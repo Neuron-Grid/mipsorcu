@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use uuid::Uuid;
+use uuid::{Builder, Uuid};
 
 #[derive(Debug, Clone)]
 struct AadInput {
@@ -44,6 +44,10 @@ fn uuid_strategy() -> impl Strategy<Value = Uuid> {
     any::<[u8; 16]>().prop_map(Uuid::from_bytes)
 }
 
+fn secret_id_strategy() -> impl Strategy<Value = Uuid> {
+    any::<[u8; 16]>().prop_map(|bytes| Builder::from_random_bytes(bytes).into_uuid())
+}
+
 fn classification_strategy() -> impl Strategy<Value = String> {
     proptest::collection::vec(proptest::char::range('a', 'z'), 1..32)
         .prop_map(|chars| chars.into_iter().collect())
@@ -57,7 +61,7 @@ fn timestamp_strategy() -> impl Strategy<Value = OffsetDateTime> {
 
 fn aad_input_strategy() -> impl Strategy<Value = AadInput> {
     (
-        uuid_strategy(),
+        secret_id_strategy(),
         1u32..=1_000_000u32,
         uuid_strategy(),
         classification_strategy(),
@@ -105,6 +109,25 @@ fn non_utc_timestamp_is_rejected() {
     assert!(matches!(result, Err(AadError::InvalidTimestamp { .. })));
 }
 
+#[test]
+fn secret_id_must_be_uuid_v4() {
+    let result = AadV1::parse(
+        "550e8400-e29b-11d4-a716-446655440000",
+        1,
+        "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "confidential",
+        "2026-04-08T12:00:00Z",
+    );
+
+    assert!(matches!(
+        result,
+        Err(AadError::InvalidUuidVersion {
+            field: "secret_id",
+            ..
+        })
+    ));
+}
+
 proptest! {
     #[test]
     fn aad_normalization_is_stable(input in aad_input_strategy()) {
@@ -150,7 +173,7 @@ proptest! {
     }
 
     #[test]
-    fn uuid_variants_are_normalized(uuid in uuid_strategy(), owner_uuid in uuid_strategy()) {
+    fn uuid_variants_are_normalized(uuid in secret_id_strategy(), owner_uuid in uuid_strategy()) {
         let secret_variant = uuid.simple().to_string().to_uppercase();
         let owner_variant = owner_uuid.simple().to_string().to_uppercase();
 

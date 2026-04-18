@@ -3,10 +3,10 @@ use std::num::NonZeroU32;
 
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
-use uuid::Uuid;
+use uuid::{Builder, Uuid, Version};
 use zeroize::Zeroize;
 
-use crate::error::{AadError, CryptoError};
+use crate::error::{AadError, CryptoError, InputError};
 
 pub const DATA_KEY_LENGTH: usize = 32;
 pub const MASTER_KEY_LENGTH: usize = 32;
@@ -22,13 +22,29 @@ pub const ENCRYPTED_DATA_KEY_LENGTH: usize =
 pub struct SecretId(Uuid);
 
 impl SecretId {
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| CryptoError::RandomnessUnavailable)?;
+        let uuid = Builder::from_random_bytes(bytes).into_uuid();
+
+        Ok(Self(uuid))
+    }
+
     pub fn parse(value: &str) -> Result<Self, AadError> {
-        Uuid::parse_str(value)
-            .map(Self)
-            .map_err(|_| AadError::InvalidUuid {
+        let uuid = Uuid::parse_str(value).map_err(|_| AadError::InvalidUuid {
+            field: "secret_id",
+            value: value.to_owned(),
+        })?;
+
+        if uuid.get_version() != Some(Version::Random) {
+            return Err(AadError::InvalidUuidVersion {
                 field: "secret_id",
                 value: value.to_owned(),
-            })
+                expected: "v4",
+            });
+        }
+
+        Ok(Self(uuid))
     }
 
     pub fn as_canonical_string(&self) -> String {
@@ -40,6 +56,10 @@ impl SecretId {
 pub struct SecretVersion(NonZeroU32);
 
 impl SecretVersion {
+    pub fn first() -> Self {
+        Self(NonZeroU32::MIN)
+    }
+
     pub fn new(value: u32) -> Result<Self, AadError> {
         NonZeroU32::new(value)
             .map(Self)
@@ -86,6 +106,32 @@ impl Classification {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct DeviceId(String);
+
+impl DeviceId {
+    pub fn new(value: &str) -> Result<Self, InputError> {
+        if value.trim().is_empty() {
+            return Err(InputError::InvalidDeviceId);
+        }
+
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for DeviceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceId")
+            .field("len", &self.0.len())
+            .finish()
     }
 }
 

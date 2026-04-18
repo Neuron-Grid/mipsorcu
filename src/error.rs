@@ -17,6 +17,11 @@ pub enum AadError {
         field: &'static str,
         value: String,
     },
+    InvalidUuidVersion {
+        field: &'static str,
+        value: String,
+        expected: &'static str,
+    },
     InvalidPositiveInteger {
         field: &'static str,
         value: String,
@@ -50,6 +55,16 @@ impl fmt::Display for AadError {
                     "field {field} must be a canonicalizable UUID: {value}"
                 )
             }
+            Self::InvalidUuidVersion {
+                field,
+                value,
+                expected,
+            } => {
+                write!(
+                    formatter,
+                    "field {field} must be a {expected} UUID: {value}"
+                )
+            }
             Self::InvalidPositiveInteger { field, value } => {
                 write!(
                     formatter,
@@ -76,6 +91,23 @@ impl fmt::Display for AadError {
 }
 
 impl std::error::Error for AadError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputError {
+    InvalidDeviceId,
+}
+
+impl fmt::Display for InputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDeviceId => {
+                write!(formatter, "device_id must not be empty or whitespace only")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InputError {}
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum CryptoError {
@@ -198,5 +230,52 @@ impl std::error::Error for CryptoError {}
 impl From<AadError> for CryptoError {
     fn from(_: AadError) -> Self {
         Self::AadFailed
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum SecretWriteError {
+    Input(InputError),
+    Aad(AadError),
+    Crypto(CryptoError),
+}
+
+impl fmt::Debug for SecretWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Input(error) => formatter.debug_tuple("Input").field(error).finish(),
+            Self::Aad(error) => formatter.debug_tuple("Aad").field(error).finish(),
+            Self::Crypto(error) => formatter.debug_tuple("Crypto").field(error).finish(),
+        }
+    }
+}
+
+impl fmt::Display for SecretWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Input(error) => write!(formatter, "{error}"),
+            Self::Aad(error) => write!(formatter, "{error}"),
+            Self::Crypto(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for SecretWriteError {}
+
+impl From<InputError> for SecretWriteError {
+    fn from(error: InputError) -> Self {
+        Self::Input(error)
+    }
+}
+
+impl From<AadError> for SecretWriteError {
+    fn from(error: AadError) -> Self {
+        Self::Aad(error)
+    }
+}
+
+impl From<CryptoError> for SecretWriteError {
+    fn from(error: CryptoError) -> Self {
+        Self::Crypto(error)
     }
 }
