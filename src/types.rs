@@ -1,10 +1,15 @@
+use std::fmt;
 use std::num::NonZeroU32;
 
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
-use crate::error::AadError;
+use crate::error::{AadError, CryptoError};
+
+pub const DATA_KEY_LENGTH: usize = 32;
+pub const NONCE_LENGTH: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SecretId(Uuid);
@@ -122,4 +127,148 @@ fn rewrite_utc_suffix(value: &str) -> String {
     }
 
     trimmed.to_owned()
+}
+
+pub struct DataKey([u8; DATA_KEY_LENGTH]);
+
+impl DataKey {
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut bytes = [0u8; DATA_KEY_LENGTH];
+        getrandom::fill(&mut bytes).map_err(|_| CryptoError::RandomnessUnavailable)?;
+
+        Ok(Self(bytes))
+    }
+
+    pub fn from_bytes(bytes: [u8; DATA_KEY_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() != DATA_KEY_LENGTH {
+            return Err(CryptoError::InvalidDataKeyLength {
+                actual: bytes.len(),
+            });
+        }
+
+        let mut data_key = [0u8; DATA_KEY_LENGTH];
+        data_key.copy_from_slice(bytes);
+
+        Ok(Self(data_key))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; DATA_KEY_LENGTH] {
+        &self.0
+    }
+}
+
+impl Drop for DataKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for DataKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DataKey(<redacted>)")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Nonce([u8; NONCE_LENGTH]);
+
+impl Nonce {
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut bytes = [0u8; NONCE_LENGTH];
+        getrandom::fill(&mut bytes).map_err(|_| CryptoError::RandomnessUnavailable)?;
+
+        Ok(Self(bytes))
+    }
+
+    pub fn from_bytes(bytes: [u8; NONCE_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() != NONCE_LENGTH {
+            return Err(CryptoError::InvalidNonceLength {
+                actual: bytes.len(),
+            });
+        }
+
+        let mut nonce = [0u8; NONCE_LENGTH];
+        nonce.copy_from_slice(bytes);
+
+        Ok(Self(nonce))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; NONCE_LENGTH] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Nonce {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Nonce")
+            .field("len", &NONCE_LENGTH)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct Ciphertext(Vec<u8>);
+
+impl Ciphertext {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, CryptoError> {
+        if bytes.is_empty() {
+            return Err(CryptoError::EmptyCiphertext);
+        }
+
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl fmt::Debug for Ciphertext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Ciphertext")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
+
+pub struct Plaintext(Vec<u8>);
+
+impl Plaintext {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for Plaintext {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for Plaintext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Plaintext")
+            .field("len", &self.0.len())
+            .field("contents", &"<redacted>")
+            .finish()
+    }
 }
