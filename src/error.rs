@@ -80,12 +80,18 @@ impl std::error::Error for AadError {}
 #[derive(Clone, PartialEq, Eq)]
 pub enum CryptoError {
     InvalidDataKeyLength { actual: usize },
+    InvalidMasterKeyLength { actual: usize },
     InvalidNonceLength { actual: usize },
+    InvalidKeyVersion { value: u32 },
+    InvalidEncryptedDataKeyLength { actual: usize },
+    UnsupportedEncryptedDataKeyVersion { version: u8 },
     EmptyCiphertext,
     RandomnessUnavailable,
     AadFailed,
     EncryptionFailed,
     DecryptionFailed,
+    KeyWrapFailed,
+    KeyUnwrapFailed,
 }
 
 impl fmt::Debug for CryptoError {
@@ -95,15 +101,33 @@ impl fmt::Debug for CryptoError {
                 .debug_struct("InvalidDataKeyLength")
                 .field("actual", actual)
                 .finish(),
+            Self::InvalidMasterKeyLength { actual } => formatter
+                .debug_struct("InvalidMasterKeyLength")
+                .field("actual", actual)
+                .finish(),
             Self::InvalidNonceLength { actual } => formatter
                 .debug_struct("InvalidNonceLength")
                 .field("actual", actual)
+                .finish(),
+            Self::InvalidKeyVersion { value } => formatter
+                .debug_struct("InvalidKeyVersion")
+                .field("value", value)
+                .finish(),
+            Self::InvalidEncryptedDataKeyLength { actual } => formatter
+                .debug_struct("InvalidEncryptedDataKeyLength")
+                .field("actual", actual)
+                .finish(),
+            Self::UnsupportedEncryptedDataKeyVersion { version } => formatter
+                .debug_struct("UnsupportedEncryptedDataKeyVersion")
+                .field("version", version)
                 .finish(),
             Self::EmptyCiphertext => formatter.write_str("EmptyCiphertext"),
             Self::RandomnessUnavailable => formatter.write_str("RandomnessUnavailable"),
             Self::AadFailed => formatter.write_str("AadFailed"),
             Self::EncryptionFailed => formatter.write_str("EncryptionFailed"),
             Self::DecryptionFailed => formatter.write_str("DecryptionFailed"),
+            Self::KeyWrapFailed => formatter.write_str("KeyWrapFailed"),
+            Self::KeyUnwrapFailed => formatter.write_str("KeyUnwrapFailed"),
         }
     }
 }
@@ -117,8 +141,32 @@ impl fmt::Display for CryptoError {
                     "data key must be 32 bytes: actual length {actual}"
                 )
             }
+            Self::InvalidMasterKeyLength { actual } => {
+                write!(
+                    formatter,
+                    "master key must be 32 bytes: actual length {actual}"
+                )
+            }
             Self::InvalidNonceLength { actual } => {
                 write!(formatter, "nonce must be 24 bytes: actual length {actual}")
+            }
+            Self::InvalidKeyVersion { value } => {
+                write!(
+                    formatter,
+                    "key version must be positive: actual value {value}"
+                )
+            }
+            Self::InvalidEncryptedDataKeyLength { actual } => {
+                write!(
+                    formatter,
+                    "encrypted data key envelope has invalid length: actual length {actual}"
+                )
+            }
+            Self::UnsupportedEncryptedDataKeyVersion { version } => {
+                write!(
+                    formatter,
+                    "unsupported encrypted data key envelope version: {version}"
+                )
             }
             Self::EmptyCiphertext => {
                 write!(formatter, "ciphertext must not be empty")
@@ -134,6 +182,12 @@ impl fmt::Display for CryptoError {
             }
             Self::DecryptionFailed => {
                 write!(formatter, "decryption failed")
+            }
+            Self::KeyWrapFailed => {
+                write!(formatter, "data key wrapping failed")
+            }
+            Self::KeyUnwrapFailed => {
+                write!(formatter, "data key unwrapping failed")
             }
         }
     }

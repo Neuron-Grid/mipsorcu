@@ -2,13 +2,64 @@ use std::fmt;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use serde::Serialize;
 use serde_json::Value;
+use zeroize::Zeroize;
 
 use crate::aad::AadV1;
 use crate::error::CryptoError;
-use crate::types::{Ciphertext, DataKey, Nonce, Plaintext};
+use crate::types::{
+    Ciphertext, DATA_KEY_LENGTH, DataKey, ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH,
+    ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KeyVersion, MasterKey,
+    Nonce, Plaintext, SecretId,
+};
 
 pub const ALGORITHM_XCHACHA20_POLY1305: &str = "xchacha20-poly1305";
+const KEY_WRAP_CONTEXT: &str = "data_key_wrap";
+const KEY_WRAP_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyWrapContext {
+    secret_id: SecretId,
+    key_version: KeyVersion,
+}
+
+impl KeyWrapContext {
+    pub fn new(secret_id: SecretId, key_version: KeyVersion) -> Self {
+        Self {
+            secret_id,
+            key_version,
+        }
+    }
+
+    pub fn secret_id(&self) -> &SecretId {
+        &self.secret_id
+    }
+
+    pub fn key_version(&self) -> KeyVersion {
+        self.key_version
+    }
+
+    fn canonical_bytes(&self) -> Result<Vec<u8>, CryptoError> {
+        let secret_id = self.secret_id.as_canonical_string();
+        let aad = CanonicalKeyWrapAad {
+            context: KEY_WRAP_CONTEXT,
+            key_version: self.key_version.get(),
+            secret_id: &secret_id,
+            wrap_version: KEY_WRAP_VERSION,
+        };
+
+        serde_json::to_vec(&aad).map_err(|_| CryptoError::AadFailed)
+    }
+}
+
+#[derive(Serialize)]
+struct CanonicalKeyWrapAad<'a> {
+    context: &'a str,
+    key_version: u32,
+    secret_id: &'a str,
+    wrap_version: u8,
+}
 
 pub struct EncryptedPayload {
     ciphertext: Ciphertext,
@@ -97,10 +148,76 @@ pub fn decrypt_secret(
     Ok(Plaintext::new(plaintext))
 }
 
+pub fn wrap_data_key(
+    master_key: &MasterKey,
+    context: &KeyWrapContext,
+    data_key: &DataKey,
+) -> Result<EncryptedDataKey, CryptoError> {
+    let nonce = Nonce::generate()?;
+    let aad_bytes = context.canonical_bytes()?;
+    let cipher = cipher_from_master_key(master_key)?;
+    let encrypted_data_key = cipher
+        .encrypt(
+            XNonce::from_slice(nonce.as_bytes()),
+            Payload {
+                msg: data_key.as_bytes(),
+                aad: &aad_bytes,
+            },
+        )
+        .map_err(|_| CryptoError::KeyWrapFailed)?;
+
+    if encrypted_data_key.len() != ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH {
+        return Err(CryptoError::KeyWrapFailed);
+    }
+
+    let mut envelope = Vec::with_capacity(ENCRYPTED_DATA_KEY_LENGTH);
+    envelope.push(ENCRYPTED_DATA_KEY_VERSION);
+    envelope.extend_from_slice(nonce.as_bytes());
+    envelope.extend_from_slice(&encrypted_data_key);
+
+    EncryptedDataKey::from_envelope_bytes(envelope)
+}
+
+pub fn unwrap_data_key(
+    master_key: &MasterKey,
+    context: &KeyWrapContext,
+    encrypted_data_key: &EncryptedDataKey,
+) -> Result<DataKey, CryptoError> {
+    let aad_bytes = context.canonical_bytes()?;
+    let cipher = cipher_from_master_key(master_key)?;
+    let mut data_key = cipher
+        .decrypt(
+            XNonce::from_slice(encrypted_data_key.nonce_bytes()),
+            Payload {
+                msg: encrypted_data_key.ciphertext_bytes(),
+                aad: &aad_bytes,
+            },
+        )
+        .map_err(|_| CryptoError::KeyUnwrapFailed)?;
+
+    if data_key.len() != DATA_KEY_LENGTH {
+        data_key.zeroize();
+        return Err(CryptoError::KeyUnwrapFailed);
+    }
+
+    let parsed_data_key = DataKey::parse(&data_key).map_err(|_| CryptoError::KeyUnwrapFailed);
+    data_key.zeroize();
+
+    parsed_data_key
+}
+
 fn cipher_from_data_key(data_key: &DataKey) -> Result<XChaCha20Poly1305, CryptoError> {
     XChaCha20Poly1305::new_from_slice(data_key.as_bytes()).map_err(|_| {
         CryptoError::InvalidDataKeyLength {
             actual: data_key.as_bytes().len(),
+        }
+    })
+}
+
+fn cipher_from_master_key(master_key: &MasterKey) -> Result<XChaCha20Poly1305, CryptoError> {
+    XChaCha20Poly1305::new_from_slice(master_key.as_bytes()).map_err(|_| {
+        CryptoError::InvalidMasterKeyLength {
+            actual: master_key.as_bytes().len(),
         }
     })
 }
