@@ -15,6 +15,13 @@ pub struct CreateSecretResponse {
 }
 
 #[derive(Serialize)]
+pub struct DecryptSecretResponse {
+    pub secret_id: String,
+    pub version: u32,
+    pub plaintext: String,
+}
+
+#[derive(Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
     pub supabase: &'static str,

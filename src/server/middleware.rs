@@ -1,6 +1,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use http::header::AUTHORIZATION;
+use std::fmt;
 
 use mipsorcu::auth::{RawJwt, VerifiedJwtClaims};
 
@@ -9,7 +10,20 @@ use super::state::AppState;
 
 const BEARER_PREFIX: &str = "Bearer ";
 
-pub struct AuthenticatedUser(pub VerifiedJwtClaims);
+pub struct AuthenticatedUser {
+    pub claims: VerifiedJwtClaims,
+    pub raw_jwt: RawJwt,
+}
+
+impl fmt::Debug for AuthenticatedUser {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedUser")
+            .field("claims", &self.claims)
+            .field("raw_jwt", &self.raw_jwt)
+            .finish()
+    }
+}
 
 impl FromRequestParts<AppState> for AuthenticatedUser {
     type Rejection = ApiError;
@@ -31,6 +45,6 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         let raw_jwt = RawJwt::new(token)?;
         let claims = state.jwt_verifier.verify(&raw_jwt)?;
 
-        Ok(Self(claims))
+        Ok(Self { claims, raw_jwt })
     }
 }

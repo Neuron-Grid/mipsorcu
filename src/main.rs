@@ -50,6 +50,7 @@ async fn main() {
         http_client,
         config.supabase_url,
         config.supabase_service_role_key,
+        config.supabase_publishable_key,
     ));
 
     let runtime_handle = tokio::runtime::Handle::current();
@@ -68,6 +69,10 @@ async fn main() {
 
     let app = Router::new()
         .route("/v1/secrets", post(handlers::create_secret))
+        .route(
+            "/v1/secrets/{secret_id}/decrypt",
+            post(handlers::decrypt_secret),
+        )
         .route("/health", get(handlers::health_check))
         .fallback(handlers::not_found)
         .layer(SetSensitiveRequestHeadersLayer::new([

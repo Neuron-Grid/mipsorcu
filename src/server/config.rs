@@ -12,6 +12,7 @@ const ENV_MASTER_KEY: &str = "MIPSORCU_MASTER_KEY";
 const ENV_KEY_VERSION: &str = "MIPSORCU_KEY_VERSION";
 const ENV_SUPABASE_URL: &str = "MIPSORCU_SUPABASE_URL";
 const ENV_SUPABASE_SERVICE_ROLE_KEY: &str = "MIPSORCU_SUPABASE_SERVICE_ROLE_KEY";
+const ENV_SUPABASE_PUBLISHABLE_KEY: &str = "MIPSORCU_SUPABASE_PUBLISHABLE_KEY";
 const ENV_JWT_ISSUER: &str = "MIPSORCU_JWT_ISSUER";
 const ENV_JWT_AUDIENCE: &str = "MIPSORCU_JWT_AUDIENCE";
 const ENV_JWKS_JSON: &str = "MIPSORCU_JWKS_JSON";
@@ -23,6 +24,7 @@ pub struct AppConfig {
     pub key_version: KeyVersion,
     pub supabase_url: String,
     pub supabase_service_role_key: String,
+    pub supabase_publishable_key: String,
     pub jwt_issuer: String,
     pub jwt_audience: String,
     pub jwks_json: String,
@@ -38,6 +40,7 @@ impl fmt::Debug for AppConfig {
             .field("key_version", &self.key_version)
             .field("supabase_url", &self.supabase_url)
             .field("supabase_service_role_key", &"<redacted>")
+            .field("supabase_publishable_key", &"<redacted>")
             .field("jwt_issuer", &self.jwt_issuer)
             .field("jwt_audience", &self.jwt_audience)
             .field("jwks_json", &"<redacted>")
@@ -110,6 +113,7 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
 
     let supabase_url = required_var(ENV_SUPABASE_URL)?;
     let supabase_service_role_key = required_var(ENV_SUPABASE_SERVICE_ROLE_KEY)?;
+    let supabase_publishable_key = required_var(ENV_SUPABASE_PUBLISHABLE_KEY)?;
     let jwt_issuer = required_var(ENV_JWT_ISSUER)?;
     let jwt_audience = required_var(ENV_JWT_AUDIENCE)?;
     let jwks_json = required_var(ENV_JWKS_JSON)?;
@@ -125,6 +129,7 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
         key_version,
         supabase_url,
         supabase_service_role_key,
+        supabase_publishable_key,
         jwt_issuer,
         jwt_audience,
         jwks_json,

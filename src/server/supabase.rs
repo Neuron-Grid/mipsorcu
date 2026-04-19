@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use mipsorcu::audit::{AuditAppendError, AuditEvent, AuditEventAppender};
+use mipsorcu::auth::RawJwt;
 
 #[derive(Debug)]
 pub enum SupabaseRpcError {
@@ -36,6 +37,7 @@ pub struct SupabaseClient {
     http_client: reqwest::Client,
     base_url: String,
     service_role_key: String,
+    publishable_key: String,
 }
 
 impl SupabaseClient {
@@ -43,11 +45,13 @@ impl SupabaseClient {
         http_client: reqwest::Client,
         base_url: impl Into<String>,
         service_role_key: impl Into<String>,
+        publishable_key: impl Into<String>,
     ) -> Self {
         Self {
             http_client,
             base_url: base_url.into(),
             service_role_key: service_role_key.into(),
+            publishable_key: publishable_key.into(),
         }
     }
 
@@ -72,6 +76,37 @@ impl SupabaseClient {
         let params = AppendAuditEventParams::from_event(event);
         let response = self.post_rpc("rpc_append_audit_event", &params).await?;
         ensure_success(response).await.map(|_| ())
+    }
+
+    pub async fn fetch_current_secret_version_for_user(
+        &self,
+        secret_id: &str,
+        raw_jwt: &RawJwt,
+    ) -> Result<Vec<SecretVersionReadRow>, SupabaseRpcError> {
+        let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+        let url = format!(
+            "{}/rest/v1/secret_versions?select={select}&secret_id=eq.{secret_id}",
+            self.base_url
+        );
+        let response = self
+            .http_client
+            .get(&url)
+            .header("apikey", &self.publishable_key)
+            .bearer_auth(raw_jwt.as_str())
+            .send()
+            .await
+            .map_err(SupabaseRpcError::Network)?;
+
+        let rows: Vec<SecretVersionReadRow> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.secrets.current_version_id == row.id)
+            .collect())
     }
 
     pub async fn check_connectivity(&self) -> bool {
@@ -122,8 +157,32 @@ impl fmt::Debug for SupabaseClient {
             .debug_struct("SupabaseClient")
             .field("base_url", &self.base_url)
             .field("service_role_key", &"<redacted>")
+            .field("publishable_key", &"<redacted>")
             .finish()
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SecretVersionReadRow {
+    pub id: String,
+    pub secret_id: String,
+    pub version: i32,
+    pub ciphertext: String,
+    pub encrypted_data_key: String,
+    pub key_version: i32,
+    pub algorithm: String,
+    pub nonce_or_iv: String,
+    pub aad_context: Value,
+    pub created_by_user_id: String,
+    pub created_at: String,
+    pub secrets: SecretReadJoin,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SecretReadJoin {
+    pub current_version_id: String,
+    pub owner_user_id: String,
+    pub classification: String,
 }
 
 #[derive(Serialize)]
