@@ -21,7 +21,11 @@ impl fmt::Display for SupabaseRpcError {
         match self {
             Self::Network(error) => write!(formatter, "supabase network error: {error}"),
             Self::NonSuccessStatus { status, body } => {
-                write!(formatter, "supabase returned status {status}: {body}")
+                write!(
+                    formatter,
+                    "supabase returned status {status} with response body length {}",
+                    body.len()
+                )
             }
             Self::InvalidResponse(message) => {
                 write!(formatter, "supabase invalid response: {message}")
@@ -144,7 +148,7 @@ async fn ensure_success(response: Response) -> Result<Response, SupabaseRpcError
         return Ok(response);
     }
 
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await.unwrap_or_else(|_| String::new());
     Err(SupabaseRpcError::NonSuccessStatus {
         status: status.as_u16(),
         body,
@@ -262,5 +266,24 @@ impl AuditEventAppender for SupabaseAuditAppender {
             .map_err(|_| AuditAppendError::ExternalDependencyFailed {
                 code: "supabase_rpc_failed",
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supabase_error_display_does_not_expose_response_body() {
+        let error = SupabaseRpcError::NonSuccessStatus {
+            status: 400,
+            body: "secret internal upstream details".to_owned(),
+        };
+
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("status 400"));
+        assert!(rendered.contains("response body length"));
+        assert!(!rendered.contains("secret internal upstream details"));
     }
 }

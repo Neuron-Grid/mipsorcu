@@ -62,10 +62,11 @@ pub async fn create_secret(
 
     match rpc_result {
         Ok(response) => {
+            let response_version = parse_write_response_version(response.version)?;
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
                 secret_id = %response.secret_id,
-                version = response.version,
+                version = response_version,
                 action = "encrypt_create",
                 result = "success",
             );
@@ -74,7 +75,7 @@ pub async fn create_secret(
                 StatusCode::CREATED,
                 Json(CreateSecretResponse {
                     secret_id: response.secret_id,
-                    version: response.version as u32,
+                    version: response_version,
                     secret_version_id: response.secret_version_id,
                 }),
             ))
@@ -297,6 +298,12 @@ struct PreparedDecryptRow {
     aad_context: serde_json::Value,
 }
 
+struct DecodedSecretVersionBytes {
+    encrypted_data_key: Vec<u8>,
+    nonce_or_iv: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
 async fn fetch_single_current_secret_version(
     state: &AppState,
     secret_id: &SecretId,
@@ -322,12 +329,8 @@ async fn fetch_single_current_secret_version(
 }
 
 fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {
-    if row.algorithm != ALGORITHM_XCHACHA20_POLY1305 {
-        return Err(ApiError::DecryptFailed);
-    }
-    if row.created_by_user_id != row.secrets.owner_user_id {
-        return Err(ApiError::DecryptFailed);
-    }
+    validate_decrypt_row_invariants(&row)?;
+    let decoded = decode_secret_version_bytes(&row)?;
 
     Ok(PreparedDecryptRow {
         secret_id: SecretId::parse(&row.secret_id).map_err(|_| ApiError::DecryptFailed)?,
@@ -338,13 +341,33 @@ fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, Ap
             .map_err(|_| ApiError::DecryptFailed)?,
         created_at: CreatedAt::parse(&row.created_at).map_err(|_| ApiError::DecryptFailed)?,
         key_version: parse_key_version(row.key_version)?,
-        encrypted_data_key: EncryptedDataKey::parse(&decode_bytea(&row.encrypted_data_key)?)
+        encrypted_data_key: EncryptedDataKey::parse(&decoded.encrypted_data_key)
             .map_err(|_| ApiError::DecryptFailed)?,
-        nonce_or_iv: Nonce::parse(&decode_bytea(&row.nonce_or_iv)?)
-            .map_err(|_| ApiError::DecryptFailed)?,
-        ciphertext: Ciphertext::new(decode_bytea(&row.ciphertext)?)
-            .map_err(|_| ApiError::DecryptFailed)?,
+        nonce_or_iv: Nonce::parse(&decoded.nonce_or_iv).map_err(|_| ApiError::DecryptFailed)?,
+        ciphertext: Ciphertext::new(decoded.ciphertext).map_err(|_| ApiError::DecryptFailed)?,
         aad_context: row.aad_context,
+    })
+}
+
+fn validate_decrypt_row_invariants(row: &SecretVersionReadRow) -> Result<(), ApiError> {
+    if row.algorithm != ALGORITHM_XCHACHA20_POLY1305 {
+        return Err(ApiError::DecryptFailed);
+    }
+
+    if row.created_by_user_id != row.secrets.owner_user_id {
+        return Err(ApiError::DecryptFailed);
+    }
+
+    Ok(())
+}
+
+fn decode_secret_version_bytes(
+    row: &SecretVersionReadRow,
+) -> Result<DecodedSecretVersionBytes, ApiError> {
+    Ok(DecodedSecretVersionBytes {
+        encrypted_data_key: decode_bytea(&row.encrypted_data_key)?,
+        nonce_or_iv: decode_bytea(&row.nonce_or_iv)?,
+        ciphertext: decode_bytea(&row.ciphertext)?,
     })
 }
 
@@ -360,6 +383,16 @@ fn parse_key_version(value: i32) -> Result<KeyVersion, ApiError> {
         .ok()
         .and_then(|v| KeyVersion::new(v).ok())
         .ok_or(ApiError::DecryptFailed)
+}
+
+fn parse_write_response_version(value: i32) -> Result<u32, ApiError> {
+    u32::try_from(value)
+        .ok()
+        .and_then(|v| SecretVersion::new(v).ok())
+        .map(SecretVersion::get)
+        .ok_or_else(|| {
+            ApiError::InternalInvariantViolation("write RPC returned invalid version".to_owned())
+        })
 }
 
 fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {
@@ -612,6 +645,19 @@ mod tests {
         assert!(matches!(
             decode_bytea("\\xzz"),
             Err(ApiError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn parse_write_response_version_rejects_non_positive_values() {
+        assert_eq!(parse_write_response_version(1).expect("valid version"), 1);
+        assert!(matches!(
+            parse_write_response_version(0),
+            Err(ApiError::InternalInvariantViolation(_))
+        ));
+        assert!(matches!(
+            parse_write_response_version(-1),
+            Err(ApiError::InternalInvariantViolation(_))
         ));
     }
 }
