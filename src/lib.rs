@@ -14,7 +14,7 @@ pub use audit::{
     AuditEventParts, AuditMetadata, AuditRecordError, AuditRecorder, AuditResult,
     LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
 };
-pub use auth::VerifiedJwtClaims;
+pub use auth::{Jwk, Jwks, JwtVerifier, JwtVerifierConfig, RawJwt, VerifiedJwtClaims};
 pub use authorization::authorize_current_version_decrypt;
 pub use crypto::{
     ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, KeyWrapContext, decrypt_secret, encrypt_secret,
@@ -22,7 +22,7 @@ pub use crypto::{
 };
 pub use error::{
     AadError, AuthorizationError, CryptoError, DecryptIntegrityError, InputError,
-    SecretDecryptError, SecretWriteError,
+    JwtVerificationError, SecretDecryptError, SecretWriteError,
 };
 pub use read::{
     DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts,

@@ -119,6 +119,67 @@ impl fmt::Display for InputError {
 
 impl std::error::Error for InputError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JwtVerificationError {
+    EmptyToken,
+    InvalidToken,
+    MissingKeyId,
+    UnsupportedAlgorithm,
+    KeyNotFound,
+    InvalidSignature,
+    Expired,
+    InvalidIssuer,
+    InvalidAudience,
+    InvalidSubject,
+    InvalidJwks,
+    MalformedClaims,
+}
+
+impl fmt::Display for JwtVerificationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyToken => {
+                write!(formatter, "jwt must not be empty or whitespace only")
+            }
+            Self::InvalidToken => {
+                write!(formatter, "jwt is invalid")
+            }
+            Self::MissingKeyId => {
+                write!(formatter, "jwt header is missing kid")
+            }
+            Self::UnsupportedAlgorithm => {
+                write!(formatter, "jwt algorithm is not supported")
+            }
+            Self::KeyNotFound => {
+                write!(formatter, "matching jwks key was not found")
+            }
+            Self::InvalidSignature => {
+                write!(formatter, "jwt signature is invalid")
+            }
+            Self::Expired => {
+                write!(formatter, "jwt is expired")
+            }
+            Self::InvalidIssuer => {
+                write!(formatter, "jwt issuer is invalid")
+            }
+            Self::InvalidAudience => {
+                write!(formatter, "jwt audience is invalid")
+            }
+            Self::InvalidSubject => {
+                write!(formatter, "jwt subject is invalid")
+            }
+            Self::InvalidJwks => {
+                write!(formatter, "jwks is invalid")
+            }
+            Self::MalformedClaims => {
+                write!(formatter, "jwt claims are malformed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for JwtVerificationError {}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum CryptoError {
     InvalidDataKeyLength { actual: usize },
