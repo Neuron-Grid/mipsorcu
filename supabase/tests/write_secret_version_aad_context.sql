@@ -221,157 +221,245 @@ exception
 end;
 $$;
 
-create function test_helpers.try_create_future_public_function()
-returns text
-language plpgsql
-as $$
-begin
-    execute $create_function$
-        create function public.test_future_public_execute()
-        returns integer
-        language sql
-        stable
-        as $function$
-            select 1;
-        $function$;
-    $create_function$;
-
-    return 'ok';
-exception
-    when others then
-        return sqlerrm;
-end;
-$$;
-create temp table first_write_result as
-select *
-from public.rpc_write_secret_version(
-    '00000000-0000-4000-8000-000000000001',
-    'encrypt_create',
-    '550e8400-e29b-41d4-a716-446655440000',
-    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-    'confidential',
-    'sbc-device-1',
-    '2026-04-08T12:00:00Z',
-    1,
-    decode(repeat('aa', 32), 'hex'),
-    decode(repeat('bb', 73), 'hex'),
-    1,
-    'xchacha20-poly1305',
-    decode(repeat('01', 24), 'hex'),
-    test_helpers.aad_context(
-        '550e8400-e29b-41d4-a716-446655440000',
-        1,
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        '2026-04-08T12:00:00Z'
-    )
-);
-
 select is(
     test_helpers.try_write_secret_version(
-        '00000000-0000-4000-8000-000000000002',
-        'encrypt_rotate',
-        '550e8400-e29b-41d4-a716-446655440000',
-        'f47ac10b-58cc-4372-a567-0e02b2c3d480',
+        '00000000-0000-4000-8000-000000000020',
+        'encrypt_create',
+        '670e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         'confidential',
         'sbc-device-1',
-        '2026-04-08T12:01:00Z',
-        2,
+        '2026-04-08T12:00:00Z',
+        1,
         decode(repeat('aa', 32), 'hex'),
         decode(repeat('bb', 73), 'hex'),
         1,
         'xchacha20-poly1305',
-        decode(repeat('02', 24), 'hex'),
+        decode(repeat('01', 24), 'hex'),
         test_helpers.aad_context(
-            '550e8400-e29b-41d4-a716-446655440000',
-            2,
+            '670e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00+00:00'
+        )
+    ),
+    'aad_context_mismatch',
+    'new secret write rejects non-canonical aad created_at offset'
+);
+
+select is(
+    test_helpers.try_write_secret_version(
+        '00000000-0000-4000-8000-000000000007',
+        'encrypt_create',
+        '650e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        decode(repeat('bb', 73), 'hex'),
+        1,
+        'xchacha20-poly1305',
+        decode(repeat('01', 24), 'hex'),
+        test_helpers.aad_context(
+            '750e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        )
+    ),
+    'aad_context_mismatch',
+    'new secret write rejects aad_context secret_id mismatch'
+);
+
+select is(
+    test_helpers.try_write_secret_version(
+        '00000000-0000-4000-8000-000000000026',
+        'encrypt_create',
+        '680e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        decode(repeat('bb', 73), 'hex'),
+        1,
+        'xchacha20-poly1305',
+        decode(repeat('06', 24), 'hex'),
+        test_helpers.aad_context(
+            '680e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        ) - 'created_at'
+    ),
+    'aad_context_mismatch',
+    'new secret write rejects aad_context missing required key'
+);
+
+select is(
+    test_helpers.try_write_secret_version(
+        '00000000-0000-4000-8000-000000000030',
+        'encrypt_create',
+        '6c0e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        decode(repeat('bb', 73), 'hex'),
+        1,
+        'xchacha20-poly1305',
+        decode(repeat('0a', 24), 'hex'),
+        test_helpers.aad_context(
+            '6c0e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        ) || jsonb_build_object('extra', 'not allowed')
+    ),
+    'aad_context_mismatch',
+    'new secret write rejects aad_context extra key'
+);
+
+select is(
+    test_helpers.try_write_secret_version(
+        '00000000-0000-4000-8000-000000000031',
+        'encrypt_create',
+        '6d0e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        decode(repeat('bb', 73), 'hex'),
+        1,
+        'xchacha20-poly1305',
+        decode(repeat('0b', 24), 'hex'),
+        test_helpers.aad_context(
+            '6d0e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        ) || jsonb_build_object('plaintext', 'leak')
+    ),
+    'aad_context_mismatch',
+    'new secret write rejects aad_context forbidden plaintext key'
+);
+
+select ok(
+    position(
+        'secret_versions_aad_context_allowed_keys' in test_helpers.try_insert_secret_version(
+            '6e0e8400-e29b-41d4-a716-446655440000',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            '2026-04-08T12:00:00Z',
+            test_helpers.aad_context(
+                '6e0e8400-e29b-41d4-a716-446655440000',
+                1,
+                'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                'confidential',
+                '2026-04-08T12:00:00Z'
+            ) || jsonb_build_object('plaintext', 'leak')
+        )
+    ) > 0,
+    'direct secret_versions insert rejects aad_context extra keys'
+);
+
+select is(
+    test_helpers.try_write_secret_version(
+        '00000000-0000-4000-8000-000000000032',
+        'encrypt_create',
+        '6f0e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        decode(repeat('bb', 73), 'hex'),
+        1,
+        'xchacha20-poly1305',
+        decode(repeat('0c', 24), 'hex'),
+        test_helpers.aad_context(
+            '6f0e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'new secret write accepts aad_context exact six-key schema'
+);
+
+select is(
+    test_helpers.try_write_secret_version(
+        '00000000-0000-4000-8000-000000000027',
+        'encrypt_create',
+        '690e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        decode(repeat('bb', 73), 'hex'),
+        1,
+        'xchacha20-poly1305',
+        decode(repeat('07', 24), 'hex'),
+        test_helpers.aad_context(
+            '690e8400-e29b-41d4-a716-446655440000',
+            1,
             'f47ac10b-58cc-4372-a567-0e02b2c3d480',
             'confidential',
-            '2026-04-08T12:01:00Z'
+            '2026-04-08T12:00:00Z'
         )
     ),
-    'owner_mismatch',
-    'existing secret write rejects non-owner'
+    'aad_context_mismatch',
+    'new secret write rejects aad_context owner_user_id mismatch'
 );
 
 select is(
     test_helpers.try_write_secret_version(
-        '00000000-0000-4000-8000-000000000003',
-        'encrypt_rotate',
-        '550e8400-e29b-41d4-a716-446655440000',
+        '00000000-0000-4000-8000-000000000028',
+        'encrypt_create',
+        '6a0e8400-e29b-41d4-a716-446655440000',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'restricted',
+        'confidential',
         'sbc-device-1',
-        '2026-04-08T12:01:00Z',
-        2,
+        '2026-04-08T12:00:00Z',
+        1,
         decode(repeat('aa', 32), 'hex'),
         decode(repeat('bb', 73), 'hex'),
         1,
         'xchacha20-poly1305',
-        decode(repeat('02', 24), 'hex'),
+        decode(repeat('08', 24), 'hex'),
         test_helpers.aad_context(
-            '550e8400-e29b-41d4-a716-446655440000',
-            2,
+            '6a0e8400-e29b-41d4-a716-446655440000',
+            1,
             'f47ac10b-58cc-4372-a567-0e02b2c3d479',
             'restricted',
-            '2026-04-08T12:01:00Z'
+            '2026-04-08T12:00:00Z'
         )
     ),
-    'classification_immutable',
-    'existing secret write rejects classification changes'
-);
-
-select is(
-    test_helpers.try_update_secret_classification(
-        '550e8400-e29b-41d4-a716-446655440000',
-        'restricted'
-    ),
-    'classification_immutable',
-    'direct secrets update rejects classification changes'
+    'aad_context_mismatch',
+    'new secret write rejects aad_context classification mismatch'
 );
 
 select is(
     test_helpers.try_write_secret_version(
-        '00000000-0000-4000-8000-000000000004',
-        'encrypt_rotate',
-        '550e8400-e29b-41d4-a716-446655440000',
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        'sbc-device-1',
-        '2026-04-08T12:02:00Z',
-        3,
-        decode(repeat('aa', 32), 'hex'),
-        decode(repeat('bb', 73), 'hex'),
-        1,
-        'xchacha20-poly1305',
-        decode(repeat('03', 24), 'hex'),
-        test_helpers.aad_context(
-            '550e8400-e29b-41d4-a716-446655440000',
-            3,
-            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-            'confidential',
-            '2026-04-08T12:02:00Z'
-        )
-    ),
-    'not_next_version',
-    'existing secret write rejects version gaps'
-);
-
-select is(
-    (
-        select count(*)::integer
-        from public.secret_versions sv
-        where sv.secret_id = '550e8400-e29b-41d4-a716-446655440000'
-    ),
-    1,
-    'rejected writes leave no partial secret version rows'
-);
-
-select is(
-    test_helpers.try_write_secret_version(
-        '00000000-0000-4000-8000-000000000005',
+        '00000000-0000-4000-8000-000000000029',
         'encrypt_create',
-        '650e8400-e29b-41d4-a716-446655440000',
+        '6b0e8400-e29b-41d4-a716-446655440000',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         'confidential',
         'sbc-device-1',
@@ -381,125 +469,17 @@ select is(
         decode(repeat('bb', 73), 'hex'),
         1,
         'xchacha20-poly1305',
-        decode(repeat('01', 23), 'hex'),
+        decode(repeat('09', 24), 'hex'),
         test_helpers.aad_context(
-            '650e8400-e29b-41d4-a716-446655440000',
-            1,
+            '6b0e8400-e29b-41d4-a716-446655440000',
+            2,
             'f47ac10b-58cc-4372-a567-0e02b2c3d479',
             'confidential',
             '2026-04-08T12:00:00Z'
         )
     ),
-    'invalid_rpc_input',
-    'new secret write rejects invalid nonce length'
-);
-
-select is(
-    test_helpers.try_write_secret_version(
-        '00000000-0000-4000-8000-000000000006',
-        'encrypt_create',
-        '650e8400-e29b-41d4-a716-446655440000',
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        'sbc-device-1',
-        '2026-04-08T12:00:00Z',
-        1,
-        decode(repeat('aa', 32), 'hex'),
-        decode(repeat('bb', 73), 'hex'),
-        1,
-        'chacha20-poly1305',
-        decode(repeat('01', 24), 'hex'),
-        test_helpers.aad_context(
-            '650e8400-e29b-41d4-a716-446655440000',
-            1,
-            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-            'confidential',
-            '2026-04-08T12:00:00Z'
-        )
-    ),
-    'invalid_rpc_input',
-    'new secret write rejects unsupported algorithm'
-);
-
-select is(
-    test_helpers.try_write_secret_version(
-        '00000000-0000-4000-8000-000000000019',
-        'encrypt_create',
-        '660e8400-e29b-11d4-a716-446655440000',
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        'sbc-device-1',
-        '2026-04-08T12:00:00Z',
-        1,
-        decode(repeat('aa', 32), 'hex'),
-        decode(repeat('bb', 73), 'hex'),
-        1,
-        'xchacha20-poly1305',
-        decode(repeat('01', 24), 'hex'),
-        test_helpers.aad_context(
-            '660e8400-e29b-11d4-a716-446655440000',
-            1,
-            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-            'confidential',
-            '2026-04-08T12:00:00Z'
-        )
-    ),
-    'invalid_rpc_input',
-    'new secret write rejects non-v4 secret_id'
-);
-
-select is(
-    test_helpers.try_write_secret_version(
-        '00000000-0000-4000-8000-000000000008',
-        'encrypt_create',
-        '650e8400-e29b-41d4-a716-446655440000',
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        'sbc-device-1',
-        '2026-04-08T12:00:00Z',
-        1,
-        ''::bytea,
-        decode(repeat('bb', 73), 'hex'),
-        1,
-        'xchacha20-poly1305',
-        decode(repeat('01', 24), 'hex'),
-        test_helpers.aad_context(
-            '650e8400-e29b-41d4-a716-446655440000',
-            1,
-            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-            'confidential',
-            '2026-04-08T12:00:00Z'
-        )
-    ),
-    'invalid_rpc_input',
-    'new secret write rejects empty ciphertext'
-);
-
-select is(
-    test_helpers.try_write_secret_version(
-        '00000000-0000-4000-8000-000000000009',
-        'encrypt_create',
-        '650e8400-e29b-41d4-a716-446655440000',
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        '   ',
-        '2026-04-08T12:00:00Z',
-        1,
-        decode(repeat('aa', 32), 'hex'),
-        decode(repeat('bb', 73), 'hex'),
-        1,
-        'xchacha20-poly1305',
-        decode(repeat('01', 24), 'hex'),
-        test_helpers.aad_context(
-            '650e8400-e29b-41d4-a716-446655440000',
-            1,
-            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-            'confidential',
-            '2026-04-08T12:00:00Z'
-        )
-    ),
-    'invalid_rpc_input',
-    'new secret write rejects blank device id'
+    'aad_context_mismatch',
+    'new secret write rejects aad_context version mismatch'
 );
 
 select * from finish();

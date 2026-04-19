@@ -30,8 +30,9 @@ declare
     v_secret_version_id uuid;
     v_purged_version_ids uuid[] := array[]::uuid[];
     v_purged record;
-    v_aad_version integer;
+    v_secret_version_from_aad integer;
     v_aad_created_at timestamptz;
+    v_audit_metadata jsonb;
 begin
     if p_request_id is null
         or p_action is null
@@ -75,7 +76,16 @@ begin
             'classification',
             'created_at'
         ]
-    ) then
+    )
+        or p_aad_context - array[
+            'aad_version',
+            'secret_id',
+            'version',
+            'owner_user_id',
+            'classification',
+            'created_at'
+        ] <> '{}'::jsonb
+    then
         raise exception 'aad_context_mismatch' using errcode = '22023';
     end if;
 
@@ -94,7 +104,7 @@ begin
     end if;
 
     begin
-        v_aad_version := (p_aad_context ->> 'version')::integer;
+        v_secret_version_from_aad := (p_aad_context ->> 'version')::integer;
         v_aad_created_at := (p_aad_context ->> 'created_at')::timestamptz;
     exception
         when others then
@@ -103,7 +113,7 @@ begin
 
     if p_aad_context ->> 'aad_version' <> '1'
         or p_aad_context ->> 'secret_id' <> p_secret_id::text
-        or v_aad_version <> p_version
+        or v_secret_version_from_aad <> p_version
         or p_aad_context ->> 'owner_user_id' <> p_owner_user_id::text
         or p_aad_context ->> 'classification' <> p_classification
         or v_aad_created_at <> p_created_at
@@ -196,6 +206,17 @@ begin
     set current_version_id = v_secret_version_id
     where id = p_secret_id;
 
+    v_audit_metadata := jsonb_build_object(
+        'version',
+        p_version,
+        'secret_version_id',
+        v_secret_version_id
+    );
+
+    if public.audit_metadata_has_forbidden_key(v_audit_metadata) then
+        raise exception 'invalid_audit_metadata' using errcode = '22023';
+    end if;
+
     insert into public.audit_events (
         request_id,
         actor_user_id,
@@ -214,12 +235,7 @@ begin
         p_secret_id,
         'success',
         p_key_version,
-        jsonb_build_object(
-            'version',
-            p_version,
-            'secret_version_id',
-            v_secret_version_id
-        )
+        v_audit_metadata
     );
 
     for v_purged in
@@ -243,6 +259,17 @@ begin
     loop
         v_purged_version_ids := array_append(v_purged_version_ids, v_purged.id);
 
+        v_audit_metadata := jsonb_build_object(
+            'version',
+            v_purged.version,
+            'secret_version_id',
+            v_purged.id
+        );
+
+        if public.audit_metadata_has_forbidden_key(v_audit_metadata) then
+            raise exception 'invalid_audit_metadata' using errcode = '22023';
+        end if;
+
         insert into public.audit_events (
             request_id,
             actor_user_id,
@@ -261,12 +288,7 @@ begin
             p_secret_id,
             'success',
             v_purged.key_version,
-            jsonb_build_object(
-                'version',
-                v_purged.version,
-                'secret_version_id',
-                v_purged.id
-            )
+            v_audit_metadata
         );
     end loop;
 

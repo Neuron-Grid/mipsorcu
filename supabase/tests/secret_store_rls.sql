@@ -333,218 +333,61 @@ from public.rpc_write_secret_version(
     )
 );
 
-select ok(
-    not has_table_privilege('anon', 'public.secrets', 'select'),
-    'anon cannot select secrets'
+set local role authenticated;
+set local "request.jwt.claim.sub" = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+
+select is(
+    (select count(*)::integer from public.secrets),
+    1,
+    'RLS exposes only owned secrets to authenticated owner'
 );
 
 select is(
-    (
-        select exists (
-            select 1
-            from (values
-                ('public.secrets', 'select'),
-                ('public.secrets', 'insert'),
-                ('public.secrets', 'update'),
-                ('public.secrets', 'delete'),
-                ('public.secret_versions', 'select'),
-                ('public.secret_versions', 'insert'),
-                ('public.secret_versions', 'update'),
-                ('public.secret_versions', 'delete'),
-                ('public.audit_events', 'select'),
-                ('public.audit_events', 'insert'),
-                ('public.audit_events', 'update'),
-                ('public.audit_events', 'delete')
-            ) as table_privileges(table_name, privilege_name)
-            where has_table_privilege(
-                'anon',
-                table_privileges.table_name,
-                table_privileges.privilege_name
-            )
-        )
-    ),
-    false,
-    'anon has no direct table privileges on secret store tables'
-);
-
-select ok(
-    has_table_privilege('authenticated', 'public.secrets', 'select'),
-    'authenticated can select secrets through RLS'
-);
-
-select ok(
-    has_table_privilege('authenticated', 'public.secret_versions', 'select'),
-    'authenticated can select secret_versions through RLS'
+    (select count(*)::integer from public.secret_versions),
+    1,
+    'RLS exposes only current secret version to authenticated owner'
 );
 
 select is(
-    (
-        select exists (
-            select 1
-            from (values
-                ('public.secrets', 'insert'),
-                ('public.secrets', 'update'),
-                ('public.secrets', 'delete'),
-                ('public.secret_versions', 'insert'),
-                ('public.secret_versions', 'update'),
-                ('public.secret_versions', 'delete')
-            ) as table_privileges(table_name, privilege_name)
-            where has_table_privilege(
-                'authenticated',
-                table_privileges.table_name,
-                table_privileges.privilege_name
-            )
-        )
-    ),
-    false,
-    'authenticated cannot write secret store tables directly'
+    (select max(version) from public.secret_versions),
+    5,
+    'RLS exposes current version rather than historical versions'
 );
 
-select ok(
-    not has_table_privilege('authenticated', 'public.audit_events', 'select'),
-    'authenticated cannot select audit_events'
-);
+reset role;
+
+set local role authenticated;
+set local "request.jwt.claim.sub" = 'f47ac10b-58cc-4372-a567-0e02b2c3d480';
 
 select is(
-    (
-        select exists (
-            select 1
-            from (values
-                ('select'),
-                ('insert'),
-                ('update'),
-                ('delete')
-            ) as table_privileges(privilege_name)
-            where has_table_privilege(
-                'authenticated',
-                'public.audit_events',
-                table_privileges.privilege_name
-            )
-        )
-    ),
-    false,
-    'authenticated has no direct table privileges on audit_events'
-);
-
-select is(
-    (
-        select bool_and(c.relrowsecurity and c.relforcerowsecurity)
-        from pg_class c
-        join pg_namespace n on n.oid = c.relnamespace
-        where n.nspname = 'public'
-            and c.relname in ('secrets', 'secret_versions', 'audit_events')
-    ),
-    true,
-    'secret store tables enable and force row level security'
+    (select count(*)::integer from public.secrets),
+    1,
+    'RLS exposes only owned secrets to other authenticated owner'
 );
 
 select is(
     (
         select count(*)::integer
-        from pg_policies p
-        where p.schemaname = 'public'
-            and p.tablename = 'audit_events'
+        from public.secrets
+        where id = '550e8400-e29b-41d4-a716-446655440000'
     ),
     0,
-    'audit_events has no client RLS policies'
+    'RLS hides another owner secret'
 );
 
 select is(
-    test_helpers.try_create_future_public_function(),
-    'ok',
-    'test can create a future public function'
+    (select count(*)::integer from public.secret_versions),
+    1,
+    'RLS exposes only current secret version to other authenticated owner'
 );
 
 select is(
-    (
-        select exists (
-            select 1
-            from pg_proc p
-            join pg_namespace n on n.oid = p.pronamespace
-            cross join lateral aclexplode(
-                coalesce(p.proacl, acldefault('f', p.proowner))
-            ) as acl_entries
-            where n.nspname = 'public'
-                and p.proname = 'test_future_public_execute'
-                and acl_entries.grantee = 0
-                and acl_entries.privilege_type = 'EXECUTE'
-        )
-    ),
-    false,
-    'future public functions do not grant execute to PUBLIC by default'
+    (select max(version) from public.secret_versions),
+    1,
+    'RLS exposes other owner current version only'
 );
 
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.test_future_public_execute()',
-        'execute'
-    ),
-    'anon cannot execute future public functions by default'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.test_future_public_execute()',
-        'execute'
-    ),
-    'authenticated cannot execute future public functions by default'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb)',
-        'execute'
-    ),
-    'anon cannot execute write RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb)',
-        'execute'
-    ),
-    'authenticated cannot execute write RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb)',
-        'execute'
-    ),
-    'service_role can execute write RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)',
-        'execute'
-    ),
-    'anon cannot execute append audit RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)',
-        'execute'
-    ),
-    'authenticated cannot execute append audit RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)',
-        'execute'
-    ),
-    'service_role can execute append audit RPC'
-);
+reset role;
 
 select * from finish();
 

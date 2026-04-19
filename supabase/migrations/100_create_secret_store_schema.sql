@@ -51,6 +51,16 @@ create table public.secret_versions (
             'created_at'
         ]
     ),
+    constraint secret_versions_aad_context_allowed_keys check (
+        aad_context - array[
+            'aad_version',
+            'secret_id',
+            'version',
+            'owner_user_id',
+            'classification',
+            'created_at'
+        ] = '{}'::jsonb
+    ),
     constraint secret_versions_aad_context_matches_row check (
         aad_context ->> 'aad_version' is not null
         and aad_context ->> 'secret_id' is not null

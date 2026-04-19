@@ -56,6 +56,10 @@ as $$
     );
 $$;
 
+alter table public.audit_events
+    add constraint audit_events_metadata_json_no_forbidden_keys
+    check (not public.audit_metadata_has_forbidden_key(metadata_json));
+
 create function public.rpc_append_audit_event(
     p_audit_event_id uuid,
     p_request_id uuid,

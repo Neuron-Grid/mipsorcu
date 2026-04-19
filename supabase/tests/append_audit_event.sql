@@ -143,6 +143,51 @@ exception
 end;
 $$;
 
+create function test_helpers.try_insert_audit_event(
+    p_audit_event_id uuid,
+    p_request_id uuid,
+    p_actor_user_id uuid,
+    p_actor_device_id text,
+    p_action text,
+    p_target_secret_id uuid,
+    p_result text,
+    p_key_version integer,
+    p_metadata_json jsonb
+)
+returns text
+language plpgsql
+as $$
+begin
+    insert into public.audit_events (
+        id,
+        request_id,
+        actor_user_id,
+        actor_device_id,
+        action,
+        target_secret_id,
+        result,
+        key_version,
+        metadata_json
+    )
+    values (
+        p_audit_event_id,
+        p_request_id,
+        p_actor_user_id,
+        p_actor_device_id,
+        p_action,
+        p_target_secret_id,
+        p_result,
+        p_key_version,
+        p_metadata_json
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
 create function test_helpers.try_update_secret_classification(
     p_secret_id uuid,
     p_classification text
@@ -248,6 +293,32 @@ select is(
     ),
     1,
     'append audit RPC stores one row for idempotent replays'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000026',
+        '00000000-0000-4000-8000-000000000015',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'integrity_check',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        '{"source":"same-request-follow-up"}'::jsonb
+    ),
+    'ok',
+    'append audit RPC allows distinct audit_event_id with same request_id'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000000015'
+    ),
+    2,
+    'request_id correlates multiple audit events instead of deduplicating them'
 );
 
 select is(
@@ -404,6 +475,23 @@ select is(
     ),
     'invalid_rpc_input',
     'append audit RPC rejects forbidden metadata keys recursively'
+);
+
+select ok(
+    position(
+        'audit_events_metadata_json_no_forbidden_keys' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000027',
+            '00000000-0000-4000-8000-000000000027',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'sbc-device-1',
+            'decrypt',
+            '550e8400-e29b-41d4-a716-446655440000',
+            'failure',
+            1,
+            '{"nested":[{"plaintext":"leak"}]}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects forbidden metadata keys recursively'
 );
 
 select * from finish();
