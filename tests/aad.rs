@@ -128,6 +128,31 @@ fn secret_id_must_be_uuid_v4() {
     ));
 }
 
+#[test]
+fn stored_context_rejects_unexpected_fields() -> Result<(), AadError> {
+    let aad = AadV1::parse(
+        "550e8400-e29b-41d4-a716-446655440000",
+        1,
+        "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "confidential",
+        "2026-04-08T12:00:00Z",
+    )?;
+    let mut context = aad.to_stored_context()?;
+    context
+        .as_object_mut()
+        .ok_or(AadError::ExpectedJsonObject)?
+        .insert("unexpected".to_owned(), Value::String("value".to_owned()));
+
+    let result = AadV1::from_stored_context(&context);
+
+    assert!(matches!(
+        result,
+        Err(AadError::UnexpectedField { field }) if field == "unexpected"
+    ));
+
+    Ok(())
+}
+
 proptest! {
     #[test]
     fn aad_normalization_is_stable(input in aad_input_strategy()) {

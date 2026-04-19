@@ -6,6 +6,9 @@ pub enum AadError {
     MissingField {
         field: &'static str,
     },
+    UnexpectedField {
+        field: String,
+    },
     InvalidFieldType {
         field: &'static str,
         expected: &'static str,
@@ -42,6 +45,9 @@ impl fmt::Display for AadError {
             }
             Self::MissingField { field } => {
                 write!(formatter, "required field is missing: {field}")
+            }
+            Self::UnexpectedField { field } => {
+                write!(formatter, "unexpected field in aad_context: {field}")
             }
             Self::InvalidFieldType { field, expected } => {
                 write!(formatter, "field {field} must be {expected}")

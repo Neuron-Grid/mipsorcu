@@ -271,32 +271,24 @@ pub fn prepare_new_secret_version(
     let secret_id = SecretId::generate()?;
     let version = SecretVersion::first();
     let data_key = DataKey::generate()?;
-    let aad = AadV1::new(
-        secret_id.clone(),
-        version,
-        input.owner_user_id.clone(),
-        input.classification.clone(),
-        input.created_at.clone(),
-    );
-    let encrypted_payload = encrypt_secret(&data_key, &aad, &input.plaintext)?;
     let key_wrap_context = KeyWrapContext::new(secret_id.clone(), input.key_version);
     let encrypted_data_key = wrap_data_key(master_key, &key_wrap_context, &data_key)?;
-    let (ciphertext, nonce_or_iv, aad_context) = encrypted_payload.into_parts();
 
-    Ok(PreparedSecretVersion {
-        write_action: SecretWriteAction::EncryptCreate,
-        secret_id,
-        version,
-        owner_user_id: input.owner_user_id,
-        classification: input.classification,
-        created_by_device_id: input.created_by_device_id,
-        created_at: input.created_at,
-        key_version: input.key_version,
-        ciphertext,
-        encrypted_data_key,
-        nonce_or_iv,
-        aad_context,
-    })
+    prepare_secret_version_with_data_key(
+        SecretWriteAction::EncryptCreate,
+        SecretVersionMetadata {
+            secret_id,
+            version,
+            owner_user_id: input.owner_user_id,
+            classification: input.classification,
+            created_by_device_id: input.created_by_device_id,
+            created_at: input.created_at,
+            key_version: input.key_version,
+            encrypted_data_key,
+        },
+        &data_key,
+        &input.plaintext,
+    )
 }
 
 pub fn prepare_existing_secret_version(
@@ -314,27 +306,62 @@ pub fn prepare_existing_secret_version(
     let version = current_version.next()?;
     let key_wrap_context = KeyWrapContext::new(secret_id.clone(), key_version);
     let data_key = unwrap_data_key(master_key, &key_wrap_context, &encrypted_data_key)?;
-    let aad = AadV1::new(
-        secret_id.clone(),
-        version,
-        owner_user_id.clone(),
-        classification.clone(),
-        input.created_at.clone(),
+
+    prepare_secret_version_with_data_key(
+        SecretWriteAction::EncryptRotate,
+        SecretVersionMetadata {
+            secret_id,
+            version,
+            owner_user_id,
+            classification,
+            created_by_device_id: input.created_by_device_id,
+            created_at: input.created_at,
+            key_version,
+            encrypted_data_key,
+        },
+        &data_key,
+        &input.plaintext,
+    )
+}
+
+struct SecretVersionMetadata {
+    secret_id: SecretId,
+    version: SecretVersion,
+    owner_user_id: OwnerUserId,
+    classification: Classification,
+    created_by_device_id: DeviceId,
+    created_at: CreatedAt,
+    key_version: KeyVersion,
+    encrypted_data_key: EncryptedDataKey,
+}
+
+fn prepare_secret_version_with_data_key(
+    write_action: SecretWriteAction,
+    metadata: SecretVersionMetadata,
+    data_key: &DataKey,
+    plaintext: &Plaintext,
+) -> Result<PreparedSecretVersion, SecretWriteError> {
+    let aad = AadV1::from_row_metadata(
+        metadata.secret_id.clone(),
+        metadata.version,
+        metadata.owner_user_id.clone(),
+        metadata.classification.clone(),
+        metadata.created_at.clone(),
     );
-    let encrypted_payload = encrypt_secret(&data_key, &aad, &input.plaintext)?;
+    let encrypted_payload = encrypt_secret(data_key, &aad, plaintext)?;
     let (ciphertext, nonce_or_iv, aad_context) = encrypted_payload.into_parts();
 
     Ok(PreparedSecretVersion {
-        write_action: SecretWriteAction::EncryptRotate,
-        secret_id,
-        version,
-        owner_user_id,
-        classification,
-        created_by_device_id: input.created_by_device_id,
-        created_at: input.created_at,
-        key_version,
+        write_action,
+        secret_id: metadata.secret_id,
+        version: metadata.version,
+        owner_user_id: metadata.owner_user_id,
+        classification: metadata.classification,
+        created_by_device_id: metadata.created_by_device_id,
+        created_at: metadata.created_at,
+        key_version: metadata.key_version,
         ciphertext,
-        encrypted_data_key,
+        encrypted_data_key: metadata.encrypted_data_key,
         nonce_or_iv,
         aad_context,
     })

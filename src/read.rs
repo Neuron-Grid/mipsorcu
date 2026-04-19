@@ -93,22 +93,35 @@ pub fn decrypt_current_secret_version(
         input.current_version,
     )?;
 
-    let stored_aad = AadV1::from_stored_context(&input.aad_context)?;
-    let row_aad = AadV1::new(
-        input.secret_id.clone(),
-        input.version,
-        input.owner_user_id.clone(),
-        input.classification.clone(),
-        input.created_at.clone(),
-    );
-
-    if stored_aad.canonical_bytes()? != row_aad.canonical_bytes()? {
-        return Err(DecryptIntegrityError::AadContextMismatch.into());
-    }
+    let row_aad = row_aad_from_input(&input);
+    verify_stored_aad_matches_row(&input.aad_context, &row_aad)?;
 
     let key_wrap_context = KeyWrapContext::new(input.secret_id, input.key_version);
     let data_key = unwrap_data_key(master_key, &key_wrap_context, &input.encrypted_data_key)?;
 
     decrypt_secret(&data_key, &row_aad, &input.nonce_or_iv, &input.ciphertext)
         .map_err(SecretDecryptError::from)
+}
+
+fn row_aad_from_input(input: &DecryptCurrentSecretVersionInput) -> AadV1 {
+    AadV1::from_row_metadata(
+        input.secret_id.clone(),
+        input.version,
+        input.owner_user_id.clone(),
+        input.classification.clone(),
+        input.created_at.clone(),
+    )
+}
+
+fn verify_stored_aad_matches_row(
+    stored_context: &Value,
+    row_aad: &AadV1,
+) -> Result<(), SecretDecryptError> {
+    let stored_aad = AadV1::from_stored_context(stored_context)?;
+
+    if stored_aad.canonical_bytes()? == row_aad.canonical_bytes()? {
+        Ok(())
+    } else {
+        Err(DecryptIntegrityError::AadContextMismatch.into())
+    }
 }

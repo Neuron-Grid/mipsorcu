@@ -5,6 +5,14 @@ use crate::error::AadError;
 use crate::types::{Classification, CreatedAt, OwnerUserId, SecretId, SecretVersion};
 
 pub const AAD_VERSION_V1: u8 = 1;
+const AAD_V1_FIELDS: &[&str] = &[
+    "aad_version",
+    "classification",
+    "created_at",
+    "owner_user_id",
+    "secret_id",
+    "version",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AadV1 {
@@ -50,6 +58,7 @@ impl AadV1 {
 
     pub fn from_stored_context(context: &Value) -> Result<Self, AadError> {
         let object = context.as_object().ok_or(AadError::ExpectedJsonObject)?;
+        validate_aad_v1_field_set(object)?;
         let aad_version = parse_aad_version(required_value(object, "aad_version")?)?;
 
         if aad_version != AAD_VERSION_V1 {
@@ -70,6 +79,22 @@ impl AadV1 {
             &owner_user_id,
             &classification,
             &created_at,
+        )
+    }
+
+    pub fn from_row_metadata(
+        secret_id: SecretId,
+        version: SecretVersion,
+        owner_user_id: OwnerUserId,
+        classification: Classification,
+        created_at: CreatedAt,
+    ) -> Self {
+        Self::new(
+            secret_id,
+            version,
+            owner_user_id,
+            classification,
+            created_at,
         )
     }
 
@@ -121,6 +146,23 @@ fn required_value<'a>(
     field: &'static str,
 ) -> Result<&'a Value, AadError> {
     object.get(field).ok_or(AadError::MissingField { field })
+}
+
+fn validate_aad_v1_field_set(object: &Map<String, Value>) -> Result<(), AadError> {
+    for field in AAD_V1_FIELDS {
+        required_value(object, field)?;
+    }
+
+    if let Some(field) = object
+        .keys()
+        .find(|key| !AAD_V1_FIELDS.contains(&key.as_str()))
+    {
+        return Err(AadError::UnexpectedField {
+            field: field.to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn parse_required_string(
