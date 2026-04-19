@@ -1,4 +1,5 @@
 pub mod aad;
+pub mod audit;
 pub mod auth;
 pub mod authorization;
 pub mod crypto;
@@ -8,6 +9,11 @@ pub mod types;
 pub mod write;
 
 pub use aad::AadV1;
+pub use audit::{
+    AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventError, AuditEventId,
+    AuditEventParts, AuditMetadata, AuditRecordError, AuditRecorder, AuditResult,
+    LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
+};
 pub use auth::VerifiedJwtClaims;
 pub use authorization::authorize_current_version_decrypt;
 pub use crypto::{
