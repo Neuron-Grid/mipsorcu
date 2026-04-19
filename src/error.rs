@@ -283,3 +283,99 @@ impl From<CryptoError> for SecretWriteError {
         Self::Crypto(error)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizationError {
+    OwnerMismatch,
+    NotCurrentVersion,
+}
+
+impl fmt::Display for AuthorizationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OwnerMismatch => {
+                write!(formatter, "actor is not allowed to decrypt this secret")
+            }
+            Self::NotCurrentVersion => {
+                write!(formatter, "requested secret version is not current")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AuthorizationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecryptIntegrityError {
+    AadContextMismatch,
+}
+
+impl fmt::Display for DecryptIntegrityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AadContextMismatch => {
+                write!(formatter, "aad_context does not match row metadata")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DecryptIntegrityError {}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum SecretDecryptError {
+    Authorization(AuthorizationError),
+    Aad(AadError),
+    Crypto(CryptoError),
+    Integrity(DecryptIntegrityError),
+}
+
+impl fmt::Debug for SecretDecryptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorization(error) => {
+                formatter.debug_tuple("Authorization").field(error).finish()
+            }
+            Self::Aad(error) => formatter.debug_tuple("Aad").field(error).finish(),
+            Self::Crypto(error) => formatter.debug_tuple("Crypto").field(error).finish(),
+            Self::Integrity(error) => formatter.debug_tuple("Integrity").field(error).finish(),
+        }
+    }
+}
+
+impl fmt::Display for SecretDecryptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorization(error) => write!(formatter, "{error}"),
+            Self::Aad(error) => write!(formatter, "{error}"),
+            Self::Crypto(error) => write!(formatter, "{error}"),
+            Self::Integrity(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for SecretDecryptError {}
+
+impl From<AuthorizationError> for SecretDecryptError {
+    fn from(error: AuthorizationError) -> Self {
+        Self::Authorization(error)
+    }
+}
+
+impl From<AadError> for SecretDecryptError {
+    fn from(error: AadError) -> Self {
+        Self::Aad(error)
+    }
+}
+
+impl From<CryptoError> for SecretDecryptError {
+    fn from(error: CryptoError) -> Self {
+        Self::Crypto(error)
+    }
+}
+
+impl From<DecryptIntegrityError> for SecretDecryptError {
+    fn from(error: DecryptIntegrityError) -> Self {
+        Self::Integrity(error)
+    }
+}

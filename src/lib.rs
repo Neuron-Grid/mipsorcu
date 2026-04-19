@@ -1,15 +1,27 @@
 pub mod aad;
+pub mod auth;
+pub mod authorization;
 pub mod crypto;
 pub mod error;
+pub mod read;
 pub mod types;
 pub mod write;
 
 pub use aad::AadV1;
+pub use auth::VerifiedJwtClaims;
+pub use authorization::authorize_current_version_decrypt;
 pub use crypto::{
     ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, KeyWrapContext, decrypt_secret, encrypt_secret,
     unwrap_data_key, wrap_data_key,
 };
-pub use error::{AadError, CryptoError, InputError, SecretWriteError};
+pub use error::{
+    AadError, AuthorizationError, CryptoError, DecryptIntegrityError, InputError,
+    SecretDecryptError, SecretWriteError,
+};
+pub use read::{
+    DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts,
+    decrypt_current_secret_version,
+};
 pub use types::{
     Ciphertext, Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,
     ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH, ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_TAG_LENGTH,
