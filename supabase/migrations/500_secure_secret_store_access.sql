@@ -18,6 +18,14 @@ using (
     )
 );
 
+create policy audit_events_deny_all
+on public.audit_events
+as restrictive
+for all
+to public
+using (false)
+with check (false);
+
 revoke all on table public.secrets from anon, authenticated;
 revoke all on table public.secret_versions from anon, authenticated;
 revoke all on table public.audit_events from anon, authenticated;
