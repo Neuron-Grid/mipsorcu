@@ -70,6 +70,10 @@ async fn main() {
     let app = Router::new()
         .route("/v1/secrets", post(handlers::create_secret))
         .route(
+            "/v1/secrets/{secret_id}/versions",
+            post(handlers::rotate_secret),
+        )
+        .route(
             "/v1/secrets/{secret_id}/decrypt",
             post(handlers::decrypt_secret),
         )

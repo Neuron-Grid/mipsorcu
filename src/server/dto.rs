@@ -14,6 +14,19 @@ pub struct CreateSecretResponse {
     pub secret_version_id: String,
 }
 
+#[derive(Deserialize)]
+pub struct RotateSecretRequest {
+    pub device_id: String,
+    pub plaintext: String,
+}
+
+#[derive(Serialize)]
+pub struct RotateSecretResponse {
+    pub secret_id: String,
+    pub version: u32,
+    pub secret_version_id: String,
+}
+
 #[derive(Serialize)]
 pub struct DecryptSecretResponse {
     pub secret_id: String,

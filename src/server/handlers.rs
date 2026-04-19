@@ -9,6 +9,7 @@ use mipsorcu::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
 };
 use mipsorcu::auth::{RawJwt, VerifiedJwtClaims};
+use mipsorcu::authorize_existing_secret_version_write;
 use mipsorcu::crypto::ALGORITHM_XCHACHA20_POLY1305;
 use mipsorcu::decrypt_current_secret_version;
 use mipsorcu::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
@@ -16,11 +17,14 @@ use mipsorcu::types::{
     Ciphertext, Classification, CreatedAt, DeviceId, EncryptedDataKey, KeyVersion, Nonce,
     OwnerUserId, Plaintext, SecretId, SecretVersion,
 };
-use mipsorcu::write::{NewSecretVersionInput, PreparedSecretVersion, prepare_new_secret_version};
+use mipsorcu::write::{
+    CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,
+    PreparedSecretVersion, prepare_existing_secret_version, prepare_new_secret_version,
+};
 
 use super::dto::{
     ApiErrorResponse, CreateSecretRequest, CreateSecretResponse, DecryptSecretResponse,
-    HealthResponse,
+    HealthResponse, RotateSecretRequest, RotateSecretResponse,
 };
 use super::errors::ApiError;
 use super::middleware::AuthenticatedUser;
@@ -95,6 +99,127 @@ pub async fn create_secret(
                 Some(&owner_user_id),
                 Some(prepared.secret_id()),
                 AuditAction::EncryptCreate,
+            );
+
+            Err(ApiError::from(rpc_error))
+        }
+    }
+}
+
+pub async fn rotate_secret(
+    State(state): State<AppState>,
+    AxumPath(secret_id): AxumPath<String>,
+    auth: AuthenticatedUser,
+    Json(body): Json<RotateSecretRequest>,
+) -> Result<(StatusCode, Json<RotateSecretResponse>), ApiError> {
+    let request_id = generate_request_id()?;
+    let requested_secret_id = parse_secret_id(&secret_id)?;
+    let actor_user_id = auth.claims.subject_user_id().clone();
+    let parsed_body = parse_rotate_secret_request(body)?;
+    let current = fetch_single_current_secret_version(&state, &requested_secret_id, &auth.raw_jwt)
+        .await
+        .inspect_err(|error| {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %requested_secret_id.as_canonical_string(),
+                error = %error,
+                action = "encrypt_rotate",
+                result = "failure",
+                "supabase read failed"
+            );
+            record_failure_audit_nonblocking(
+                &state,
+                &request_id,
+                Some(&actor_user_id),
+                Some(&requested_secret_id),
+                AuditAction::EncryptRotate,
+            );
+        })?;
+
+    authorize_existing_secret_version_write(&auth.claims, &current.owner_user_id).map_err(
+        |error| {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %requested_secret_id.as_canonical_string(),
+                error = %error,
+                action = "encrypt_rotate",
+                result = "failure",
+                "authorization failed"
+            );
+            record_failure_audit_nonblocking(
+                &state,
+                &request_id,
+                Some(&actor_user_id),
+                Some(&requested_secret_id),
+                AuditAction::EncryptRotate,
+            );
+            ApiError::Forbidden("forbidden".to_owned())
+        },
+    )?;
+
+    let prepared = prepare_existing_secret_version_for_request(&state, current, parsed_body)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %requested_secret_id.as_canonical_string(),
+                error = %error,
+                action = "encrypt_rotate",
+                result = "failure",
+                "encryption failed"
+            );
+            record_failure_audit_nonblocking(
+                &state,
+                &request_id,
+                Some(&actor_user_id),
+                Some(&requested_secret_id),
+                AuditAction::EncryptRotate,
+            );
+            error
+        })?;
+
+    let rpc_params = build_rpc_params(&request_id, &prepared)?;
+    let rpc_result = state
+        .supabase_client
+        .call_write_secret_version(&rpc_params)
+        .await;
+
+    match rpc_result {
+        Ok(response) => {
+            let response_version = parse_write_response_version(response.version)?;
+            tracing::info!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %response.secret_id,
+                version = response_version,
+                action = "encrypt_rotate",
+                result = "success",
+            );
+
+            Ok((
+                StatusCode::CREATED,
+                Json(RotateSecretResponse {
+                    secret_id: response.secret_id,
+                    version: response_version,
+                    secret_version_id: response.secret_version_id,
+                }),
+            ))
+        }
+        Err(rpc_error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %requested_secret_id.as_canonical_string(),
+                error = %rpc_error,
+                action = "encrypt_rotate",
+                result = "failure",
+                "supabase RPC failed"
+            );
+
+            record_failure_audit_nonblocking(
+                &state,
+                &request_id,
+                Some(&actor_user_id),
+                Some(&requested_secret_id),
+                AuditAction::EncryptRotate,
             );
 
             Err(ApiError::from(rpc_error))
@@ -244,6 +369,12 @@ struct ParsedCreateSecretRequest {
     created_at: CreatedAt,
 }
 
+struct ParsedRotateSecretRequest {
+    device_id: DeviceId,
+    plaintext: Plaintext,
+    created_at: CreatedAt,
+}
+
 fn generate_request_id() -> Result<RequestId, ApiError> {
     RequestId::generate().map_err(|error| ApiError::InternalError(error.to_string()))
 }
@@ -253,6 +384,16 @@ fn parse_create_secret_request(
 ) -> Result<ParsedCreateSecretRequest, ApiError> {
     Ok(ParsedCreateSecretRequest {
         classification: parse_classification(&body.classification)?,
+        device_id: parse_device_id(&body.device_id)?,
+        plaintext: parse_hex_plaintext(&body.plaintext)?,
+        created_at: current_created_at()?,
+    })
+}
+
+fn parse_rotate_secret_request(
+    body: RotateSecretRequest,
+) -> Result<ParsedRotateSecretRequest, ApiError> {
+    Ok(ParsedRotateSecretRequest {
         device_id: parse_device_id(&body.device_id)?,
         plaintext: parse_hex_plaintext(&body.plaintext)?,
         created_at: current_created_at()?,
@@ -302,6 +443,19 @@ struct DecodedSecretVersionBytes {
     encrypted_data_key: Vec<u8>,
     nonce_or_iv: Vec<u8>,
     ciphertext: Vec<u8>,
+}
+
+impl PreparedDecryptRow {
+    fn into_current_secret_version_state(self) -> CurrentSecretVersionState {
+        CurrentSecretVersionState::new(
+            self.secret_id,
+            self.version,
+            self.owner_user_id,
+            self.classification,
+            self.key_version,
+            self.encrypted_data_key,
+        )
+    }
 }
 
 async fn fetch_single_current_secret_version(
@@ -451,6 +605,30 @@ async fn prepare_secret_version(
                 request.device_id,
                 request.created_at,
                 key_version,
+                request.plaintext,
+            ),
+        )
+    })
+    .await
+    .map_err(|error| ApiError::InternalError(error.to_string()))?
+    .map_err(ApiError::from)
+}
+
+async fn prepare_existing_secret_version_for_request(
+    state: &AppState,
+    current: PreparedDecryptRow,
+    request: ParsedRotateSecretRequest,
+) -> Result<PreparedSecretVersion, ApiError> {
+    let master_key = state.master_key.clone();
+    let current_state = current.into_current_secret_version_state();
+
+    tokio::task::spawn_blocking(move || {
+        prepare_existing_secret_version(
+            &master_key,
+            ExistingSecretVersionInput::new(
+                current_state,
+                request.device_id,
+                request.created_at,
                 request.plaintext,
             ),
         )
@@ -612,6 +790,24 @@ mod tests {
     }
 
     #[test]
+    fn parsed_row_builds_current_secret_version_state_for_rotation() {
+        let parsed = parse_decrypt_row(valid_row()).expect("valid row should parse");
+
+        let current = parsed.into_current_secret_version_state();
+
+        assert_eq!(current.secret_id().as_canonical_string(), SECRET_ID);
+        assert_eq!(current.current_version().get(), 1);
+        assert_eq!(current.owner_user_id().as_canonical_string(), OWNER_USER_ID);
+        assert_eq!(current.classification().as_str(), "confidential");
+        assert_eq!(current.key_version().get(), 1);
+        assert_eq!(
+            current.encrypted_data_key().as_bytes().len(),
+            mipsorcu::ENCRYPTED_DATA_KEY_LENGTH
+        );
+        assert_eq!(current.encrypted_data_key().version(), 1);
+    }
+
+    #[test]
     fn parse_decrypt_row_rejects_invalid_lengths_and_metadata() {
         let mut bad_nonce = valid_row();
         bad_nonce.nonce_or_iv = "\\x00".to_owned();
@@ -632,6 +828,41 @@ mod tests {
         assert!(matches!(
             parse_decrypt_row(owner_mismatch),
             Err(ApiError::DecryptFailed)
+        ));
+
+        let mut bad_algorithm = valid_row();
+        bad_algorithm.algorithm = "chacha20-poly1305".to_owned();
+        assert!(matches!(
+            parse_decrypt_row(bad_algorithm),
+            Err(ApiError::DecryptFailed)
+        ));
+
+        let mut bad_encrypted_data_key = valid_row();
+        bad_encrypted_data_key.encrypted_data_key = "\\x01".to_owned();
+        assert!(matches!(
+            parse_decrypt_row(bad_encrypted_data_key),
+            Err(ApiError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn parse_rotate_secret_request_rejects_invalid_device_id_and_plaintext() {
+        let invalid_device_id = RotateSecretRequest {
+            device_id: "   ".to_owned(),
+            plaintext: "00".to_owned(),
+        };
+        assert!(matches!(
+            parse_rotate_secret_request(invalid_device_id),
+            Err(ApiError::BadRequest(_))
+        ));
+
+        let invalid_plaintext = RotateSecretRequest {
+            device_id: "sbc-device-1".to_owned(),
+            plaintext: "not hex".to_owned(),
+        };
+        assert!(matches!(
+            parse_rotate_secret_request(invalid_plaintext),
+            Err(ApiError::BadRequest(_))
         ));
     }
 

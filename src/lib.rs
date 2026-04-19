@@ -15,7 +15,9 @@ pub use audit::{
     LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
 };
 pub use auth::{Jwk, Jwks, JwtVerifier, JwtVerifierConfig, RawJwt, VerifiedJwtClaims};
-pub use authorization::authorize_current_version_decrypt;
+pub use authorization::{
+    authorize_current_version_decrypt, authorize_existing_secret_version_write,
+};
 pub use crypto::{
     ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, KeyWrapContext, decrypt_secret, encrypt_secret,
     unwrap_data_key, wrap_data_key,
