@@ -3,7 +3,9 @@ use std::fmt;
 use serde_json::Value;
 
 use crate::aad::AadV1;
-use crate::crypto::{ALGORITHM_XCHACHA20_POLY1305, KeyWrapContext, encrypt_secret, wrap_data_key};
+use crate::crypto::{
+    ALGORITHM_XCHACHA20_POLY1305, KeyWrapContext, encrypt_secret, unwrap_data_key, wrap_data_key,
+};
 use crate::error::SecretWriteError;
 use crate::types::{
     Ciphertext, Classification, CreatedAt, DataKey, DeviceId, EncryptedDataKey, KeyVersion,
@@ -53,8 +55,127 @@ impl fmt::Debug for NewSecretVersionInput {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretWriteAction {
+    EncryptCreate,
+    EncryptRotate,
+}
+
+impl SecretWriteAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EncryptCreate => "encrypt_create",
+            Self::EncryptRotate => "encrypt_rotate",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct CurrentSecretVersionState {
+    secret_id: SecretId,
+    current_version: SecretVersion,
+    owner_user_id: OwnerUserId,
+    classification: Classification,
+    key_version: KeyVersion,
+    encrypted_data_key: EncryptedDataKey,
+}
+
+impl CurrentSecretVersionState {
+    pub fn new(
+        secret_id: SecretId,
+        current_version: SecretVersion,
+        owner_user_id: OwnerUserId,
+        classification: Classification,
+        key_version: KeyVersion,
+        encrypted_data_key: EncryptedDataKey,
+    ) -> Self {
+        Self {
+            secret_id,
+            current_version,
+            owner_user_id,
+            classification,
+            key_version,
+            encrypted_data_key,
+        }
+    }
+
+    pub fn secret_id(&self) -> &SecretId {
+        &self.secret_id
+    }
+
+    pub fn current_version(&self) -> SecretVersion {
+        self.current_version
+    }
+
+    pub fn owner_user_id(&self) -> &OwnerUserId {
+        &self.owner_user_id
+    }
+
+    pub fn classification(&self) -> &Classification {
+        &self.classification
+    }
+
+    pub fn key_version(&self) -> KeyVersion {
+        self.key_version
+    }
+
+    pub fn encrypted_data_key(&self) -> &EncryptedDataKey {
+        &self.encrypted_data_key
+    }
+}
+
+impl fmt::Debug for CurrentSecretVersionState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CurrentSecretVersionState")
+            .field("secret_id", &self.secret_id)
+            .field("current_version", &self.current_version)
+            .field("owner_user_id", &self.owner_user_id)
+            .field("classification", &self.classification)
+            .field("key_version", &self.key_version)
+            .field("encrypted_data_key", &self.encrypted_data_key)
+            .finish()
+    }
+}
+
+pub struct ExistingSecretVersionInput {
+    current: CurrentSecretVersionState,
+    created_by_device_id: DeviceId,
+    created_at: CreatedAt,
+    plaintext: Plaintext,
+}
+
+impl ExistingSecretVersionInput {
+    pub fn new(
+        current: CurrentSecretVersionState,
+        created_by_device_id: DeviceId,
+        created_at: CreatedAt,
+        plaintext: Plaintext,
+    ) -> Self {
+        Self {
+            current,
+            created_by_device_id,
+            created_at,
+            plaintext,
+        }
+    }
+}
+
+impl fmt::Debug for ExistingSecretVersionInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExistingSecretVersionInput")
+            .field("current", &self.current)
+            .field("created_by_device_id", &self.created_by_device_id)
+            .field("created_at", &self.created_at)
+            .field("plaintext", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedSecretVersion {
+    write_action: SecretWriteAction,
     secret_id: SecretId,
     version: SecretVersion,
     owner_user_id: OwnerUserId,
@@ -69,6 +190,10 @@ pub struct PreparedSecretVersion {
 }
 
 impl PreparedSecretVersion {
+    pub fn write_action(&self) -> SecretWriteAction {
+        self.write_action
+    }
+
     pub fn secret_id(&self) -> &SecretId {
         &self.secret_id
     }
@@ -122,6 +247,7 @@ impl fmt::Debug for PreparedSecretVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PreparedSecretVersion")
+            .field("write_action", &self.write_action)
             .field("secret_id", &self.secret_id)
             .field("version", &self.version)
             .field("owner_user_id", &self.owner_user_id)
@@ -158,6 +284,7 @@ pub fn prepare_new_secret_version(
     let (ciphertext, nonce_or_iv, aad_context) = encrypted_payload.into_parts();
 
     Ok(PreparedSecretVersion {
+        write_action: SecretWriteAction::EncryptCreate,
         secret_id,
         version,
         owner_user_id: input.owner_user_id,
@@ -165,6 +292,47 @@ pub fn prepare_new_secret_version(
         created_by_device_id: input.created_by_device_id,
         created_at: input.created_at,
         key_version: input.key_version,
+        ciphertext,
+        encrypted_data_key,
+        nonce_or_iv,
+        aad_context,
+    })
+}
+
+pub fn prepare_existing_secret_version(
+    master_key: &MasterKey,
+    input: ExistingSecretVersionInput,
+) -> Result<PreparedSecretVersion, SecretWriteError> {
+    let CurrentSecretVersionState {
+        secret_id,
+        current_version,
+        owner_user_id,
+        classification,
+        key_version,
+        encrypted_data_key,
+    } = input.current;
+    let version = current_version.next()?;
+    let key_wrap_context = KeyWrapContext::new(secret_id.clone(), key_version);
+    let data_key = unwrap_data_key(master_key, &key_wrap_context, &encrypted_data_key)?;
+    let aad = AadV1::new(
+        secret_id.clone(),
+        version,
+        owner_user_id.clone(),
+        classification.clone(),
+        input.created_at.clone(),
+    );
+    let encrypted_payload = encrypt_secret(&data_key, &aad, &input.plaintext)?;
+    let (ciphertext, nonce_or_iv, aad_context) = encrypted_payload.into_parts();
+
+    Ok(PreparedSecretVersion {
+        write_action: SecretWriteAction::EncryptRotate,
+        secret_id,
+        version,
+        owner_user_id,
+        classification,
+        created_by_device_id: input.created_by_device_id,
+        created_at: input.created_at,
+        key_version,
         ciphertext,
         encrypted_data_key,
         nonce_or_iv,

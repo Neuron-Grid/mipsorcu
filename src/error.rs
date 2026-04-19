@@ -95,6 +95,7 @@ impl std::error::Error for AadError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputError {
     InvalidDeviceId,
+    SecretVersionOverflow,
 }
 
 impl fmt::Display for InputError {
@@ -102,6 +103,9 @@ impl fmt::Display for InputError {
         match self {
             Self::InvalidDeviceId => {
                 write!(formatter, "device_id must not be empty or whitespace only")
+            }
+            Self::SecretVersionOverflow => {
+                write!(formatter, "secret version cannot be incremented")
             }
         }
     }

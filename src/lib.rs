@@ -16,4 +16,8 @@ pub use types::{
     ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
     NONCE_LENGTH, Nonce, OwnerUserId, Plaintext, SecretId, SecretVersion,
 };
-pub use write::{NewSecretVersionInput, PreparedSecretVersion, prepare_new_secret_version};
+pub use write::{
+    CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,
+    PreparedSecretVersion, SecretWriteAction, prepare_existing_secret_version,
+    prepare_new_secret_version,
+};

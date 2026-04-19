@@ -69,6 +69,18 @@ impl SecretVersion {
             })
     }
 
+    pub fn next(self) -> Result<Self, InputError> {
+        let next = self
+            .0
+            .get()
+            .checked_add(1)
+            .ok_or(InputError::SecretVersionOverflow)?;
+
+        NonZeroU32::new(next)
+            .map(Self)
+            .ok_or(InputError::SecretVersionOverflow)
+    }
+
     pub fn get(self) -> u32 {
         self.0.get()
     }
