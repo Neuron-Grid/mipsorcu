@@ -2,8 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::audit::{AuditRecordError, AuditRecorder, LocalAuditFallbackStore, ResendAuditSummary};
-use crate::auth::{Jwks, JwtVerifier, JwtVerifierConfig};
+use crate::audit::{
+    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
+    AuditRecorder, AuditResult, LocalAuditFallbackStore, RequestId, ResendAuditSummary,
+};
+use crate::auth::{Jwks, JwtVerifier, JwtVerifierConfig, VerifiedJwtClaims};
+use crate::decrypt_current_secret_version;
+use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
 use axum::Router;
 use axum::routing::{get, post};
 use tokio::sync::watch;
@@ -13,7 +18,9 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 
 use crate::server::config;
+use crate::server::errors::ApiError;
 use crate::server::handlers;
+use crate::server::handlers::PreparedDecryptRow;
 use crate::server::state::AppState;
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 
@@ -59,6 +66,7 @@ pub async fn run() {
     let audit_fallback_path = config.audit_fallback_path.clone();
     let audit_resend_interval = config.audit_resend_interval;
     let audit_fallback_alert_threshold_bytes = config.audit_fallback_alert_threshold_bytes;
+    let restore_test_interval = config.restore_test_interval;
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let audit_resend_recorder = audit_recorder.clone();
     tokio::spawn(run_audit_resend_loop(
@@ -77,6 +85,12 @@ pub async fn run() {
         audit_recorder,
         audit_fallback_path: config.audit_fallback_path,
     };
+    let restore_test_state = state.clone();
+    tokio::spawn(run_restore_test_loop(
+        restore_test_state,
+        restore_test_interval,
+        shutdown_sender.subscribe(),
+    ));
 
     let app = Router::new()
         .route("/v1/secrets", post(handlers::create_secret))
@@ -112,6 +126,294 @@ pub async fn run() {
             tracing::error!(error = %error, "server error");
             std::process::exit(1);
         });
+}
+
+async fn run_restore_test_loop(
+    state: AppState,
+    interval_duration: Duration,
+    mut shutdown_receiver: watch::Receiver<bool>,
+) {
+    run_restore_test_once(&state).await;
+
+    let mut interval = tokio::time::interval(interval_duration);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            result = shutdown_receiver.changed() => {
+                if result.is_err() || *shutdown_receiver.borrow() {
+                    tracing::info!("restore test loop stopped");
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                run_restore_test_once(&state).await;
+            }
+        }
+    }
+}
+
+pub async fn run_restore_test_once(state: &AppState) {
+    let request_id = match RequestId::generate() {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = "request_id_generation_failed",
+                "restore test setup failed"
+            );
+            return;
+        }
+    };
+
+    let row = match state
+        .supabase_client
+        .fetch_restore_test_current_secret_version()
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            record_restore_test_audit(
+                state,
+                &request_id,
+                RestoreTestAudit {
+                    result: AuditResult::Success,
+                    target_secret_id: None,
+                    key_version: None,
+                    metadata: restore_test_metadata(0, Some("no_current_secret_versions")),
+                    error_code: None,
+                },
+            )
+            .await;
+            tracing::info!(
+                request_id = %request_id.as_canonical_string(),
+                action = "restore_test",
+                result = "success",
+                sample_count = 0,
+            );
+            return;
+        }
+        Err(error) => {
+            record_restore_test_audit(
+                state,
+                &request_id,
+                RestoreTestAudit {
+                    result: AuditResult::Failure,
+                    target_secret_id: None,
+                    key_version: None,
+                    metadata: restore_test_metadata(0, Some("candidate_fetch_failed")),
+                    error_code: Some("candidate_fetch_failed"),
+                },
+            )
+            .await;
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = "candidate_fetch_failed",
+                sample_count = 0,
+                "restore test candidate fetch failed"
+            );
+            return;
+        }
+    };
+
+    let parsed = match handlers::parse_decrypt_row(row) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            record_restore_test_audit(
+                state,
+                &request_id,
+                RestoreTestAudit {
+                    result: AuditResult::Failure,
+                    target_secret_id: None,
+                    key_version: None,
+                    metadata: restore_test_metadata(1, Some("row_validation_failed")),
+                    error_code: Some("row_validation_failed"),
+                },
+            )
+            .await;
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = "row_validation_failed",
+                sample_count = 1,
+                "restore test row validation failed"
+            );
+            return;
+        }
+    };
+
+    let target_secret_id = parsed.secret_id.clone();
+    let key_version = parsed.key_version;
+    let input = build_restore_test_decrypt_input(parsed);
+    let master_key = state.master_key.clone();
+    let decrypt_result =
+        tokio::task::spawn_blocking(move || decrypt_current_secret_version(&master_key, input))
+            .await
+            .map_err(|error| ApiError::InternalError(error.to_string()))
+            .and_then(|result| result.map_err(ApiError::from));
+
+    match decrypt_result {
+        Ok(plaintext) => {
+            drop(plaintext);
+            record_restore_test_audit(
+                state,
+                &request_id,
+                RestoreTestAudit {
+                    result: AuditResult::Success,
+                    target_secret_id: Some(target_secret_id.clone()),
+                    key_version: Some(key_version),
+                    metadata: restore_test_metadata(1, None),
+                    error_code: None,
+                },
+            )
+            .await;
+            tracing::info!(
+                request_id = %request_id.as_canonical_string(),
+                target_secret_id = %target_secret_id.as_canonical_string(),
+                key_version = key_version.get(),
+                action = "restore_test",
+                result = "success",
+                sample_count = 1,
+            );
+        }
+        Err(error) => {
+            record_restore_test_audit(
+                state,
+                &request_id,
+                RestoreTestAudit {
+                    result: AuditResult::Failure,
+                    target_secret_id: Some(target_secret_id.clone()),
+                    key_version: Some(key_version),
+                    metadata: restore_test_metadata(1, Some("decrypt_failed")),
+                    error_code: Some("decrypt_failed"),
+                },
+            )
+            .await;
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                target_secret_id = %target_secret_id.as_canonical_string(),
+                key_version = key_version.get(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = "decrypt_failed",
+                sample_count = 1,
+                "restore test decrypt failed"
+            );
+        }
+    }
+}
+
+fn build_restore_test_decrypt_input(row: PreparedDecryptRow) -> DecryptCurrentSecretVersionInput {
+    DecryptCurrentSecretVersionInput::new(DecryptCurrentSecretVersionInputParts {
+        claims: VerifiedJwtClaims::from_verified_subject(row.owner_user_id.clone()),
+        secret_id: row.secret_id,
+        version: row.version,
+        current_version: row.version,
+        owner_user_id: row.owner_user_id,
+        classification: row.classification,
+        created_at: row.created_at,
+        key_version: row.key_version,
+        encrypted_data_key: row.encrypted_data_key,
+        nonce_or_iv: row.nonce_or_iv,
+        ciphertext: row.ciphertext,
+        aad_context: row.aad_context,
+    })
+}
+
+struct RestoreTestAudit {
+    result: AuditResult,
+    target_secret_id: Option<crate::SecretId>,
+    key_version: Option<crate::KeyVersion>,
+    metadata: AuditMetadata,
+    error_code: Option<&'static str>,
+}
+
+async fn record_restore_test_audit(
+    state: &AppState,
+    request_id: &RequestId,
+    audit: RestoreTestAudit,
+) {
+    let audit_event_id = match AuditEventId::generate() {
+        Ok(audit_event_id) => audit_event_id,
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = "audit_event_id_generation_failed",
+                "restore test audit setup failed"
+            );
+            return;
+        }
+    };
+    let event = match AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: request_id.clone(),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::RestoreTest,
+        target_secret_id: audit.target_secret_id,
+        result: audit.result,
+        key_version: audit.key_version,
+        metadata_json: audit.metadata,
+    }) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = "audit_event_build_failed",
+                "restore test audit setup failed"
+            );
+            return;
+        }
+    };
+
+    let recorder = state.audit_recorder.clone();
+    let record_result = tokio::task::spawn_blocking(move || recorder.record(&event))
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| error.to_string()));
+
+    if let Err(error) = record_result {
+        tracing::error!(
+            request_id = %request_id.as_canonical_string(),
+            error = %error,
+            action = "restore_test",
+            result = "failure",
+            error_code = audit.error_code.unwrap_or("audit_record_failed"),
+            "restore test audit recording failed"
+        );
+    }
+}
+
+fn restore_test_metadata(sample_count: u64, error_code: Option<&'static str>) -> AuditMetadata {
+    let value = match error_code {
+        Some("no_current_secret_versions") => serde_json::json!({
+            "sample_count": sample_count,
+            "reason": "no_current_secret_versions",
+        }),
+        Some(code) => serde_json::json!({
+            "sample_count": sample_count,
+            "error_code": code,
+        }),
+        None => serde_json::json!({
+            "sample_count": sample_count,
+        }),
+    };
+
+    AuditMetadata::new(value).unwrap_or_else(|_| AuditMetadata::empty())
 }
 
 async fn shutdown_signal(shutdown_sender: watch::Sender<bool>) {
@@ -245,5 +547,153 @@ fn record_audit_fallback_size_alert(path: &Path, threshold_bytes: u64) {
                 "audit fallback log size check failed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::server::supabase::SecretReadJoin;
+    use crate::{
+        Classification, CreatedAt, DeviceId, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
+        NewSecretVersionInput, OwnerUserId, Plaintext, SecretDecryptError,
+        prepare_new_secret_version,
+    };
+
+    const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const CLASSIFICATION: &str = "confidential";
+    const CREATED_AT: &str = "2026-04-08T12:00:00Z";
+    const DEVICE_ID: &str = "sbc-device-1";
+
+    fn sample_master_key() -> MasterKey {
+        MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH])
+    }
+
+    fn prepared_row(
+        plaintext: Vec<u8>,
+    ) -> Result<(MasterKey, PreparedDecryptRow), Box<dyn std::error::Error>> {
+        let master_key = sample_master_key();
+        let prepared = prepare_new_secret_version(
+            &master_key,
+            NewSecretVersionInput::new(
+                OwnerUserId::parse(OWNER_USER_ID)?,
+                Classification::new(CLASSIFICATION)?,
+                DeviceId::new(DEVICE_ID)?,
+                CreatedAt::parse(CREATED_AT)?,
+                KeyVersion::new(1)?,
+                Plaintext::new(plaintext),
+            ),
+        )?;
+        let version_id = "650e8400-e29b-41d4-a716-446655440000".to_owned();
+        let row = crate::server::supabase::SecretVersionReadRow {
+            id: version_id.clone(),
+            secret_id: prepared.secret_id().as_canonical_string(),
+            version: i32::try_from(prepared.version().get())?,
+            ciphertext: format!("\\x{}", hex::encode(prepared.ciphertext().as_bytes())),
+            encrypted_data_key: format!(
+                "\\x{}",
+                hex::encode(prepared.encrypted_data_key().as_bytes())
+            ),
+            key_version: i32::try_from(prepared.key_version().get())?,
+            algorithm: crate::ALGORITHM_XCHACHA20_POLY1305.to_owned(),
+            nonce_or_iv: format!("\\x{}", hex::encode(prepared.nonce_or_iv().as_bytes())),
+            aad_context: prepared.aad_context().clone(),
+            created_by_user_id: OWNER_USER_ID.to_owned(),
+            created_at: prepared.created_at().as_rfc3339_utc()?,
+            secrets: SecretReadJoin {
+                current_version_id: version_id,
+                owner_user_id: prepared.owner_user_id().as_canonical_string(),
+                classification: prepared.classification().as_str().to_owned(),
+            },
+        };
+
+        Ok((master_key, handlers::parse_decrypt_row(row)?))
+    }
+
+    #[test]
+    fn restore_test_metadata_records_no_sample_reason_without_forbidden_keys() {
+        let metadata = restore_test_metadata(0, Some("no_current_secret_versions"));
+
+        assert_eq!(
+            metadata.as_value(),
+            &json!({
+                "sample_count": 0,
+                "reason": "no_current_secret_versions",
+            })
+        );
+    }
+
+    #[test]
+    fn restore_test_metadata_records_failure_code_without_forbidden_keys() {
+        let metadata = restore_test_metadata(1, Some("decrypt_failed"));
+
+        assert_eq!(
+            metadata.as_value(),
+            &json!({
+                "sample_count": 1,
+                "error_code": "decrypt_failed",
+            })
+        );
+    }
+
+    #[test]
+    fn restore_test_input_round_trips_existing_encrypted_sample()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let plaintext = b"restore test sample".to_vec();
+        let (master_key, row) = prepared_row(plaintext.clone())?;
+        let input = build_restore_test_decrypt_input(row);
+
+        let decrypted = decrypt_current_secret_version(&master_key, input)?;
+
+        assert_eq!(decrypted.as_bytes(), plaintext.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::Error>> {
+        let (master_key, mut row) = prepared_row(b"restore test sample".to_vec())?;
+        row.aad_context = json!({
+            "aad_version": 1,
+            "secret_id": row.secret_id.as_canonical_string(),
+            "version": row.version.get(),
+            "owner_user_id": row.owner_user_id.as_canonical_string(),
+            "classification": "tampered",
+            "created_at": row.created_at.as_rfc3339_utc()?,
+        });
+        let input = build_restore_test_decrypt_input(row);
+
+        let result = decrypt_current_secret_version(&master_key, input);
+
+        assert!(matches!(
+            result,
+            Err(SecretDecryptError::Integrity(
+                crate::DecryptIntegrityError::AadContextMismatch
+            ))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn restore_test_input_rejects_ciphertext_tampering() -> Result<(), Box<dyn std::error::Error>> {
+        let (master_key, mut row) = prepared_row(b"restore test sample".to_vec())?;
+        let mut bytes = row.ciphertext.as_bytes().to_vec();
+        let first = bytes
+            .first_mut()
+            .ok_or(crate::CryptoError::DecryptionFailed)?;
+        *first ^= 1;
+        row.ciphertext = crate::Ciphertext::new(bytes)?;
+        let input = build_restore_test_decrypt_input(row);
+
+        let result = decrypt_current_secret_version(&master_key, input);
+
+        assert!(matches!(
+            result,
+            Err(SecretDecryptError::Crypto(
+                crate::CryptoError::DecryptionFailed
+            ))
+        ));
+        Ok(())
     }
 }

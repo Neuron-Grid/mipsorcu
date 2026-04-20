@@ -9,6 +9,7 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_AUDIT_FALLBACK_PATH: &str = "/var/lib/mipsorcu/audit_fallback.jsonl";
 const DEFAULT_AUDIT_RESEND_INTERVAL_SECONDS: u64 = 60;
 const DEFAULT_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_RESTORE_TEST_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 
 const ENV_LISTEN_ADDR: &str = "MIPSORCU_LISTEN_ADDR";
 const ENV_MASTER_KEY: &str = "MIPSORCU_MASTER_KEY";
@@ -23,6 +24,7 @@ const ENV_AUDIT_FALLBACK_PATH: &str = "MIPSORCU_AUDIT_FALLBACK_PATH";
 const ENV_AUDIT_RESEND_INTERVAL_SECONDS: &str = "MIPSORCU_AUDIT_RESEND_INTERVAL_SECONDS";
 const ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: &str =
     "MIPSORCU_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES";
+const ENV_RESTORE_TEST_INTERVAL_SECONDS: &str = "MIPSORCU_RESTORE_TEST_INTERVAL_SECONDS";
 
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
@@ -37,6 +39,7 @@ pub struct AppConfig {
     pub audit_fallback_path: PathBuf,
     pub audit_resend_interval: Duration,
     pub audit_fallback_alert_threshold_bytes: u64,
+    pub restore_test_interval: Duration,
 }
 
 impl fmt::Debug for AppConfig {
@@ -60,6 +63,10 @@ impl fmt::Debug for AppConfig {
             .field(
                 "audit_fallback_alert_threshold_bytes",
                 &self.audit_fallback_alert_threshold_bytes,
+            )
+            .field(
+                "restore_test_interval_seconds",
+                &self.restore_test_interval.as_secs(),
             )
             .finish()
     }
@@ -143,6 +150,8 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
     let audit_fallback_alert_threshold_bytes = parse_audit_fallback_alert_threshold(
         std::env::var(ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES).ok(),
     )?;
+    let restore_test_interval =
+        parse_restore_test_interval(std::env::var(ENV_RESTORE_TEST_INTERVAL_SECONDS).ok())?;
 
     Ok(AppConfig {
         listen_addr,
@@ -157,6 +166,7 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
         audit_fallback_path,
         audit_resend_interval,
         audit_fallback_alert_threshold_bytes,
+        restore_test_interval,
     })
 }
 
@@ -188,6 +198,15 @@ pub fn parse_audit_fallback_alert_threshold(value: Option<String>) -> Result<u64
         ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES,
         DEFAULT_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES,
     )
+}
+
+pub fn parse_restore_test_interval(value: Option<String>) -> Result<Duration, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_RESTORE_TEST_INTERVAL_SECONDS,
+        DEFAULT_RESTORE_TEST_INTERVAL_SECONDS,
+    )
+    .map(Duration::from_secs)
 }
 
 fn parse_positive_u64_config(

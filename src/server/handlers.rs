@@ -426,17 +426,17 @@ fn current_created_at() -> Result<CreatedAt, ApiError> {
     CreatedAt::parse(&rfc3339).map_err(|error| ApiError::InternalError(error.to_string()))
 }
 
-struct PreparedDecryptRow {
-    secret_id: SecretId,
-    version: SecretVersion,
-    owner_user_id: OwnerUserId,
-    classification: Classification,
-    created_at: CreatedAt,
-    key_version: KeyVersion,
-    encrypted_data_key: EncryptedDataKey,
-    nonce_or_iv: Nonce,
-    ciphertext: Ciphertext,
-    aad_context: serde_json::Value,
+pub(super) struct PreparedDecryptRow {
+    pub(super) secret_id: SecretId,
+    pub(super) version: SecretVersion,
+    pub(super) owner_user_id: OwnerUserId,
+    pub(super) classification: Classification,
+    pub(super) created_at: CreatedAt,
+    pub(super) key_version: KeyVersion,
+    pub(super) encrypted_data_key: EncryptedDataKey,
+    pub(super) nonce_or_iv: Nonce,
+    pub(super) ciphertext: Ciphertext,
+    pub(super) aad_context: serde_json::Value,
 }
 
 struct DecodedSecretVersionBytes {
@@ -482,7 +482,7 @@ async fn fetch_single_current_secret_version(
     }
 }
 
-fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {
+pub(super) fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {
     validate_decrypt_row_invariants(&row)?;
     let decoded = decode_secret_version_bytes(&row)?;
 

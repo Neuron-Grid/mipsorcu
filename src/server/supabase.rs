@@ -113,6 +113,34 @@ impl SupabaseClient {
             .collect())
     }
 
+    pub async fn fetch_restore_test_current_secret_version(
+        &self,
+    ) -> Result<Option<SecretVersionReadRow>, SupabaseRpcError> {
+        let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+        let url = format!(
+            "{}/rest/v1/secret_versions?select={select}&order=created_at.desc&limit=100",
+            self.base_url
+        );
+        let response = self
+            .http_client
+            .get(&url)
+            .header("apikey", &self.service_role_key)
+            .bearer_auth(&self.service_role_key)
+            .send()
+            .await
+            .map_err(SupabaseRpcError::Network)?;
+
+        let rows: Vec<SecretVersionReadRow> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .find(|row| row.secrets.current_version_id == row.id))
+    }
+
     pub async fn check_connectivity(&self) -> bool {
         let url = format!("{}/rest/v1/", self.base_url);
         self.http_client

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use mipsorcu::server::config::{
     AppConfig, ConfigError, parse_audit_fallback_alert_threshold, parse_audit_resend_interval,
+    parse_restore_test_interval,
 };
 use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
 
@@ -70,6 +71,37 @@ fn audit_fallback_alert_threshold_rejects_zero_empty_and_non_numeric_values() {
 }
 
 #[test]
+fn restore_test_interval_defaults_to_twenty_four_hours() {
+    let interval = parse_restore_test_interval(None).expect("default interval should be valid");
+
+    assert_eq!(interval, Duration::from_secs(24 * 60 * 60));
+}
+
+#[test]
+fn restore_test_interval_accepts_positive_seconds() {
+    let interval = parse_restore_test_interval(Some("3600".to_owned()))
+        .expect("positive interval should be valid");
+
+    assert_eq!(interval, Duration::from_secs(3600));
+}
+
+#[test]
+fn restore_test_interval_rejects_zero_empty_and_non_numeric_values() {
+    assert!(matches!(
+        parse_restore_test_interval(Some("0".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_restore_test_interval(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_restore_test_interval(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
 fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     let master_key_bytes = vec![7; MASTER_KEY_LENGTH];
     let config = AppConfig {
@@ -87,12 +119,14 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         audit_fallback_path: PathBuf::from("/tmp/mipsorcu-audit.jsonl"),
         audit_resend_interval: Duration::from_secs(60),
         audit_fallback_alert_threshold_bytes: 4096,
+        restore_test_interval: Duration::from_secs(24 * 60 * 60),
     };
 
     let output = format!("{config:?}");
 
     assert!(output.contains("audit_fallback_alert_threshold_bytes"));
     assert!(output.contains("4096"));
+    assert!(output.contains("restore_test_interval_seconds"));
     assert!(!output.contains("service-role-secret"));
     assert!(!output.contains("publishable-secret"));
     assert!(!output.contains("jwks-secret"));
