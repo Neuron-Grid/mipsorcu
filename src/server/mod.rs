@@ -3,5 +3,6 @@ pub mod dto;
 pub mod errors;
 pub mod handlers;
 pub mod middleware;
+pub mod runtime;
 pub mod state;
 pub mod supabase;
