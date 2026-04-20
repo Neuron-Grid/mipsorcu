@@ -577,7 +577,7 @@ fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
         hasher.update(&buffer[..bytes_read]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn gzip_line_count(path: &Path) -> Result<usize, std::io::Error> {
