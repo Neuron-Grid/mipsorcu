@@ -5,6 +5,7 @@ pub mod authorization;
 pub mod crypto;
 pub mod error;
 pub mod read;
+pub mod server;
 pub mod types;
 pub mod write;
 

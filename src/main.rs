@@ -1,6 +1,4 @@
-mod server;
-
 #[tokio::main]
 async fn main() {
-    server::runtime::run().await;
+    mipsorcu::server::runtime::run().await;
 }

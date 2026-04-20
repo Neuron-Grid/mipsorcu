@@ -3,7 +3,7 @@ use axum::http::request::Parts;
 use http::header::AUTHORIZATION;
 use std::fmt;
 
-use mipsorcu::auth::{RawJwt, VerifiedJwtClaims};
+use crate::auth::{RawJwt, VerifiedJwtClaims};
 
 use super::errors::ApiError;
 use super::state::AppState;

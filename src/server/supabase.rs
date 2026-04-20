@@ -5,8 +5,8 @@ use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use mipsorcu::audit::{AuditAppendError, AuditEvent, AuditEventAppender};
-use mipsorcu::auth::RawJwt;
+use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender};
+use crate::auth::RawJwt;
 
 #[derive(Debug)]
 pub enum SupabaseRpcError {

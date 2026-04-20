@@ -1,12 +1,11 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::audit::{AuditRecordError, AuditRecorder, LocalAuditFallbackStore, ResendAuditSummary};
+use crate::auth::{Jwks, JwtVerifier, JwtVerifierConfig};
 use axum::Router;
 use axum::routing::{get, post};
-use mipsorcu::audit::{
-    AuditRecordError, AuditRecorder, LocalAuditFallbackStore, ResendAuditSummary,
-};
-use mipsorcu::auth::{Jwks, JwtVerifier, JwtVerifierConfig};
 use tokio::sync::watch;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::TraceLayer;
@@ -57,12 +56,16 @@ pub async fn run() {
     let audit_appender = SupabaseAuditAppender::new(supabase_client.clone(), runtime_handle);
     let fallback_store = LocalAuditFallbackStore::new(&config.audit_fallback_path);
     let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store));
+    let audit_fallback_path = config.audit_fallback_path.clone();
     let audit_resend_interval = config.audit_resend_interval;
+    let audit_fallback_alert_threshold_bytes = config.audit_fallback_alert_threshold_bytes;
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let audit_resend_recorder = audit_recorder.clone();
     tokio::spawn(run_audit_resend_loop(
         audit_resend_recorder,
+        audit_fallback_path,
         audit_resend_interval,
+        audit_fallback_alert_threshold_bytes,
         shutdown_receiver,
     ));
 
@@ -119,10 +122,13 @@ async fn shutdown_signal(shutdown_sender: watch::Sender<bool>) {
 
 async fn run_audit_resend_loop(
     audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
+    audit_fallback_path: PathBuf,
     interval_duration: Duration,
+    audit_fallback_alert_threshold_bytes: u64,
     mut shutdown_receiver: watch::Receiver<bool>,
 ) {
     record_audit_resend_result(resend_pending_once(audit_recorder.clone()).await);
+    record_audit_fallback_size_alert(&audit_fallback_path, audit_fallback_alert_threshold_bytes);
 
     let mut interval = tokio::time::interval(interval_duration);
     interval.tick().await;
@@ -137,6 +143,10 @@ async fn run_audit_resend_loop(
             }
             _ = interval.tick() => {
                 record_audit_resend_result(resend_pending_once(audit_recorder.clone()).await);
+                record_audit_fallback_size_alert(
+                    &audit_fallback_path,
+                    audit_fallback_alert_threshold_bytes,
+                );
             }
         }
     }
@@ -176,5 +186,64 @@ fn audit_record_error_kind(error: &AuditRecordError) -> &'static str {
         AuditRecordError::FallbackWriteFailed { .. } => "fallback_write_failed",
         AuditRecordError::ResendReadFailed(_) => "resend_read_failed",
         AuditRecordError::ResendMarkSentFailed(_) => "resend_mark_sent_failed",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditFallbackSizeAlert {
+    pub size_bytes: u64,
+    pub threshold_bytes: u64,
+}
+
+pub fn audit_fallback_size_alert(
+    path: &Path,
+    threshold_bytes: u64,
+) -> Result<Option<AuditFallbackSizeAlert>, std::io::Error> {
+    let Some(size_bytes) = audit_fallback_file_size(path)? else {
+        return Ok(None);
+    };
+
+    if size_bytes >= threshold_bytes {
+        Ok(Some(AuditFallbackSizeAlert {
+            size_bytes,
+            threshold_bytes,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn audit_fallback_file_size(path: &Path) -> Result<Option<u64>, std::io::Error> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_file() {
+                Ok(Some(metadata.len()))
+            } else {
+                Ok(None)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn record_audit_fallback_size_alert(path: &Path, threshold_bytes: u64) {
+    match audit_fallback_size_alert(path, threshold_bytes) {
+        Ok(Some(alert)) => {
+            tracing::warn!(
+                path = %path.display(),
+                size_bytes = alert.size_bytes,
+                threshold_bytes = alert.threshold_bytes,
+                "audit fallback log size threshold exceeded"
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                error_kind = ?error.kind(),
+                "audit fallback log size check failed"
+            );
+        }
     }
 }

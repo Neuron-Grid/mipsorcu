@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::fmt;
 
-use mipsorcu::error::{JwtVerificationError, SecretDecryptError, SecretWriteError};
+use crate::error::{JwtVerificationError, SecretDecryptError, SecretWriteError};
 
 use super::dto::ApiErrorResponse;
 use super::supabase::SupabaseRpcError;

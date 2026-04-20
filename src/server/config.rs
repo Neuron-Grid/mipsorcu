@@ -3,11 +3,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use mipsorcu::types::{KeyVersion, MasterKey};
+use crate::types::{KeyVersion, MasterKey};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_AUDIT_FALLBACK_PATH: &str = "/var/lib/mipsorcu/audit_fallback.jsonl";
 const DEFAULT_AUDIT_RESEND_INTERVAL_SECONDS: u64 = 60;
+const DEFAULT_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 
 const ENV_LISTEN_ADDR: &str = "MIPSORCU_LISTEN_ADDR";
 const ENV_MASTER_KEY: &str = "MIPSORCU_MASTER_KEY";
@@ -20,6 +21,8 @@ const ENV_JWT_AUDIENCE: &str = "MIPSORCU_JWT_AUDIENCE";
 const ENV_JWKS_JSON: &str = "MIPSORCU_JWKS_JSON";
 const ENV_AUDIT_FALLBACK_PATH: &str = "MIPSORCU_AUDIT_FALLBACK_PATH";
 const ENV_AUDIT_RESEND_INTERVAL_SECONDS: &str = "MIPSORCU_AUDIT_RESEND_INTERVAL_SECONDS";
+const ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: &str =
+    "MIPSORCU_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES";
 
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
@@ -33,6 +36,7 @@ pub struct AppConfig {
     pub jwks_json: String,
     pub audit_fallback_path: PathBuf,
     pub audit_resend_interval: Duration,
+    pub audit_fallback_alert_threshold_bytes: u64,
 }
 
 impl fmt::Debug for AppConfig {
@@ -52,6 +56,10 @@ impl fmt::Debug for AppConfig {
             .field(
                 "audit_resend_interval_seconds",
                 &self.audit_resend_interval.as_secs(),
+            )
+            .field(
+                "audit_fallback_alert_threshold_bytes",
+                &self.audit_fallback_alert_threshold_bytes,
             )
             .finish()
     }
@@ -132,6 +140,9 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
     );
     let audit_resend_interval =
         parse_audit_resend_interval(std::env::var(ENV_AUDIT_RESEND_INTERVAL_SECONDS).ok())?;
+    let audit_fallback_alert_threshold_bytes = parse_audit_fallback_alert_threshold(
+        std::env::var(ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES).ok(),
+    )?;
 
     Ok(AppConfig {
         listen_addr,
@@ -145,10 +156,11 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
         jwks_json,
         audit_fallback_path,
         audit_resend_interval,
+        audit_fallback_alert_threshold_bytes,
     })
 }
 
-fn parse_audit_resend_interval(value: Option<String>) -> Result<Duration, ConfigError> {
+pub fn parse_audit_resend_interval(value: Option<String>) -> Result<Duration, ConfigError> {
     let Some(value) = value else {
         return Ok(Duration::from_secs(DEFAULT_AUDIT_RESEND_INTERVAL_SECONDS));
     };
@@ -170,6 +182,40 @@ fn parse_audit_resend_interval(value: Option<String>) -> Result<Duration, Config
     Ok(Duration::from_secs(seconds))
 }
 
+pub fn parse_audit_fallback_alert_threshold(value: Option<String>) -> Result<u64, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES,
+        DEFAULT_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES,
+    )
+}
+
+fn parse_positive_u64_config(
+    value: Option<String>,
+    name: &'static str,
+    default_value: u64,
+) -> Result<u64, ConfigError> {
+    let Some(value) = value else {
+        return Ok(default_value);
+    };
+
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|error| ConfigError::InvalidValue {
+            name,
+            reason: error.to_string(),
+        })?;
+
+    if parsed == 0 {
+        return Err(ConfigError::InvalidValue {
+            name,
+            reason: "value must be greater than zero".to_owned(),
+        });
+    }
+
+    Ok(parsed)
+}
+
 fn required_var(name: &'static str) -> Result<String, ConfigError> {
     let value = std::env::var(name).map_err(|_| ConfigError::MissingVar { name })?;
     if value.trim().is_empty() {
@@ -183,40 +229,4 @@ fn required_var(name: &'static str) -> Result<String, ConfigError> {
 
 fn optional_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn audit_resend_interval_defaults_to_sixty_seconds() {
-        let interval = parse_audit_resend_interval(None).expect("default interval should be valid");
-
-        assert_eq!(interval, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn audit_resend_interval_accepts_positive_seconds() {
-        let interval = parse_audit_resend_interval(Some("30".to_owned()))
-            .expect("positive interval should be valid");
-
-        assert_eq!(interval, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn audit_resend_interval_rejects_zero_empty_and_non_numeric_values() {
-        assert!(matches!(
-            parse_audit_resend_interval(Some("0".to_owned())),
-            Err(ConfigError::InvalidValue { .. })
-        ));
-        assert!(matches!(
-            parse_audit_resend_interval(Some(String::new())),
-            Err(ConfigError::InvalidValue { .. })
-        ));
-        assert!(matches!(
-            parse_audit_resend_interval(Some("not-a-number".to_owned())),
-            Err(ConfigError::InvalidValue { .. })
-        ));
-    }
 }

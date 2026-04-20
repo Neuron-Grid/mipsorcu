@@ -5,19 +5,19 @@ use std::path::Path;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use mipsorcu::audit::{
+use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
 };
-use mipsorcu::auth::{RawJwt, VerifiedJwtClaims};
-use mipsorcu::authorize_existing_secret_version_write;
-use mipsorcu::crypto::ALGORITHM_XCHACHA20_POLY1305;
-use mipsorcu::decrypt_current_secret_version;
-use mipsorcu::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
-use mipsorcu::types::{
+use crate::auth::{RawJwt, VerifiedJwtClaims};
+use crate::authorize_existing_secret_version_write;
+use crate::crypto::ALGORITHM_XCHACHA20_POLY1305;
+use crate::decrypt_current_secret_version;
+use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
+use crate::types::{
     Ciphertext, Classification, CreatedAt, DeviceId, EncryptedDataKey, KeyVersion, Nonce,
     OwnerUserId, Plaintext, SecretId, SecretVersion,
 };
-use mipsorcu::write::{
+use crate::write::{
     CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,
     PreparedSecretVersion, prepare_existing_secret_version, prepare_new_secret_version,
 };
@@ -802,7 +802,7 @@ mod tests {
         assert_eq!(current.key_version().get(), 1);
         assert_eq!(
             current.encrypted_data_key().as_bytes().len(),
-            mipsorcu::ENCRYPTED_DATA_KEY_LENGTH
+            crate::ENCRYPTED_DATA_KEY_LENGTH
         );
         assert_eq!(current.encrypted_data_key().version(), 1);
     }

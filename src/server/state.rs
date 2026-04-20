@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mipsorcu::audit::AuditRecorder;
-use mipsorcu::auth::JwtVerifier;
-use mipsorcu::types::{KeyVersion, MasterKey};
+use crate::audit::AuditRecorder;
+use crate::auth::JwtVerifier;
+use crate::types::{KeyVersion, MasterKey};
 
 use super::supabase::{SupabaseAuditAppender, SupabaseClient};
 
