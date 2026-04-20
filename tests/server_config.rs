@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use mipsorcu::server::config::{
     AppConfig, ConfigError, parse_audit_fallback_alert_threshold, parse_audit_resend_interval,
-    parse_restore_test_interval,
+    parse_jwks_refresh_interval, parse_restore_test_interval,
 };
 use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
 
@@ -102,6 +102,37 @@ fn restore_test_interval_rejects_zero_empty_and_non_numeric_values() {
 }
 
 #[test]
+fn jwks_refresh_interval_defaults_to_sixty_minutes() {
+    let interval = parse_jwks_refresh_interval(None).expect("default interval should be valid");
+
+    assert_eq!(interval, Duration::from_secs(60 * 60));
+}
+
+#[test]
+fn jwks_refresh_interval_accepts_positive_seconds() {
+    let interval = parse_jwks_refresh_interval(Some("300".to_owned()))
+        .expect("positive interval should be valid");
+
+    assert_eq!(interval, Duration::from_secs(300));
+}
+
+#[test]
+fn jwks_refresh_interval_rejects_zero_empty_and_non_numeric_values() {
+    assert!(matches!(
+        parse_jwks_refresh_interval(Some("0".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_jwks_refresh_interval(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_jwks_refresh_interval(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
 fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     let master_key_bytes = vec![7; MASTER_KEY_LENGTH];
     let config = AppConfig {
@@ -115,7 +146,8 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         supabase_publishable_key: "publishable-secret".to_owned(),
         jwt_issuer: "issuer".to_owned(),
         jwt_audience: "audience".to_owned(),
-        jwks_json: "jwks-secret".to_owned(),
+        jwks_url: "https://example.supabase.co/auth/v1/.well-known/jwks.json".to_owned(),
+        jwks_refresh_interval: Duration::from_secs(300),
         audit_fallback_path: PathBuf::from("/tmp/mipsorcu-audit.jsonl"),
         audit_resend_interval: Duration::from_secs(60),
         audit_fallback_alert_threshold_bytes: 4096,
@@ -127,7 +159,9 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("audit_fallback_alert_threshold_bytes"));
     assert!(output.contains("4096"));
     assert!(output.contains("restore_test_interval_seconds"));
+    assert!(output.contains("jwks_url"));
+    assert!(output.contains("jwks_refresh_interval_seconds"));
+    assert!(output.contains("300"));
     assert!(!output.contains("service-role-secret"));
     assert!(!output.contains("publishable-secret"));
-    assert!(!output.contains("jwks-secret"));
 }

@@ -15,7 +15,10 @@ pub use audit::{
     AuditEventParts, AuditMetadata, AuditRecordError, AuditRecorder, AuditResult,
     LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
 };
-pub use auth::{Jwk, Jwks, JwtVerifier, JwtVerifierConfig, RawJwt, VerifiedJwtClaims};
+pub use auth::{
+    Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,
+    VerifiedJwtClaims, fetch_jwks,
+};
 pub use authorization::{
     authorize_current_version_decrypt, authorize_existing_secret_version_write,
 };

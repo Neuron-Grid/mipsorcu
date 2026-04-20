@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::{Arc, RwLock};
 
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -47,6 +48,10 @@ impl Jwks {
             return Err(JwtVerificationError::InvalidJwks);
         }
 
+        for key in &keys {
+            key.validate_for_rs256()?;
+        }
+
         Ok(Self { keys })
     }
 
@@ -64,6 +69,103 @@ impl Jwks {
                 Ok(key)
             })
     }
+}
+
+#[derive(Clone)]
+pub struct JwksCache {
+    inner: Arc<RwLock<Jwks>>,
+}
+
+impl JwksCache {
+    pub fn new(jwks: Jwks) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(jwks)),
+        }
+    }
+
+    pub fn snapshot(&self) -> Result<Jwks, JwtVerificationError> {
+        self.inner
+            .read()
+            .map(|guard| guard.clone())
+            .map_err(|_| JwtVerificationError::InvalidJwks)
+    }
+
+    pub fn replace(&self, jwks: Jwks) -> Result<(), JwtVerificationError> {
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|_| JwtVerificationError::InvalidJwks)?;
+        *guard = jwks;
+        Ok(())
+    }
+}
+
+impl fmt::Debug for JwksCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.snapshot() {
+            Ok(jwks) => formatter
+                .debug_struct("JwksCache")
+                .field("key_count", &jwks.keys().len())
+                .finish(),
+            Err(_) => formatter
+                .debug_struct("JwksCache")
+                .field("state", &"unavailable")
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum JwksFetchError {
+    Network(reqwest::Error),
+    NonSuccessStatus { status: u16 },
+    InvalidResponse(String),
+    InvalidJwks(JwtVerificationError),
+}
+
+impl fmt::Display for JwksFetchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Network(error) => write!(formatter, "jwks fetch network error: {error}"),
+            Self::NonSuccessStatus { status } => {
+                write!(formatter, "jwks endpoint returned status {status}")
+            }
+            Self::InvalidResponse(message) => {
+                write!(
+                    formatter,
+                    "jwks endpoint returned invalid response: {message}"
+                )
+            }
+            Self::InvalidJwks(error) => write!(formatter, "jwks validation failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for JwksFetchError {}
+
+pub async fn fetch_jwks(
+    http_client: &reqwest::Client,
+    jwks_url: &str,
+) -> Result<Jwks, JwksFetchError> {
+    let response = http_client
+        .get(jwks_url)
+        .send()
+        .await
+        .map_err(JwksFetchError::Network)?;
+    let status = response.status();
+
+    if !status.is_success() {
+        return Err(JwksFetchError::NonSuccessStatus {
+            status: status.as_u16(),
+        });
+    }
+
+    let jwks = response
+        .json::<Jwks>()
+        .await
+        .map_err(|error| JwksFetchError::InvalidResponse(error.to_string()))?;
+
+    Jwks::new(jwks.keys).map_err(JwksFetchError::InvalidJwks)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -170,15 +272,23 @@ impl JwtVerifierConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct JwtVerifier {
     config: JwtVerifierConfig,
-    jwks: Jwks,
+    jwks_cache: JwksCache,
 }
 
 impl JwtVerifier {
     pub fn new(config: JwtVerifierConfig, jwks: Jwks) -> Self {
-        Self { config, jwks }
+        Self::with_cache(config, JwksCache::new(jwks))
+    }
+
+    pub fn with_cache(config: JwtVerifierConfig, jwks_cache: JwksCache) -> Self {
+        Self { config, jwks_cache }
+    }
+
+    pub fn jwks_cache(&self) -> JwksCache {
+        self.jwks_cache.clone()
     }
 
     pub fn verify(&self, raw_jwt: &RawJwt) -> Result<VerifiedJwtClaims, JwtVerificationError> {
@@ -189,7 +299,8 @@ impl JwtVerifier {
         }
 
         let key_id = header.kid.ok_or(JwtVerificationError::MissingKeyId)?;
-        let jwk = self.jwks.find_signing_key(&key_id)?;
+        let jwks = self.jwks_cache.snapshot()?;
+        let jwk = jwks.find_signing_key(&key_id)?;
         let decoding_key = jwk.decoding_key()?;
         let mut validation = Validation::new(SUPPORTED_JWT_ALGORITHM);
         validation.set_issuer(&[self.config.issuer.as_str()]);

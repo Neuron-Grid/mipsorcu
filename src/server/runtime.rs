@@ -6,7 +6,9 @@ use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
     AuditRecorder, AuditResult, LocalAuditFallbackStore, RequestId, ResendAuditSummary,
 };
-use crate::auth::{Jwks, JwtVerifier, JwtVerifierConfig, VerifiedJwtClaims};
+use crate::auth::{
+    JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, VerifiedJwtClaims, fetch_jwks,
+};
 use crate::decrypt_current_secret_version;
 use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
 use axum::Router;
@@ -38,10 +40,18 @@ pub async fn run() {
     let listen_addr = config.listen_addr;
     tracing::info!(listen_addr = %listen_addr, "starting mipsorcu");
 
-    let jwks: Jwks = serde_json::from_str(&config.jwks_json).unwrap_or_else(|error| {
-        tracing::error!(error = %error, "JWKS parsing failed");
-        std::process::exit(1);
-    });
+    let http_client = reqwest::Client::new();
+    let jwks = fetch_jwks(&http_client, &config.jwks_url)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(
+                jwks_url = %config.jwks_url,
+                error_kind = jwks_fetch_error_kind(&error),
+                "configuration JWKS loading failed"
+            );
+            std::process::exit(1);
+        });
+    let jwks_cache = JwksCache::new(jwks);
 
     let jwt_config = JwtVerifierConfig::new(&config.jwt_issuer, &config.jwt_audience)
         .unwrap_or_else(|error| {
@@ -49,9 +59,20 @@ pub async fn run() {
             std::process::exit(1);
         });
 
-    let jwt_verifier = Arc::new(JwtVerifier::new(jwt_config, jwks));
+    let jwt_verifier = Arc::new(JwtVerifier::with_cache(jwt_config, jwks_cache.clone()));
 
-    let http_client = reqwest::Client::new();
+    let jwks_refresh_http_client = http_client.clone();
+    let jwks_refresh_url = config.jwks_url.clone();
+    let jwks_refresh_interval = config.jwks_refresh_interval;
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    tokio::spawn(run_jwks_refresh_loop(
+        jwks_cache,
+        jwks_refresh_http_client,
+        jwks_refresh_url,
+        jwks_refresh_interval,
+        shutdown_sender.subscribe(),
+    ));
+
     let supabase_client = Arc::new(SupabaseClient::new(
         http_client,
         config.supabase_url,
@@ -67,7 +88,6 @@ pub async fn run() {
     let audit_resend_interval = config.audit_resend_interval;
     let audit_fallback_alert_threshold_bytes = config.audit_fallback_alert_threshold_bytes;
     let restore_test_interval = config.restore_test_interval;
-    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let audit_resend_recorder = audit_recorder.clone();
     tokio::spawn(run_audit_resend_loop(
         audit_resend_recorder,
@@ -92,6 +112,14 @@ pub async fn run() {
         shutdown_sender.subscribe(),
     ));
 
+    serve_app(state, listen_addr, shutdown_sender).await;
+}
+
+async fn serve_app(
+    state: AppState,
+    listen_addr: std::net::SocketAddr,
+    shutdown_sender: watch::Sender<bool>,
+) {
     let app = Router::new()
         .route("/v1/secrets", post(handlers::create_secret))
         .route(
@@ -126,6 +154,92 @@ pub async fn run() {
             tracing::error!(error = %error, "server error");
             std::process::exit(1);
         });
+}
+
+pub async fn initialize_jwt_verifier_from_jwks_url(
+    http_client: &reqwest::Client,
+    jwks_url: &str,
+    jwt_issuer: &str,
+    jwt_audience: &str,
+) -> Result<JwtVerifier, JwtVerifierInitError> {
+    let jwks = fetch_jwks(http_client, jwks_url)
+        .await
+        .map_err(JwtVerifierInitError::Fetch)?;
+    let jwt_config =
+        JwtVerifierConfig::new(jwt_issuer, jwt_audience).map_err(JwtVerifierInitError::Config)?;
+
+    Ok(JwtVerifier::with_cache(jwt_config, JwksCache::new(jwks)))
+}
+
+#[derive(Debug)]
+pub enum JwtVerifierInitError {
+    Fetch(JwksFetchError),
+    Config(crate::JwtVerificationError),
+}
+
+impl std::fmt::Display for JwtVerifierInitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fetch(error) => write!(formatter, "JWKS loading failed: {error}"),
+            Self::Config(error) => write!(formatter, "JWT verifier config is invalid: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for JwtVerifierInitError {}
+
+pub async fn refresh_jwks_cache_once(
+    cache: &JwksCache,
+    http_client: &reqwest::Client,
+    jwks_url: &str,
+) -> Result<(), JwksFetchError> {
+    let jwks = fetch_jwks(http_client, jwks_url).await?;
+    cache.replace(jwks).map_err(JwksFetchError::InvalidJwks)
+}
+
+async fn run_jwks_refresh_loop(
+    cache: JwksCache,
+    http_client: reqwest::Client,
+    jwks_url: String,
+    interval_duration: Duration,
+    mut shutdown_receiver: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(interval_duration);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            result = shutdown_receiver.changed() => {
+                if result.is_err() || *shutdown_receiver.borrow() {
+                    tracing::info!("JWKS refresh loop stopped");
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                match refresh_jwks_cache_once(&cache, &http_client, &jwks_url).await {
+                    Ok(()) => {
+                        tracing::info!(jwks_url = %jwks_url, "JWKS cache refreshed");
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            jwks_url = %jwks_url,
+                            error_kind = jwks_fetch_error_kind(&error),
+                            "JWKS cache refresh failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn jwks_fetch_error_kind(error: &JwksFetchError) -> &'static str {
+    match error {
+        JwksFetchError::Network(_) => "network",
+        JwksFetchError::NonSuccessStatus { .. } => "non_success_status",
+        JwksFetchError::InvalidResponse(_) => "invalid_response",
+        JwksFetchError::InvalidJwks(_) => "invalid_jwks",
+    }
 }
 
 async fn run_restore_test_loop(
@@ -695,5 +809,37 @@ mod tests {
             ))
         ));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn jwks_refresh_loop_stops_on_shutdown_signal() {
+        let jwks = crate::Jwks::new(vec![crate::Jwk::new(
+            "RSA",
+            "test-key",
+            Some("RS256".to_owned()),
+            Some("sig".to_owned()),
+            "abc",
+            "AQAB",
+        )])
+        .expect("test JWKS should be valid");
+        let cache = JwksCache::new(jwks);
+        let client = reqwest::Client::new();
+        let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+        let task = tokio::spawn(run_jwks_refresh_loop(
+            cache,
+            client,
+            "http://127.0.0.1:1/jwks".to_owned(),
+            Duration::from_secs(60),
+            shutdown_receiver,
+        ));
+
+        shutdown_sender
+            .send(true)
+            .expect("shutdown signal should send");
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("JWKS refresh loop should stop promptly")
+            .expect("JWKS refresh loop task should not panic");
     }
 }

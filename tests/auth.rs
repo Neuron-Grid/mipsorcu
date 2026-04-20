@@ -2,7 +2,8 @@ use std::error::Error;
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mipsorcu::{
-    Jwk, Jwks, JwtVerificationError, JwtVerifier, JwtVerifierConfig, OwnerUserId, RawJwt,
+    Jwk, Jwks, JwksCache, JwksFetchError, JwtVerificationError, JwtVerifier, JwtVerifierConfig,
+    OwnerUserId, RawJwt,
 };
 use serde::Serialize;
 
@@ -279,4 +280,80 @@ fn verifier_rejects_invalid_subject() -> TestResult<()> {
     assert!(matches!(result, Err(JwtVerificationError::InvalidSubject)));
 
     Ok(())
+}
+
+#[test]
+fn verifier_uses_updated_jwks_cache() -> TestResult<()> {
+    let cache = JwksCache::new(jwks_with_key_id(KEY_ID)?);
+    let verifier =
+        JwtVerifier::with_cache(JwtVerifierConfig::new(ISSUER, AUDIENCE)?, cache.clone());
+    let new_key_token = signed_token_with_key_id(
+        Some(OTHER_KEY_ID),
+        Algorithm::RS256,
+        claims(SUBJECT_USER_ID, ISSUER, AUDIENCE, 4_102_444_800),
+    )?;
+    let raw_jwt = RawJwt::new(&new_key_token)?;
+
+    let before_update = verifier.verify(&raw_jwt);
+    assert!(matches!(
+        before_update,
+        Err(JwtVerificationError::KeyNotFound)
+    ));
+
+    cache.replace(jwks_with_key_id(OTHER_KEY_ID)?)?;
+    let verified = verifier.verify(&raw_jwt)?;
+
+    assert_eq!(
+        verified.subject_user_id(),
+        &OwnerUserId::parse(SUBJECT_USER_ID)?
+    );
+
+    Ok(())
+}
+
+#[test]
+fn jwks_new_rejects_empty_and_invalid_keys() -> TestResult<()> {
+    assert!(matches!(
+        Jwks::new(Vec::new()),
+        Err(JwtVerificationError::InvalidJwks)
+    ));
+
+    let invalid_key = Jwk::new(
+        "oct",
+        KEY_ID,
+        Some("RS256".to_owned()),
+        Some("sig".to_owned()),
+        RSA_MODULUS,
+        RSA_EXPONENT,
+    );
+
+    assert!(matches!(
+        Jwks::new(vec![invalid_key]),
+        Err(JwtVerificationError::InvalidJwks)
+    ));
+
+    let invalid_algorithm = Jwk::new(
+        "RSA",
+        KEY_ID,
+        Some("RS384".to_owned()),
+        Some("sig".to_owned()),
+        RSA_MODULUS,
+        RSA_EXPONENT,
+    );
+
+    assert!(matches!(
+        Jwks::new(vec![invalid_algorithm]),
+        Err(JwtVerificationError::UnsupportedAlgorithm)
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn jwks_fetch_error_display_does_not_expose_response_body() {
+    let error = JwksFetchError::NonSuccessStatus { status: 500 };
+    let rendered = error.to_string();
+
+    assert!(rendered.contains("status 500"));
+    assert!(!rendered.contains("upstream secret"));
 }

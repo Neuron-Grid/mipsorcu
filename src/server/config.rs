@@ -10,6 +10,7 @@ const DEFAULT_AUDIT_FALLBACK_PATH: &str = "/var/lib/mipsorcu/audit_fallback.json
 const DEFAULT_AUDIT_RESEND_INTERVAL_SECONDS: u64 = 60;
 const DEFAULT_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_RESTORE_TEST_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const DEFAULT_JWKS_REFRESH_INTERVAL_SECONDS: u64 = 60 * 60;
 
 const ENV_LISTEN_ADDR: &str = "MIPSORCU_LISTEN_ADDR";
 const ENV_MASTER_KEY: &str = "MIPSORCU_MASTER_KEY";
@@ -19,12 +20,13 @@ const ENV_SUPABASE_SERVICE_ROLE_KEY: &str = "MIPSORCU_SUPABASE_SERVICE_ROLE_KEY"
 const ENV_SUPABASE_PUBLISHABLE_KEY: &str = "MIPSORCU_SUPABASE_PUBLISHABLE_KEY";
 const ENV_JWT_ISSUER: &str = "MIPSORCU_JWT_ISSUER";
 const ENV_JWT_AUDIENCE: &str = "MIPSORCU_JWT_AUDIENCE";
-const ENV_JWKS_JSON: &str = "MIPSORCU_JWKS_JSON";
+const ENV_JWKS_URL: &str = "MIPSORCU_JWKS_URL";
 const ENV_AUDIT_FALLBACK_PATH: &str = "MIPSORCU_AUDIT_FALLBACK_PATH";
 const ENV_AUDIT_RESEND_INTERVAL_SECONDS: &str = "MIPSORCU_AUDIT_RESEND_INTERVAL_SECONDS";
 const ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: &str =
     "MIPSORCU_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES";
 const ENV_RESTORE_TEST_INTERVAL_SECONDS: &str = "MIPSORCU_RESTORE_TEST_INTERVAL_SECONDS";
+const ENV_JWKS_REFRESH_INTERVAL_SECONDS: &str = "MIPSORCU_JWKS_REFRESH_INTERVAL_SECONDS";
 
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
@@ -35,7 +37,8 @@ pub struct AppConfig {
     pub supabase_publishable_key: String,
     pub jwt_issuer: String,
     pub jwt_audience: String,
-    pub jwks_json: String,
+    pub jwks_url: String,
+    pub jwks_refresh_interval: Duration,
     pub audit_fallback_path: PathBuf,
     pub audit_resend_interval: Duration,
     pub audit_fallback_alert_threshold_bytes: u64,
@@ -54,7 +57,11 @@ impl fmt::Debug for AppConfig {
             .field("supabase_publishable_key", &"<redacted>")
             .field("jwt_issuer", &self.jwt_issuer)
             .field("jwt_audience", &self.jwt_audience)
-            .field("jwks_json", &"<redacted>")
+            .field("jwks_url", &self.jwks_url)
+            .field(
+                "jwks_refresh_interval_seconds",
+                &self.jwks_refresh_interval.as_secs(),
+            )
             .field("audit_fallback_path", &self.audit_fallback_path)
             .field(
                 "audit_resend_interval_seconds",
@@ -139,7 +146,9 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
     let supabase_publishable_key = required_var(ENV_SUPABASE_PUBLISHABLE_KEY)?;
     let jwt_issuer = required_var(ENV_JWT_ISSUER)?;
     let jwt_audience = required_var(ENV_JWT_AUDIENCE)?;
-    let jwks_json = required_var(ENV_JWKS_JSON)?;
+    let jwks_url = required_var(ENV_JWKS_URL)?;
+    let jwks_refresh_interval =
+        parse_jwks_refresh_interval(std::env::var(ENV_JWKS_REFRESH_INTERVAL_SECONDS).ok())?;
 
     let audit_fallback_path = PathBuf::from(
         optional_var(ENV_AUDIT_FALLBACK_PATH)
@@ -162,7 +171,8 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
         supabase_publishable_key,
         jwt_issuer,
         jwt_audience,
-        jwks_json,
+        jwks_url,
+        jwks_refresh_interval,
         audit_fallback_path,
         audit_resend_interval,
         audit_fallback_alert_threshold_bytes,
@@ -205,6 +215,15 @@ pub fn parse_restore_test_interval(value: Option<String>) -> Result<Duration, Co
         value,
         ENV_RESTORE_TEST_INTERVAL_SECONDS,
         DEFAULT_RESTORE_TEST_INTERVAL_SECONDS,
+    )
+    .map(Duration::from_secs)
+}
+
+pub fn parse_jwks_refresh_interval(value: Option<String>) -> Result<Duration, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_JWKS_REFRESH_INTERVAL_SECONDS,
+        DEFAULT_JWKS_REFRESH_INTERVAL_SECONDS,
     )
     .map(Duration::from_secs)
 }
