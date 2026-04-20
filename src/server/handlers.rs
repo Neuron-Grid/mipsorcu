@@ -469,13 +469,23 @@ async fn fetch_single_current_secret_version(
         .await
         .map_err(ApiError::from)?;
 
-    match rows.len() {
+    select_single_current_secret_version_row(rows).and_then(parse_decrypt_row)
+}
+
+fn select_single_current_secret_version_row(
+    rows: Vec<SecretVersionReadRow>,
+) -> Result<SecretVersionReadRow, ApiError> {
+    let current_rows = rows
+        .into_iter()
+        .filter(|row| row.secrets.current_version_id == row.id)
+        .collect::<Vec<_>>();
+
+    match current_rows.len() {
         0 => Err(ApiError::NotFound("secret not found".to_owned())),
-        1 => rows
+        1 => current_rows
             .into_iter()
             .next()
-            .ok_or_else(|| ApiError::InternalInvariantViolation("missing read row".to_owned()))
-            .and_then(parse_decrypt_row),
+            .ok_or_else(|| ApiError::InternalInvariantViolation("missing read row".to_owned())),
         count => Err(ApiError::InternalInvariantViolation(format!(
             "expected one current secret version row, got {count}"
         ))),
@@ -505,6 +515,10 @@ pub(super) fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDec
 
 fn validate_decrypt_row_invariants(row: &SecretVersionReadRow) -> Result<(), ApiError> {
     if row.algorithm != ALGORITHM_XCHACHA20_POLY1305 {
+        return Err(ApiError::DecryptFailed);
+    }
+
+    if row.secrets.current_version_id != row.id {
         return Err(ApiError::DecryptFailed);
     }
 
@@ -808,6 +822,42 @@ mod tests {
     }
 
     #[test]
+    fn select_single_current_secret_version_row_returns_only_current_row() {
+        let current = valid_row();
+        let mut old = valid_row();
+        old.id = "750e8400-e29b-41d4-a716-446655440000".to_owned();
+        old.version = 0;
+
+        let selected = select_single_current_secret_version_row(vec![old, current])
+            .expect("one current row should be selected");
+
+        assert_eq!(selected.id, "650e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(selected.version, 1);
+    }
+
+    #[test]
+    fn select_single_current_secret_version_row_maps_no_current_row_to_not_found() {
+        let mut old = valid_row();
+        old.id = "750e8400-e29b-41d4-a716-446655440000".to_owned();
+
+        assert!(matches!(
+            select_single_current_secret_version_row(vec![old]),
+            Err(ApiError::NotFound(message)) if message == "secret not found"
+        ));
+    }
+
+    #[test]
+    fn select_single_current_secret_version_row_rejects_multiple_current_rows() {
+        let first = valid_row();
+        let second = valid_row();
+
+        assert!(matches!(
+            select_single_current_secret_version_row(vec![first, second]),
+            Err(ApiError::InternalInvariantViolation(_))
+        ));
+    }
+
+    #[test]
     fn parse_decrypt_row_rejects_invalid_lengths_and_metadata() {
         let mut bad_nonce = valid_row();
         bad_nonce.nonce_or_iv = "\\x00".to_owned();
@@ -834,6 +884,13 @@ mod tests {
         bad_algorithm.algorithm = "chacha20-poly1305".to_owned();
         assert!(matches!(
             parse_decrypt_row(bad_algorithm),
+            Err(ApiError::DecryptFailed)
+        ));
+
+        let mut non_current = valid_row();
+        non_current.secrets.current_version_id = "750e8400-e29b-41d4-a716-446655440000".to_owned();
+        assert!(matches!(
+            parse_decrypt_row(non_current),
             Err(ApiError::DecryptFailed)
         ));
 

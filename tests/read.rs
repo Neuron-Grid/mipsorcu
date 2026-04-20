@@ -158,6 +158,7 @@ fn decrypt_rejects_aad_context_metadata_tampering() -> TestResult<()> {
     let (master_key, prepared, _) =
         prepared_secret_with_plaintext(b"dummy secret from read test".to_vec())?;
     let cases = [
+        ("secret_id", json!(WRONG_SECRET_ID)),
         ("version", json!(2)),
         ("owner_user_id", json!(OTHER_USER_ID)),
         ("classification", json!("restricted")),
@@ -181,6 +182,31 @@ fn decrypt_rejects_aad_context_metadata_tampering() -> TestResult<()> {
             "field {field} should fail with AAD mismatch"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_rejects_unexpected_aad_context_field_as_aad_error() -> TestResult<()> {
+    let (master_key, prepared, _) =
+        prepared_secret_with_plaintext(b"dummy secret from read test".to_vec())?;
+    let mut context = prepared.aad_context().clone();
+    let object = context
+        .as_object_mut()
+        .ok_or(AadError::ExpectedJsonObject)?;
+    object.insert("debug".to_owned(), json!("must-not-be-stored"));
+
+    let mut parts = base_input_parts(&prepared, OWNER_USER_ID, prepared.version())?;
+    parts.aad_context = context;
+    let input = DecryptCurrentSecretVersionInput::new(parts);
+
+    let result = decrypt_current_secret_version(&master_key, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Aad(AadError::UnexpectedField { field }))
+            if field == "debug"
+    ));
 
     Ok(())
 }

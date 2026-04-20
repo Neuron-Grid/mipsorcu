@@ -107,10 +107,7 @@ impl SupabaseClient {
             .await
             .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .filter(|row| row.secrets.current_version_id == row.id)
-            .collect())
+        Ok(rows)
     }
 
     pub async fn fetch_restore_test_current_secret_version(
