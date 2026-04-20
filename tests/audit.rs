@@ -1,13 +1,16 @@
 use std::cell::RefCell;
 use std::error::Error;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use flate2::read::GzDecoder;
 use mipsorcu::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventError, AuditEventId,
     AuditEventParts, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditRecorder,
-    AuditResult, DeviceId, KeyVersion, LocalAuditFallbackStore, OwnerUserId, RequestId, SecretId,
+    AuditResult, DeviceId, KeyVersion, LocalAuditFallbackStore, OwnerUserId, RequestId,
+    RolloverOutcome, SecretId,
 };
 use serde_json::{Value, json};
 
@@ -129,6 +132,32 @@ fn read_json_lines(path: &PathBuf) -> TestResult<Vec<Value>> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).map_err(Into::into))
         .collect()
+}
+
+fn read_gzip_text(path: &PathBuf) -> TestResult<String> {
+    let file = fs::File::open(path)?;
+    let mut decoder = GzDecoder::new(file);
+    let mut text = String::new();
+    decoder.read_to_string(&mut text)?;
+
+    Ok(text)
+}
+
+fn archive_file_names(path: &PathBuf) -> TestResult<Vec<String>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut names = fs::read_dir(path)?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(Into::into)
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    names.sort();
+
+    Ok(names)
 }
 
 #[test]
@@ -354,6 +383,130 @@ fn resend_marks_only_successful_events_as_sent() -> TestResult<()> {
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[2]["audit_event_id"], AUDIT_EVENT_ID);
     assert_eq!(lines[2]["delivery_status"], "sent");
+
+    let pending_ids = store
+        .pending_events()?
+        .into_iter()
+        .map(|event| event.audit_event_id().as_canonical_string())
+        .collect::<Vec<_>>();
+    assert_eq!(pending_ids, vec![AUDIT_EVENT_ID_2]);
+
+    Ok(())
+}
+
+#[test]
+fn rollover_skips_when_pending_event_remains() -> TestResult<()> {
+    let path = temp_jsonl_path("rollover-pending");
+    let archive_dir = temp_jsonl_path("rollover-pending-archive");
+    let store = LocalAuditFallbackStore::with_rollover_config(path.clone(), archive_dir.clone(), 1);
+    store.append_pending(&sample_event()?)?;
+
+    assert!(!store.should_rollover()?);
+
+    let outcome = store.rollover()?;
+
+    assert_eq!(outcome, RolloverOutcome::Skipped);
+    assert_eq!(read_json_lines(&path)?.len(), 1);
+    assert!(archive_file_names(&archive_dir)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn rollover_seals_all_sent_current_file_and_resets_current_file() -> TestResult<()> {
+    let path = temp_jsonl_path("rollover-all-sent");
+    let archive_dir = temp_jsonl_path("rollover-all-sent-archive");
+    let store = LocalAuditFallbackStore::with_rollover_config(path.clone(), archive_dir.clone(), 1);
+    let event = sample_event()?;
+    store.append_pending(&event)?;
+    store.mark_sent(&event)?;
+
+    assert!(store.should_rollover()?);
+
+    let outcome = store.rollover()?;
+    let RolloverOutcome::Sealed(archive) = outcome else {
+        panic!("rollover should seal the all-sent fallback file");
+    };
+
+    assert_eq!(archive.line_count, 2);
+    assert_eq!(archive.sha256_hex.len(), 64);
+    assert!(
+        archive
+            .sha256_hex
+            .chars()
+            .all(|value| value.is_ascii_hexdigit())
+    );
+    assert!(archive.first_occurred_at.is_some());
+    assert!(archive.last_occurred_at.is_some());
+    assert!(archive.size_bytes > 0);
+    assert!(archive.archive_path.exists());
+    assert_eq!(fs::read_to_string(&path)?, "");
+
+    let archive_name = archive
+        .archive_path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .ok_or_else(|| std::io::Error::other("archive filename should be present"))?;
+    assert!(archive_name.starts_with("audit-fallback-"));
+    assert!(archive_name.ends_with(".jsonl.sealed.gz"));
+    assert_eq!(
+        archive_name.len(),
+        "audit-fallback-YYYYMMDDTHHMMSSZ.jsonl.sealed.gz".len()
+    );
+
+    let decoded = read_gzip_text(&archive.archive_path)?;
+    assert_eq!(decoded.lines().count(), 2);
+    assert_eq!(store.pending_events()?.len(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn pending_events_ignores_sealed_archives_after_rollover() -> TestResult<()> {
+    let path = temp_jsonl_path("rollover-archive-ignored");
+    let archive_dir = temp_jsonl_path("rollover-archive-ignored-archive");
+    let store = LocalAuditFallbackStore::with_rollover_config(path.clone(), archive_dir, 1);
+    let first = sample_event_with_ids(AUDIT_EVENT_ID, REQUEST_ID)?;
+    let second = sample_event_with_ids(AUDIT_EVENT_ID_2, REQUEST_ID)?;
+    store.append_pending(&first)?;
+    store.mark_sent(&first)?;
+    assert!(matches!(store.rollover()?, RolloverOutcome::Sealed(_)));
+
+    store.append_pending(&second)?;
+
+    let pending_ids = store
+        .pending_events()?
+        .into_iter()
+        .map(|event| event.audit_event_id().as_canonical_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(pending_ids, vec![AUDIT_EVENT_ID_2]);
+
+    Ok(())
+}
+
+#[test]
+fn rollover_skips_after_partial_resend_leaves_pending_event() -> TestResult<()> {
+    let path = temp_jsonl_path("rollover-partial-resend");
+    let archive_dir = temp_jsonl_path("rollover-partial-resend-archive");
+    let store = LocalAuditFallbackStore::with_rollover_config(path.clone(), archive_dir.clone(), 1);
+    store.append_pending(&sample_event_with_ids(AUDIT_EVENT_ID, REQUEST_ID)?)?;
+    store.append_pending(&sample_event_with_ids(AUDIT_EVENT_ID_2, REQUEST_ID)?)?;
+    let appender = FakeAppender::outcomes(vec![
+        Ok(()),
+        Err(AuditAppendError::ExternalDependencyFailed { code: "still_down" }),
+    ]);
+    let recorder = AuditRecorder::new(appender, store.clone());
+
+    let summary = recorder.resend_pending()?;
+    let outcome = store.rollover()?;
+
+    assert_eq!(summary.attempted, 2);
+    assert_eq!(summary.sent, 1);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(outcome, RolloverOutcome::Skipped);
+    assert!(!store.should_rollover()?);
+    assert_eq!(archive_file_names(&archive_dir)?.len(), 0);
 
     let pending_ids = store
         .pending_events()?

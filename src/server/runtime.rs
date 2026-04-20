@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
-    AuditRecordOutcome, AuditRecorder, AuditResult, LocalAuditFallbackStore, RequestId,
-    ResendAuditSummary,
+    ArchiveSweepOutcome, AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata,
+    AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditResult, LocalAuditFallbackStore,
+    LocalAuditStoreError, RequestId, ResendAuditSummary, RolloverOutcome,
 };
 use crate::auth::{
     JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, VerifiedJwtClaims, fetch_jwks,
@@ -26,6 +26,8 @@ use crate::server::handlers;
 use crate::server::handlers::PreparedDecryptRow;
 use crate::server::state::AppState;
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
+
+const AUDIT_ARCHIVE_SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub async fn run() {
     fmt::fmt()
@@ -83,18 +85,27 @@ pub async fn run() {
 
     let runtime_handle = tokio::runtime::Handle::current();
     let audit_appender = SupabaseAuditAppender::new(supabase_client.clone(), runtime_handle);
-    let fallback_store = LocalAuditFallbackStore::new(&config.audit_fallback_path);
-    let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store));
+    let fallback_store = LocalAuditFallbackStore::with_rollover_config(
+        &config.audit_fallback_path,
+        &config.audit_fallback_archive_dir,
+        config.audit_fallback_rotate_size_bytes,
+    );
+    let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store.clone()));
     let audit_fallback_path = config.audit_fallback_path.clone();
     let audit_resend_interval = config.audit_resend_interval;
     let audit_fallback_alert_threshold_bytes = config.audit_fallback_alert_threshold_bytes;
+    let audit_fallback_archive_auto_delete_enabled =
+        config.audit_fallback_archive_auto_delete_enabled;
+    let audit_fallback_archive_retention = config.audit_fallback_archive_retention;
     let restore_test_interval = config.restore_test_interval;
     let audit_resend_recorder = audit_recorder.clone();
     tokio::spawn(run_audit_resend_loop(
         audit_resend_recorder,
-        audit_fallback_path,
+        fallback_store,
         audit_resend_interval,
         audit_fallback_alert_threshold_bytes,
+        audit_fallback_archive_auto_delete_enabled,
+        audit_fallback_archive_retention,
         shutdown_receiver,
     ));
 
@@ -104,7 +115,7 @@ pub async fn run() {
         jwt_verifier,
         supabase_client,
         audit_recorder,
-        audit_fallback_path: config.audit_fallback_path,
+        audit_fallback_path,
     };
     let restore_test_state = state.clone();
     tokio::spawn(run_restore_test_loop(
@@ -558,13 +569,24 @@ async fn shutdown_signal(shutdown_sender: watch::Sender<bool>) {
 
 async fn run_audit_resend_loop(
     audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
-    audit_fallback_path: PathBuf,
+    fallback_store: LocalAuditFallbackStore,
     interval_duration: Duration,
     audit_fallback_alert_threshold_bytes: u64,
+    audit_fallback_archive_auto_delete_enabled: bool,
+    audit_fallback_archive_retention: Duration,
     mut shutdown_receiver: watch::Receiver<bool>,
 ) {
+    let mut last_archive_sweep = None;
+
     record_audit_resend_result(resend_pending_once(audit_recorder.clone()).await);
-    record_audit_fallback_size_alert(&audit_fallback_path, audit_fallback_alert_threshold_bytes);
+    record_audit_fallback_post_resend_tasks(
+        &fallback_store,
+        audit_fallback_alert_threshold_bytes,
+        audit_fallback_archive_auto_delete_enabled,
+        audit_fallback_archive_retention,
+        &mut last_archive_sweep,
+    )
+    .await;
 
     let mut interval = tokio::time::interval(interval_duration);
     interval.tick().await;
@@ -579,13 +601,62 @@ async fn run_audit_resend_loop(
             }
             _ = interval.tick() => {
                 record_audit_resend_result(resend_pending_once(audit_recorder.clone()).await);
-                record_audit_fallback_size_alert(
-                    &audit_fallback_path,
+                record_audit_fallback_post_resend_tasks(
+                    &fallback_store,
                     audit_fallback_alert_threshold_bytes,
-                );
+                    audit_fallback_archive_auto_delete_enabled,
+                    audit_fallback_archive_retention,
+                    &mut last_archive_sweep,
+                )
+                .await;
             }
         }
     }
+}
+
+async fn record_audit_fallback_post_resend_tasks(
+    fallback_store: &LocalAuditFallbackStore,
+    audit_fallback_alert_threshold_bytes: u64,
+    audit_fallback_archive_auto_delete_enabled: bool,
+    audit_fallback_archive_retention: Duration,
+    last_archive_sweep: &mut Option<Instant>,
+) {
+    record_audit_fallback_size_alert(fallback_store.path(), audit_fallback_alert_threshold_bytes);
+    record_audit_fallback_rollover_result(
+        fallback_store.path(),
+        run_audit_fallback_rollover_once(fallback_store.clone()).await,
+    );
+
+    if audit_fallback_archive_auto_delete_enabled && should_sweep_archive(last_archive_sweep) {
+        record_audit_fallback_archive_sweep_result(
+            fallback_store.archive_dir(),
+            audit_fallback_archive_retention,
+            sweep_audit_fallback_archive_once(
+                fallback_store.clone(),
+                audit_fallback_archive_retention,
+            )
+            .await,
+        );
+    }
+}
+
+pub async fn run_audit_fallback_rollover_once(
+    fallback_store: LocalAuditFallbackStore,
+) -> Result<RolloverOutcome, LocalAuditStoreError> {
+    tokio::task::spawn_blocking(move || fallback_store.rollover())
+        .await
+        .map_err(|_| LocalAuditStoreError::Io(std::io::Error::other("join failed")))?
+}
+
+pub async fn sweep_audit_fallback_archive_once(
+    fallback_store: LocalAuditFallbackStore,
+    audit_fallback_archive_retention: Duration,
+) -> Result<ArchiveSweepOutcome, LocalAuditStoreError> {
+    tokio::task::spawn_blocking(move || {
+        fallback_store.sweep_archive(audit_fallback_archive_retention)
+    })
+    .await
+    .map_err(|_| LocalAuditStoreError::Io(std::io::Error::other("join failed")))?
 }
 
 async fn resend_pending_once(
@@ -681,6 +752,91 @@ fn record_audit_fallback_size_alert(path: &Path, threshold_bytes: u64) {
                 "audit fallback log size check failed"
             );
         }
+    }
+}
+
+fn record_audit_fallback_rollover_result(
+    path: &Path,
+    result: Result<RolloverOutcome, LocalAuditStoreError>,
+) {
+    match result {
+        Ok(RolloverOutcome::Skipped) => {}
+        Ok(RolloverOutcome::Sealed(archive)) => {
+            tracing::info!(
+                path = %path.display(),
+                archive_path = %archive.archive_path.display(),
+                sha256_hex = %archive.sha256_hex,
+                line_count = archive.line_count,
+                first_occurred_at = archive.first_occurred_at.as_deref(),
+                last_occurred_at = archive.last_occurred_at.as_deref(),
+                size_bytes = archive.size_bytes,
+                "audit fallback log rolled over"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                error_kind = local_audit_store_error_kind(&error),
+                "audit fallback rollover failed"
+            );
+        }
+    }
+}
+
+fn record_audit_fallback_archive_sweep_result(
+    archive_dir: &Path,
+    retention: Duration,
+    result: Result<ArchiveSweepOutcome, LocalAuditStoreError>,
+) {
+    match result {
+        Ok(outcome) => {
+            for archive in outcome.deleted_archives {
+                tracing::info!(
+                    archive_dir = %archive_dir.display(),
+                    archive_path = %archive.archive_path.display(),
+                    sha256_hex = archive.sha256_hex.as_deref(),
+                    line_count = ?archive.line_count,
+                    size_bytes = archive.size_bytes,
+                    retention_days = retention.as_secs() / (24 * 60 * 60),
+                    "audit fallback archive deleted"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                archive_dir = %archive_dir.display(),
+                error_kind = local_audit_store_error_kind(&error),
+                "audit fallback archive sweep failed"
+            );
+        }
+    }
+}
+
+fn should_sweep_archive(last_archive_sweep: &mut Option<Instant>) -> bool {
+    let now = Instant::now();
+
+    match last_archive_sweep {
+        Some(last_sweep) if now.duration_since(*last_sweep) < AUDIT_ARCHIVE_SWEEP_INTERVAL => false,
+        _ => {
+            *last_archive_sweep = Some(now);
+            true
+        }
+    }
+}
+
+fn local_audit_store_error_kind(error: &LocalAuditStoreError) -> &'static str {
+    match error {
+        LocalAuditStoreError::Io(_) => "io",
+        LocalAuditStoreError::Json(_) => "json",
+        LocalAuditStoreError::TimestampFormat(_) => "timestamp_format",
+        LocalAuditStoreError::ArchivePathUnavailable { .. } => "archive_path_unavailable",
+        LocalAuditStoreError::GzipWriteFailed { .. } => "gzip_write_failed",
+        LocalAuditStoreError::HashReadFailed { .. } => "hash_read_failed",
+        LocalAuditStoreError::CurrentFileRemoveFailed { .. } => "current_file_remove_failed",
+        LocalAuditStoreError::ArchiveDeleteFailed { .. } => "archive_delete_failed",
+        LocalAuditStoreError::LockPoisoned => "lock_poisoned",
+        LocalAuditStoreError::InvalidLine { .. } => "invalid_line",
+        LocalAuditStoreError::Event(_) => "event",
     }
 }
 

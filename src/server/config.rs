@@ -1,14 +1,17 @@
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::types::{KeyVersion, MasterKey};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:3000";
-const DEFAULT_AUDIT_FALLBACK_PATH: &str = "/var/lib/mipsorcu/audit_fallback.jsonl";
+const DEFAULT_AUDIT_FALLBACK_PATH: &str = "/var/lib/mipsorcu/audit-fallback-current.jsonl";
 const DEFAULT_AUDIT_RESEND_INTERVAL_SECONDS: u64 = 60;
 const DEFAULT_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_AUDIT_FALLBACK_ROTATE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS: u64 = 90;
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const DEFAULT_RESTORE_TEST_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_JWKS_REFRESH_INTERVAL_SECONDS: u64 = 60 * 60;
 
@@ -25,6 +28,12 @@ const ENV_AUDIT_FALLBACK_PATH: &str = "MIPSORCU_AUDIT_FALLBACK_PATH";
 const ENV_AUDIT_RESEND_INTERVAL_SECONDS: &str = "MIPSORCU_AUDIT_RESEND_INTERVAL_SECONDS";
 const ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: &str =
     "MIPSORCU_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES";
+const ENV_AUDIT_FALLBACK_ROTATE_SIZE_BYTES: &str = "MIPSORCU_AUDIT_FALLBACK_ROTATE_SIZE_BYTES";
+const ENV_AUDIT_FALLBACK_ARCHIVE_DIR: &str = "MIPSORCU_AUDIT_FALLBACK_ARCHIVE_DIR";
+const ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED: &str =
+    "MIPSORCU_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED";
+const ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS: &str =
+    "MIPSORCU_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS";
 const ENV_RESTORE_TEST_INTERVAL_SECONDS: &str = "MIPSORCU_RESTORE_TEST_INTERVAL_SECONDS";
 const ENV_JWKS_REFRESH_INTERVAL_SECONDS: &str = "MIPSORCU_JWKS_REFRESH_INTERVAL_SECONDS";
 
@@ -42,6 +51,10 @@ pub struct AppConfig {
     pub audit_fallback_path: PathBuf,
     pub audit_resend_interval: Duration,
     pub audit_fallback_alert_threshold_bytes: u64,
+    pub audit_fallback_rotate_size_bytes: u64,
+    pub audit_fallback_archive_dir: PathBuf,
+    pub audit_fallback_archive_auto_delete_enabled: bool,
+    pub audit_fallback_archive_retention: Duration,
     pub restore_test_interval: Duration,
 }
 
@@ -70,6 +83,22 @@ impl fmt::Debug for AppConfig {
             .field(
                 "audit_fallback_alert_threshold_bytes",
                 &self.audit_fallback_alert_threshold_bytes,
+            )
+            .field(
+                "audit_fallback_rotate_size_bytes",
+                &self.audit_fallback_rotate_size_bytes,
+            )
+            .field(
+                "audit_fallback_archive_dir",
+                &self.audit_fallback_archive_dir,
+            )
+            .field(
+                "audit_fallback_archive_auto_delete_enabled",
+                &self.audit_fallback_archive_auto_delete_enabled,
+            )
+            .field(
+                "audit_fallback_archive_retention_days",
+                &(self.audit_fallback_archive_retention.as_secs() / SECONDS_PER_DAY),
             )
             .field(
                 "restore_test_interval_seconds",
@@ -154,10 +183,22 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
         optional_var(ENV_AUDIT_FALLBACK_PATH)
             .unwrap_or_else(|| DEFAULT_AUDIT_FALLBACK_PATH.to_owned()),
     );
+    let audit_fallback_archive_dir = optional_var(ENV_AUDIT_FALLBACK_ARCHIVE_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_audit_fallback_archive_dir(&audit_fallback_path));
     let audit_resend_interval =
         parse_audit_resend_interval(std::env::var(ENV_AUDIT_RESEND_INTERVAL_SECONDS).ok())?;
     let audit_fallback_alert_threshold_bytes = parse_audit_fallback_alert_threshold(
         std::env::var(ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES).ok(),
+    )?;
+    let audit_fallback_rotate_size_bytes =
+        parse_audit_fallback_rotate_size(std::env::var(ENV_AUDIT_FALLBACK_ROTATE_SIZE_BYTES).ok())?;
+    let audit_fallback_archive_auto_delete_enabled =
+        parse_audit_fallback_archive_auto_delete_enabled(
+            std::env::var(ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED).ok(),
+        )?;
+    let audit_fallback_archive_retention = parse_audit_fallback_archive_retention_days(
+        std::env::var(ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS).ok(),
     )?;
     let restore_test_interval =
         parse_restore_test_interval(std::env::var(ENV_RESTORE_TEST_INTERVAL_SECONDS).ok())?;
@@ -176,6 +217,10 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
         audit_fallback_path,
         audit_resend_interval,
         audit_fallback_alert_threshold_bytes,
+        audit_fallback_rotate_size_bytes,
+        audit_fallback_archive_dir,
+        audit_fallback_archive_auto_delete_enabled,
+        audit_fallback_archive_retention,
         restore_test_interval,
     })
 }
@@ -208,6 +253,50 @@ pub fn parse_audit_fallback_alert_threshold(value: Option<String>) -> Result<u64
         ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES,
         DEFAULT_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES,
     )
+}
+
+pub fn parse_audit_fallback_rotate_size(value: Option<String>) -> Result<u64, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_AUDIT_FALLBACK_ROTATE_SIZE_BYTES,
+        DEFAULT_AUDIT_FALLBACK_ROTATE_SIZE_BYTES,
+    )
+}
+
+pub fn parse_audit_fallback_archive_auto_delete_enabled(
+    value: Option<String>,
+) -> Result<bool, ConfigError> {
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(ConfigError::InvalidValue {
+            name: ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED,
+            reason: "value must be true or false".to_owned(),
+        }),
+    }
+}
+
+pub fn parse_audit_fallback_archive_retention_days(
+    value: Option<String>,
+) -> Result<Duration, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS,
+        DEFAULT_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS,
+    )
+    .and_then(|days| {
+        days.checked_mul(SECONDS_PER_DAY)
+            .map(Duration::from_secs)
+            .ok_or_else(|| ConfigError::InvalidValue {
+                name: ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS,
+                reason: "value is too large".to_owned(),
+            })
+    })
 }
 
 pub fn parse_restore_test_interval(value: Option<String>) -> Result<Duration, ConfigError> {
@@ -267,4 +356,11 @@ fn required_var(name: &'static str) -> Result<String, ConfigError> {
 
 fn optional_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+fn default_audit_fallback_archive_dir(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("archive")
 }

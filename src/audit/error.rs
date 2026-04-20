@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 use super::event::AuditAction;
 
@@ -69,6 +70,26 @@ pub enum LocalAuditStoreError {
     Io(std::io::Error),
     Json(serde_json::Error),
     TimestampFormat(time::error::Format),
+    ArchivePathUnavailable {
+        path: PathBuf,
+    },
+    GzipWriteFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    HashReadFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    CurrentFileRemoveFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    ArchiveDeleteFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    LockPoisoned,
     InvalidLine {
         line_number: usize,
         reason: &'static str,
@@ -86,6 +107,44 @@ impl fmt::Display for LocalAuditStoreError {
                     formatter,
                     "local audit store timestamp format failed: {error}"
                 )
+            }
+            Self::ArchivePathUnavailable { path } => {
+                write!(
+                    formatter,
+                    "local audit archive path is unavailable: {}",
+                    path.display()
+                )
+            }
+            Self::GzipWriteFailed { path, source } => {
+                write!(
+                    formatter,
+                    "local audit archive gzip write failed for {}: {source}",
+                    path.display()
+                )
+            }
+            Self::HashReadFailed { path, source } => {
+                write!(
+                    formatter,
+                    "local audit archive hash read failed for {}: {source}",
+                    path.display()
+                )
+            }
+            Self::CurrentFileRemoveFailed { path, source } => {
+                write!(
+                    formatter,
+                    "local audit current file removal failed for {}: {source}",
+                    path.display()
+                )
+            }
+            Self::ArchiveDeleteFailed { path, source } => {
+                write!(
+                    formatter,
+                    "local audit archive deletion failed for {}: {source}",
+                    path.display()
+                )
+            }
+            Self::LockPoisoned => {
+                write!(formatter, "local audit store lock is poisoned")
             }
             Self::InvalidLine {
                 line_number,

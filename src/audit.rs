@@ -8,5 +8,7 @@ pub use event::{
     AuditAction, AuditEvent, AuditEventAppender, AuditEventId, AuditEventParts, AuditMetadata,
     AuditResult, RequestId,
 };
-pub use fallback::LocalAuditFallbackStore;
+pub use fallback::{
+    ArchiveSweepOutcome, LocalAuditFallbackStore, RolloverArchive, RolloverOutcome, SweptArchive,
+};
 pub use recorder::{AuditRecordOutcome, AuditRecorder, ResendAuditSummary};

@@ -1,13 +1,14 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mipsorcu::server::runtime::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
     audit_fallback_size_alert, initialize_jwt_verifier_from_jwks_url, refresh_jwks_cache_once,
+    run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
-use mipsorcu::{Jwks, JwksCache};
+use mipsorcu::{Jwks, JwksCache, LocalAuditFallbackStore, RolloverOutcome};
 
 fn temp_path(test_name: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -21,6 +22,22 @@ fn temp_path(test_name: &str) -> PathBuf {
 fn write_file(path: &Path, bytes: &[u8]) {
     let mut file = fs::File::create(path).expect("test file should be created");
     file.write_all(bytes).expect("test file should be written");
+}
+
+fn valid_audit_fallback_line(audit_event_id: &str, delivery_status: &str) -> String {
+    format!(
+        r#"{{"audit_event_id":"{audit_event_id}","request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","actor_user_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479","actor_device_id":"sbc-device-1","action":"decrypt","target_secret_id":"550e8400-e29b-41d4-a716-446655440000","result":"failure","key_version":1,"metadata_json":{{"error_code":"decrypt_failed"}},"occurred_at":"2026-04-08T12:00:00Z","delivery_status":"{delivery_status}"}}"#
+    )
+}
+
+fn archive_file_count(path: &Path) -> usize {
+    if !path.exists() {
+        return 0;
+    }
+
+    fs::read_dir(path)
+        .expect("archive directory should be readable")
+        .count()
 }
 
 #[test]
@@ -78,6 +95,54 @@ fn audit_fallback_file_size_ignores_directories() {
 
     assert_eq!(size, None);
     let _ = fs::remove_dir(path);
+}
+
+#[tokio::test]
+async fn audit_fallback_rollover_once_seals_eligible_current_file() {
+    let path = temp_path("rollover-current.jsonl");
+    let archive_dir = temp_path("rollover-archive");
+    let line = valid_audit_fallback_line("11111111-1111-4111-8111-111111111111", "sent");
+    write_file(&path, format!("{line}\n").as_bytes());
+    let store = LocalAuditFallbackStore::with_rollover_config(&path, &archive_dir, 1);
+
+    let outcome = run_audit_fallback_rollover_once(store)
+        .await
+        .expect("rollover helper should succeed");
+
+    let RolloverOutcome::Sealed(archive) = outcome else {
+        panic!("eligible current file should be sealed");
+    };
+    assert!(archive.archive_path.exists());
+    assert_eq!(archive.line_count, 1);
+    assert_eq!(archive_file_count(&archive_dir), 1);
+    assert_eq!(
+        fs::read_to_string(&path).expect("current file should be readable"),
+        ""
+    );
+}
+
+#[tokio::test]
+async fn archive_sweep_once_deletes_archives_only_when_called() {
+    let path = temp_path("sweep-current.jsonl");
+    let archive_dir = temp_path("sweep-archive");
+    let line = valid_audit_fallback_line("22222222-2222-4222-8222-222222222222", "sent");
+    write_file(&path, format!("{line}\n").as_bytes());
+    let store = LocalAuditFallbackStore::with_rollover_config(&path, &archive_dir, 1);
+
+    let rollover = run_audit_fallback_rollover_once(store.clone())
+        .await
+        .expect("rollover helper should succeed");
+    assert!(matches!(rollover, RolloverOutcome::Sealed(_)));
+    assert_eq!(archive_file_count(&archive_dir), 1);
+
+    let sweep = sweep_audit_fallback_archive_once(store, Duration::ZERO)
+        .await
+        .expect("archive sweep helper should succeed");
+
+    assert_eq!(sweep.deleted_archives.len(), 1);
+    assert_eq!(sweep.deleted_archives[0].line_count, Some(1));
+    assert!(sweep.deleted_archives[0].sha256_hex.is_some());
+    assert_eq!(archive_file_count(&archive_dir), 0);
 }
 
 #[tokio::test]
