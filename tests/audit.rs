@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mipsorcu::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventError, AuditEventId,
-    AuditEventParts, AuditMetadata, AuditRecorder, AuditResult, DeviceId, KeyVersion,
-    LocalAuditFallbackStore, OwnerUserId, RequestId, SecretId,
+    AuditEventParts, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditRecorder,
+    AuditResult, DeviceId, KeyVersion, LocalAuditFallbackStore, OwnerUserId, RequestId, SecretId,
 };
 use serde_json::{Value, json};
 
@@ -227,8 +227,9 @@ fn recorder_does_not_write_fallback_when_appender_succeeds() -> TestResult<()> {
         LocalAuditFallbackStore::new(path.clone()),
     );
 
-    recorder.record(&sample_event()?)?;
+    let outcome = recorder.record(&sample_event()?)?;
 
+    assert_eq!(outcome, AuditRecordOutcome::PrimarySucceeded);
     assert!(!path.exists());
 
     Ok(())
@@ -242,8 +243,9 @@ fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
         LocalAuditFallbackStore::new(path.clone()),
     );
 
-    recorder.record(&sample_event()?)?;
+    let outcome = recorder.record(&sample_event()?)?;
 
+    assert_eq!(outcome, AuditRecordOutcome::FallbackSucceeded);
     let lines = read_json_lines(&path)?;
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["audit_event_id"], AUDIT_EVENT_ID);
@@ -257,6 +259,29 @@ fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
     assert_eq!(lines[0]["delivery_status"], "pending");
     assert!(lines[0]["occurred_at"].as_str().is_some());
     assert!(lines[0]["metadata_json"].is_object());
+
+    Ok(())
+}
+
+#[test]
+fn recorder_returns_primary_and_fallback_failed_when_both_paths_fail() -> TestResult<()> {
+    let path = temp_jsonl_path("fallback-directory");
+    fs::create_dir_all(&path)?;
+    let recorder = AuditRecorder::new(
+        FakeAppender::always_err(),
+        LocalAuditFallbackStore::new(path.clone()),
+    );
+
+    let error = recorder
+        .record(&sample_event()?)
+        .expect_err("primary and fallback should both fail");
+
+    assert!(matches!(
+        error,
+        AuditRecordError::PrimaryAndFallbackFailed { .. }
+    ));
+
+    fs::remove_dir_all(path)?;
 
     Ok(())
 }

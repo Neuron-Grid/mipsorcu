@@ -12,8 +12,8 @@ pub mod write;
 pub use aad::AadV1;
 pub use audit::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventError, AuditEventId,
-    AuditEventParts, AuditMetadata, AuditRecordError, AuditRecorder, AuditResult,
-    LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
+    AuditEventParts, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditRecorder,
+    AuditResult, LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
 };
 pub use auth::{
     Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,

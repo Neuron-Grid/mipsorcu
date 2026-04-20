@@ -6,7 +6,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
+    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
+    AuditRecordOutcome, AuditResult, RequestId,
 };
 use crate::auth::{RawJwt, VerifiedJwtClaims};
 use crate::authorize_existing_secret_version_write;
@@ -679,13 +680,44 @@ async fn record_success_audit(
     .map_err(|error| ApiError::InternalError(error.to_string()))?;
 
     let recorder = state.audit_recorder.clone();
-    tokio::task::spawn_blocking(move || recorder.record(&event))
+    let outcome = tokio::task::spawn_blocking(move || recorder.record(&event))
         .await
         .map_err(|error| ApiError::InternalError(error.to_string()))?
-        .map_err(|error| {
-            tracing::error!(error = %error, "decrypt success audit recording failed");
-            ApiError::AuditAppendFailed
-        })
+        .map_err(|error| match error {
+            AuditRecordError::PrimaryAndFallbackFailed { .. } => {
+                tracing::error!(
+                    error = %error,
+                    audit_record_outcome = "both_failed",
+                    "decrypt success audit recording failed"
+                );
+                ApiError::AuditAppendFailed
+            }
+            AuditRecordError::ResendReadFailed(_) | AuditRecordError::ResendMarkSentFailed(_) => {
+                tracing::error!(
+                    error = %error,
+                    audit_record_outcome = "unexpected_resend_error",
+                    "decrypt success audit recording failed"
+                );
+                ApiError::AuditAppendFailed
+            }
+        })?;
+
+    match outcome {
+        AuditRecordOutcome::PrimarySucceeded => {
+            tracing::info!(
+                audit_record_outcome = "primary_succeeded",
+                "decrypt success audit recorded"
+            );
+            Ok(())
+        }
+        AuditRecordOutcome::FallbackSucceeded => {
+            tracing::warn!(
+                audit_record_outcome = "fallback_succeeded",
+                "decrypt success audit recorded to local fallback"
+            );
+            Ok(())
+        }
+    }
 }
 
 fn record_failure_audit_nonblocking(
@@ -722,10 +754,23 @@ fn record_failure_audit_nonblocking(
     };
 
     let recorder = state.audit_recorder.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Err(error) = recorder.record(&event) {
+    tokio::task::spawn_blocking(move || match recorder.record(&event) {
+        Ok(AuditRecordOutcome::PrimarySucceeded) => {
+            tracing::debug!(
+                audit_record_outcome = "primary_succeeded",
+                "failure audit recorded"
+            );
+        }
+        Ok(AuditRecordOutcome::FallbackSucceeded) => {
+            tracing::warn!(
+                audit_record_outcome = "fallback_succeeded",
+                "failure audit recorded to local fallback"
+            );
+        }
+        Err(error) => {
             tracing::error!(
                 error = %error,
+                audit_record_outcome = "both_failed",
                 "audit recording failed (including fallback)"
             );
         }

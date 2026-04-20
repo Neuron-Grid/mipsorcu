@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
-    AuditRecorder, AuditResult, LocalAuditFallbackStore, RequestId, ResendAuditSummary,
+    AuditRecordOutcome, AuditRecorder, AuditResult, LocalAuditFallbackStore, RequestId,
+    ResendAuditSummary,
 };
 use crate::auth::{
     JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, VerifiedJwtClaims, fetch_jwks,
@@ -500,15 +501,34 @@ async fn record_restore_test_audit(
         .map_err(|error| error.to_string())
         .and_then(|result| result.map_err(|error| error.to_string()));
 
-    if let Err(error) = record_result {
-        tracing::error!(
-            request_id = %request_id.as_canonical_string(),
-            error = %error,
-            action = "restore_test",
-            result = "failure",
-            error_code = audit.error_code.unwrap_or("audit_record_failed"),
-            "restore test audit recording failed"
-        );
+    match record_result {
+        Ok(AuditRecordOutcome::PrimarySucceeded) => {
+            tracing::debug!(
+                request_id = %request_id.as_canonical_string(),
+                action = "restore_test",
+                audit_record_outcome = "primary_succeeded",
+                "restore test audit recorded"
+            );
+        }
+        Ok(AuditRecordOutcome::FallbackSucceeded) => {
+            tracing::warn!(
+                request_id = %request_id.as_canonical_string(),
+                action = "restore_test",
+                audit_record_outcome = "fallback_succeeded",
+                "restore test audit recorded to local fallback"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = audit.error_code.unwrap_or("audit_record_failed"),
+                audit_record_outcome = "both_failed",
+                "restore test audit recording failed"
+            );
+        }
     }
 }
 
@@ -599,7 +619,7 @@ fn record_audit_resend_result(result: Result<ResendAuditSummary, AuditRecordErro
 
 fn audit_record_error_kind(error: &AuditRecordError) -> &'static str {
     match error {
-        AuditRecordError::FallbackWriteFailed { .. } => "fallback_write_failed",
+        AuditRecordError::PrimaryAndFallbackFailed { .. } => "primary_and_fallback_failed",
         AuditRecordError::ResendReadFailed(_) => "resend_read_failed",
         AuditRecordError::ResendMarkSentFailed(_) => "resend_mark_sent_failed",
     }

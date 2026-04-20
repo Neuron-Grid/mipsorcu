@@ -151,7 +151,7 @@ impl From<AuditEventError> for LocalAuditStoreError {
 
 #[derive(Debug)]
 pub enum AuditRecordError {
-    FallbackWriteFailed {
+    PrimaryAndFallbackFailed {
         append_error: AuditAppendError,
         store_error: LocalAuditStoreError,
     },
@@ -162,7 +162,7 @@ pub enum AuditRecordError {
 impl fmt::Display for AuditRecordError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FallbackWriteFailed {
+            Self::PrimaryAndFallbackFailed {
                 append_error,
                 store_error,
             } => {
@@ -188,6 +188,12 @@ impl fmt::Display for AuditRecordError {
 }
 
 impl std::error::Error for AuditRecordError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditRecordOutcome {
+    PrimarySucceeded,
+    FallbackSucceeded,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuditEventId(Uuid);
@@ -580,13 +586,14 @@ where
         }
     }
 
-    pub fn record(&self, event: &AuditEvent) -> Result<(), AuditRecordError> {
+    pub fn record(&self, event: &AuditEvent) -> Result<AuditRecordOutcome, AuditRecordError> {
         match self.appender.append_audit_event(event) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(AuditRecordOutcome::PrimarySucceeded),
             Err(append_error) => self
                 .fallback_store
                 .append_pending(event)
-                .map_err(|store_error| AuditRecordError::FallbackWriteFailed {
+                .map(|()| AuditRecordOutcome::FallbackSucceeded)
+                .map_err(|store_error| AuditRecordError::PrimaryAndFallbackFailed {
                     append_error,
                     store_error,
                 }),
