@@ -11,7 +11,7 @@ use axum::extract::State;
 use mipsorcu::server::dto::CreateSecretRequest;
 use mipsorcu::server::handlers::create_secret;
 use mipsorcu::server::middleware::AuthenticatedUser;
-use mipsorcu::server::state::AppState;
+use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use mipsorcu::{
     AuditRecorder, Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore,
@@ -101,9 +101,11 @@ fn test_app_state(supabase_url: &str) -> TestResult<AppState> {
     ));
     let audit_appender =
         SupabaseAuditAppender::new(supabase_client.clone(), tokio::runtime::Handle::current());
+    let audit_fallback_store =
+        LocalAuditFallbackStore::new(temp_jsonl_path("create-secret-failure-audit"));
     let audit_recorder = Arc::new(AuditRecorder::new(
         audit_appender,
-        LocalAuditFallbackStore::new(temp_jsonl_path("create-secret-failure-audit")),
+        audit_fallback_store.clone(),
     ));
 
     Ok(AppState {
@@ -112,7 +114,9 @@ fn test_app_state(supabase_url: &str) -> TestResult<AppState> {
         jwt_verifier: Arc::new(test_jwt_verifier()?),
         supabase_client,
         audit_recorder,
-        audit_fallback_path: temp_jsonl_path("create-secret-failure-audit-health"),
+        audit_fallback_store,
+        readiness_state: ReadinessState::new(),
+        health_readiness_poll_interval: Duration::from_secs(30),
     })
 }
 

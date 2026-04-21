@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use http::StatusCode;
 use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -128,15 +129,17 @@ impl SupabaseClient {
             .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))
     }
 
-    pub async fn check_connectivity(&self) -> bool {
+    pub async fn probe_readiness(&self) -> bool {
         let url = format!("{}/rest/v1/", self.base_url);
-        self.http_client
-            .head(&url)
-            .header("apikey", &self.service_role_key)
-            .bearer_auth(&self.service_role_key)
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success())
+
+        match self.readiness_probe_status(&url, None).await {
+            Ok(status) if status.is_success() => true,
+            Ok(StatusCode::UNAUTHORIZED) | Ok(StatusCode::FORBIDDEN) => self
+                .readiness_probe_status(&url, Some(&self.publishable_key))
+                .await
+                .is_ok_and(|status| status.is_success()),
+            Ok(_) | Err(_) => false,
+        }
     }
 
     async fn post_rpc<T: Serialize + ?Sized>(
@@ -154,6 +157,20 @@ impl SupabaseClient {
             .send()
             .await
             .map_err(SupabaseRpcError::Network)
+    }
+
+    async fn readiness_probe_status(
+        &self,
+        url: &str,
+        api_key: Option<&str>,
+    ) -> Result<StatusCode, reqwest::Error> {
+        let request = self.http_client.head(url);
+        let request = match api_key {
+            Some(api_key) => request.header("apikey", api_key),
+            None => request,
+        };
+
+        request.send().await.map(|response| response.status())
     }
 }
 

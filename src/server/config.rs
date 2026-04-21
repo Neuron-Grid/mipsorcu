@@ -18,6 +18,7 @@ const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const DEFAULT_RESTORE_TEST_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_RESTORE_TEST_SAMPLE_LIMIT: u32 = 3;
 const DEFAULT_JWKS_REFRESH_INTERVAL_SECONDS: u64 = 60 * 60;
+const DEFAULT_HEALTH_READINESS_POLL_INTERVAL_SECONDS: u64 = 30;
 
 const ENV_LISTEN_ADDR: &str = "MIPSORCU_LISTEN_ADDR";
 const ENV_MASTER_KEY: &str = "MIPSORCU_MASTER_KEY";
@@ -41,6 +42,8 @@ const ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS: &str =
 const ENV_RESTORE_TEST_INTERVAL_SECONDS: &str = "MIPSORCU_RESTORE_TEST_INTERVAL_SECONDS";
 const ENV_RESTORE_TEST_SAMPLE_LIMIT: &str = "MIPSORCU_RESTORE_TEST_SAMPLE_LIMIT";
 const ENV_JWKS_REFRESH_INTERVAL_SECONDS: &str = "MIPSORCU_JWKS_REFRESH_INTERVAL_SECONDS";
+const ENV_HEALTH_READINESS_POLL_INTERVAL_SECONDS: &str =
+    "MIPSORCU_HEALTH_READINESS_POLL_INTERVAL_SECONDS";
 
 #[doc(hidden)]
 pub type DotenvVars = HashMap<String, String>;
@@ -56,6 +59,7 @@ pub struct AppConfig {
     pub jwt_audience: String,
     pub jwks_url: String,
     pub jwks_refresh_interval: Duration,
+    pub health_readiness_poll_interval: Duration,
     pub audit_fallback_path: PathBuf,
     pub audit_resend_interval: Duration,
     pub audit_fallback_alert_threshold_bytes: u64,
@@ -83,6 +87,10 @@ impl fmt::Debug for AppConfig {
             .field(
                 "jwks_refresh_interval_seconds",
                 &self.jwks_refresh_interval.as_secs(),
+            )
+            .field(
+                "health_readiness_poll_interval_seconds",
+                &self.health_readiness_poll_interval.as_secs(),
             )
             .field("audit_fallback_path", &self.audit_fallback_path)
             .field(
@@ -213,6 +221,11 @@ where
         dotenv,
         get_process_var,
     ))?;
+    let health_readiness_poll_interval = parse_health_readiness_poll_interval(optional_var(
+        ENV_HEALTH_READINESS_POLL_INTERVAL_SECONDS,
+        dotenv,
+        get_process_var,
+    ))?;
 
     let audit_fallback_path = PathBuf::from(
         optional_var(ENV_AUDIT_FALLBACK_PATH, dotenv, get_process_var)
@@ -271,6 +284,7 @@ where
         jwt_audience,
         jwks_url,
         jwks_refresh_interval,
+        health_readiness_poll_interval,
         audit_fallback_path,
         audit_resend_interval,
         audit_fallback_alert_threshold_bytes,
@@ -393,6 +407,17 @@ pub fn parse_jwks_refresh_interval(value: Option<String>) -> Result<Duration, Co
         value,
         ENV_JWKS_REFRESH_INTERVAL_SECONDS,
         DEFAULT_JWKS_REFRESH_INTERVAL_SECONDS,
+    )
+    .map(Duration::from_secs)
+}
+
+pub fn parse_health_readiness_poll_interval(
+    value: Option<String>,
+) -> Result<Duration, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_HEALTH_READINESS_POLL_INTERVAL_SECONDS,
+        DEFAULT_HEALTH_READINESS_POLL_INTERVAL_SECONDS,
     )
     .map(Duration::from_secs)
 }

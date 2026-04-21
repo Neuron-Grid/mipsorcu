@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mipsorcu::server::runtime::testing as runtime_testing;
@@ -13,7 +13,7 @@ use mipsorcu::server::runtime::{
     audit_fallback_size_alert, initialize_jwt_verifier_from_jwks_url, refresh_jwks_cache_once,
     run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
-use mipsorcu::server::state::AppState;
+use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{RestoreTestSampleRow, SupabaseAuditAppender, SupabaseClient};
 use mipsorcu::{
     AuditRecorder, Classification, CreatedAt, DeviceId, Jwk, Jwks, JwksCache, JwtVerifier,
@@ -23,6 +23,7 @@ use mipsorcu::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
@@ -282,9 +283,10 @@ fn test_app_state(
     ));
     let audit_appender =
         SupabaseAuditAppender::new(supabase_client.clone(), tokio::runtime::Handle::current());
+    let audit_fallback_store = LocalAuditFallbackStore::new(audit_fallback_path);
     let audit_recorder = Arc::new(AuditRecorder::new(
         audit_appender,
-        LocalAuditFallbackStore::new(audit_fallback_path.clone()),
+        audit_fallback_store.clone(),
     ));
 
     Ok(AppState {
@@ -293,7 +295,9 @@ fn test_app_state(
         jwt_verifier: Arc::new(test_jwt_verifier()?),
         supabase_client,
         audit_recorder,
-        audit_fallback_path,
+        audit_fallback_store,
+        readiness_state: ReadinessState::new(),
+        health_readiness_poll_interval: Duration::from_secs(30),
     })
 }
 
@@ -350,6 +354,52 @@ fn spawn_supabase_read_and_audit_server(
                     "Internal Server Error",
                     audit_body,
                 )?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_capture_server(
+    idle_timeout: Duration,
+) -> Result<
+    (
+        String,
+        mpsc::Receiver<CapturedRequest>,
+        thread::JoinHandle<std::io::Result<()>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + idle_timeout;
+
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = read_http_request(&mut stream)?;
+                    sender.send(request).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "captured request receiver was dropped",
+                        )
+                    })?;
+                    write_http_response(&mut stream, 200, "OK", r#"{"status":"ok"}"#)?;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
             }
         }
 
@@ -539,6 +589,175 @@ async fn refresh_jwks_cache_once_replaces_existing_cache_on_success() {
 
     let snapshot = cache.snapshot().expect("cache should remain readable");
     assert_eq!(snapshot.keys()[0].key_id(), "refreshed-key");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn health_endpoint_returns_minimal_liveness_and_does_not_call_supabase() {
+    let (supabase_url, receiver, server_thread) =
+        spawn_capture_server(Duration::from_millis(250)).expect("capture server should start");
+    let state = test_app_state(&supabase_url, temp_path("health-minimal"))
+        .expect("test app state should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::get(format!("{app_url}/health"))
+        .await
+        .expect("health request should succeed");
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .expect("health response should be JSON");
+
+    app_task.abort();
+    assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err());
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body, json!({ "status": "up" }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ready_endpoint_returns_cached_supabase_state_when_fresh() {
+    let state = test_app_state("http://127.0.0.1:1", temp_path("ready-fresh"))
+        .expect("test app state should be created");
+    let checked_at = OffsetDateTime::now_utc();
+    state
+        .readiness_state
+        .record_supabase_probe_result_at(true, checked_at);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::get(format!("{app_url}/ready"))
+        .await
+        .expect("ready request should succeed");
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .expect("ready response should be JSON");
+
+    app_task.abort();
+
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["supabase_reachable"], true);
+    assert_eq!(body["master_key_loaded"], true);
+    assert_eq!(body["fallback_writable"], true);
+    assert_eq!(body["audit_failure_append_both_failed_recent"], false);
+    assert!(body["supabase_last_checked_at"].is_string());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ready_endpoint_returns_service_unavailable_when_supabase_probe_is_stale() {
+    let state = test_app_state("http://127.0.0.1:1", temp_path("ready-stale"))
+        .expect("test app state should be created");
+    state.readiness_state.record_supabase_probe_result_at(
+        true,
+        OffsetDateTime::now_utc() - time::Duration::seconds(61),
+    );
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::get(format!("{app_url}/ready"))
+        .await
+        .expect("ready request should succeed");
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .expect("ready response should be JSON");
+
+    app_task.abort();
+
+    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["status"], "not_ready");
+    assert_eq!(body["supabase_reachable"], true);
+    assert!(body["supabase_last_checked_at"].is_string());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ready_endpoint_reports_failure_audit_both_failed_recent_with_ttl() {
+    let state = test_app_state("http://127.0.0.1:1", temp_path("ready-both-failed"))
+        .expect("test app state should be created");
+    state
+        .readiness_state
+        .record_supabase_probe_result_at(true, OffsetDateTime::now_utc());
+    let (app_url, app_task) = spawn_app(state.clone())
+        .await
+        .expect("test app should start");
+
+    state
+        .readiness_state
+        .mark_failure_audit_both_failed_at(OffsetDateTime::now_utc());
+    let recent_response = reqwest::get(format!("{app_url}/ready"))
+        .await
+        .expect("ready request should succeed");
+    let recent_status = recent_response.status();
+    let recent_body: Value = recent_response
+        .json()
+        .await
+        .expect("recent ready response should be JSON");
+
+    state.readiness_state.mark_failure_audit_both_failed_at(
+        OffsetDateTime::now_utc() - time::Duration::seconds(301),
+    );
+    let expired_response = reqwest::get(format!("{app_url}/ready"))
+        .await
+        .expect("ready request should succeed");
+    let expired_status = expired_response.status();
+    let expired_body: Value = expired_response
+        .json()
+        .await
+        .expect("expired ready response should be JSON");
+
+    app_task.abort();
+
+    assert_eq!(recent_status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(recent_body["audit_failure_append_both_failed_recent"], true);
+    assert_eq!(recent_body["status"], "not_ready");
+
+    assert_eq!(expired_status, reqwest::StatusCode::OK);
+    assert_eq!(
+        expired_body["audit_failure_append_both_failed_recent"],
+        false
+    );
+    assert_eq!(expired_body["status"], "ready");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ready_endpoint_reflects_pending_fallback_count_and_disk_metrics() {
+    let fallback_path = temp_path("ready-diagnostics.jsonl");
+    write_file(
+        &fallback_path,
+        format!(
+            "{}\n",
+            valid_audit_fallback_line("33333333-3333-4333-8333-333333333333", "pending")
+        )
+        .as_bytes(),
+    );
+    let state = test_app_state("http://127.0.0.1:1", fallback_path.clone())
+        .expect("test app state should be created");
+    state
+        .readiness_state
+        .record_supabase_probe_result_at(true, OffsetDateTime::now_utc());
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::get(format!("{app_url}/ready"))
+        .await
+        .expect("ready request should succeed");
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .expect("ready response should be JSON");
+
+    app_task.abort();
+
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["audit_fallback_pending"], 1);
+    assert_eq!(body["fallback_writable"], true);
+    assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
 }
 
 #[test]

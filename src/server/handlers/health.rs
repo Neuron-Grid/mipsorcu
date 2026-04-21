@@ -1,22 +1,61 @@
+use std::fs::OpenOptions;
 use std::path::Path;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
-use crate::server::dto::{ApiErrorResponse, HealthResponse};
+use crate::server::dto::{ApiErrorResponse, HealthResponse, ReadyResponse};
 use crate::server::state::AppState;
 
-pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    let supabase_ok = state.supabase_client.check_connectivity().await;
-    let disk_space = available_disk_space_mb(&state.audit_fallback_path);
+const FAILURE_AUDIT_BOTH_FAILED_TTL: Duration = Duration::from_secs(5 * 60);
 
-    Json(HealthResponse {
-        status: "up",
-        supabase: if supabase_ok { "ok" } else { "ng" },
-        master_key: "loaded",
-        disk_space_mb: disk_space,
-    })
+pub async fn health_check() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "up" })
+}
+
+pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<ReadyResponse>) {
+    let now = OffsetDateTime::now_utc();
+    let snapshot = state.readiness_state.snapshot();
+    let supabase_max_age = state
+        .health_readiness_poll_interval
+        .checked_mul(2)
+        .unwrap_or(Duration::MAX);
+    let supabase_fresh = snapshot.supabase_is_fresh(now, supabase_max_age);
+    let fallback_writable = fallback_is_writable(state.audit_fallback_store.path());
+    let disk_free_mb = available_disk_space_mb(state.audit_fallback_store.path());
+    let audit_failure_append_both_failed_recent =
+        snapshot.failure_audit_both_failed_recent(now, FAILURE_AUDIT_BOTH_FAILED_TTL);
+    let audit_fallback_pending = audit_fallback_pending_count(&state).await;
+    let supabase_last_checked_at = format_timestamp(snapshot.supabase_last_checked_at);
+    let master_key_loaded = true;
+    let is_ready = snapshot.supabase_reachable
+        && supabase_fresh
+        && master_key_loaded
+        && fallback_writable
+        && !audit_failure_append_both_failed_recent;
+    let status = if is_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(ReadyResponse {
+            status: if is_ready { "ready" } else { "not_ready" },
+            supabase_reachable: snapshot.supabase_reachable,
+            supabase_last_checked_at,
+            master_key_loaded,
+            fallback_writable,
+            disk_free_mb,
+            audit_fallback_pending,
+            audit_failure_append_both_failed_recent,
+        }),
+    )
 }
 
 pub async fn not_found() -> (StatusCode, Json<ApiErrorResponse>) {
@@ -51,4 +90,41 @@ fn available_disk_space_mb(path: &Path) -> Option<u64> {
         let _ = path;
         None
     }
+}
+
+async fn audit_fallback_pending_count(state: &AppState) -> u64 {
+    let fallback_store = state.audit_fallback_store.clone();
+
+    match tokio::task::spawn_blocking(move || {
+        fallback_store
+            .pending_events()
+            .map(|events| match u64::try_from(events.len()) {
+                Ok(count) => count,
+                Err(_) => u64::MAX,
+            })
+    })
+    .await
+    {
+        Ok(Ok(count)) => count,
+        Ok(Err(error)) => {
+            tracing::error!(error = %error, "failed to count pending audit fallback events");
+            0
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "pending audit fallback count task failed");
+            0
+        }
+    }
+}
+
+fn fallback_is_writable(path: &Path) -> bool {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .is_ok()
+}
+
+fn format_timestamp(timestamp: Option<OffsetDateTime>) -> Option<String> {
+    timestamp.and_then(|timestamp| timestamp.format(&Rfc3339).ok())
 }

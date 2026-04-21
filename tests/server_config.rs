@@ -7,7 +7,8 @@ use mipsorcu::server::config::{
     AppConfig, ConfigError, load_config_from_sources, parse_audit_fallback_alert_threshold,
     parse_audit_fallback_archive_auto_delete_enabled, parse_audit_fallback_archive_retention_days,
     parse_audit_fallback_rotate_size, parse_audit_resend_interval, parse_dotenv_contents,
-    parse_jwks_refresh_interval, parse_restore_test_interval, parse_restore_test_sample_limit,
+    parse_health_readiness_poll_interval, parse_jwks_refresh_interval, parse_restore_test_interval,
+    parse_restore_test_sample_limit,
 };
 use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
 
@@ -298,7 +299,8 @@ fn restore_test_interval_rejects_zero_empty_and_non_numeric_values() {
 
 #[test]
 fn restore_test_sample_limit_defaults_to_three() {
-    let limit = parse_restore_test_sample_limit(None).expect("default sample limit should be valid");
+    let limit =
+        parse_restore_test_sample_limit(None).expect("default sample limit should be valid");
 
     assert_eq!(limit, 3);
 }
@@ -359,6 +361,38 @@ fn jwks_refresh_interval_rejects_zero_empty_and_non_numeric_values() {
 }
 
 #[test]
+fn health_readiness_poll_interval_defaults_to_thirty_seconds() {
+    let interval =
+        parse_health_readiness_poll_interval(None).expect("default poll interval should be valid");
+
+    assert_eq!(interval, Duration::from_secs(30));
+}
+
+#[test]
+fn health_readiness_poll_interval_accepts_positive_seconds() {
+    let interval = parse_health_readiness_poll_interval(Some("45".to_owned()))
+        .expect("positive poll interval should be valid");
+
+    assert_eq!(interval, Duration::from_secs(45));
+}
+
+#[test]
+fn health_readiness_poll_interval_rejects_zero_empty_and_non_numeric_values() {
+    assert!(matches!(
+        parse_health_readiness_poll_interval(Some("0".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_health_readiness_poll_interval(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_health_readiness_poll_interval(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
 fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     let master_key_bytes = vec![7; MASTER_KEY_LENGTH];
     let config = AppConfig {
@@ -374,6 +408,7 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         jwt_audience: "audience".to_owned(),
         jwks_url: "https://example.supabase.co/auth/v1/.well-known/jwks.json".to_owned(),
         jwks_refresh_interval: Duration::from_secs(300),
+        health_readiness_poll_interval: Duration::from_secs(45),
         audit_fallback_path: PathBuf::from("/tmp/mipsorcu-audit.jsonl"),
         audit_resend_interval: Duration::from_secs(60),
         audit_fallback_alert_threshold_bytes: 4096,
@@ -401,6 +436,8 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("jwks_url"));
     assert!(output.contains("jwks_refresh_interval_seconds"));
     assert!(output.contains("300"));
+    assert!(output.contains("health_readiness_poll_interval_seconds"));
+    assert!(output.contains("45"));
     assert!(!output.contains("service-role-secret"));
     assert!(!output.contains("publishable-secret"));
 }

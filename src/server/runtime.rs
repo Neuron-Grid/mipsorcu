@@ -27,7 +27,7 @@ use tracing_subscriber::fmt;
 use crate::server::config;
 use crate::server::errors::ApiError;
 use crate::server::handlers;
-use crate::server::state::AppState;
+use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{RestoreTestSampleRow, SupabaseAuditAppender, SupabaseClient};
 use crate::{
     Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
@@ -89,6 +89,14 @@ pub async fn run() {
         config.supabase_service_role_key,
         config.supabase_publishable_key,
     ));
+    let readiness_state = ReadinessState::new();
+    let health_readiness_poll_interval = config.health_readiness_poll_interval;
+    tokio::spawn(run_supabase_readiness_poll_loop(
+        readiness_state.clone(),
+        supabase_client.clone(),
+        health_readiness_poll_interval,
+        shutdown_sender.subscribe(),
+    ));
 
     let runtime_handle = tokio::runtime::Handle::current();
     let audit_appender = SupabaseAuditAppender::new(supabase_client.clone(), runtime_handle);
@@ -97,8 +105,8 @@ pub async fn run() {
         &config.audit_fallback_archive_dir,
         config.audit_fallback_rotate_size_bytes,
     );
+    let app_fallback_store = fallback_store.clone();
     let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store.clone()));
-    let audit_fallback_path = config.audit_fallback_path.clone();
     let audit_resend_interval = config.audit_resend_interval;
     let audit_fallback_alert_threshold_bytes = config.audit_fallback_alert_threshold_bytes;
     let audit_fallback_archive_auto_delete_enabled =
@@ -123,7 +131,9 @@ pub async fn run() {
         jwt_verifier,
         supabase_client,
         audit_recorder,
-        audit_fallback_path,
+        audit_fallback_store: app_fallback_store,
+        readiness_state,
+        health_readiness_poll_interval,
     };
     let restore_test_state = state.clone();
     tokio::spawn(run_restore_test_loop(
@@ -173,6 +183,7 @@ fn build_app(state: AppState) -> Router {
             post(handlers::decrypt_secret),
         )
         .route("/health", get(handlers::health_check))
+        .route("/ready", get(handlers::ready_check))
         .fallback(handlers::not_found)
         .layer(SetSensitiveRequestHeadersLayer::new([
             http::header::AUTHORIZATION,
@@ -271,6 +282,40 @@ async fn run_jwks_refresh_loop(
             }
         }
     }
+}
+
+async fn run_supabase_readiness_poll_loop(
+    readiness_state: ReadinessState,
+    supabase_client: Arc<SupabaseClient>,
+    interval_duration: Duration,
+    mut shutdown_receiver: watch::Receiver<bool>,
+) {
+    run_supabase_readiness_probe_once(&readiness_state, &supabase_client).await;
+
+    let mut interval = tokio::time::interval(interval_duration);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            result = shutdown_receiver.changed() => {
+                if result.is_err() || *shutdown_receiver.borrow() {
+                    tracing::info!("Supabase readiness poll loop stopped");
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                run_supabase_readiness_probe_once(&readiness_state, &supabase_client).await;
+            }
+        }
+    }
+}
+
+async fn run_supabase_readiness_probe_once(
+    readiness_state: &ReadinessState,
+    supabase_client: &Arc<SupabaseClient>,
+) {
+    let reachable = supabase_client.probe_readiness().await;
+    readiness_state.record_supabase_probe_result(reachable);
 }
 
 fn jwks_fetch_error_kind(error: &JwksFetchError) -> &'static str {

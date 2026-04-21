@@ -251,6 +251,7 @@ fn record_failure_audit_nonblocking_with_metadata(
     };
 
     let recorder = state.audit_recorder.clone();
+    let readiness_state = state.readiness_state.clone();
     tokio::task::spawn_blocking(move || match recorder.record(&event) {
         Ok(AuditRecordOutcome::PrimarySucceeded) => {
             tracing::debug!(
@@ -265,6 +266,7 @@ fn record_failure_audit_nonblocking_with_metadata(
             );
         }
         Err(error) => {
+            readiness_state.mark_failure_audit_both_failed();
             tracing::error!(
                 error = %error,
                 audit_record_outcome = "both_failed",

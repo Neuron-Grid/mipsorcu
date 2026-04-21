@@ -9,7 +9,7 @@ mod shared;
 
 pub use create::create_secret;
 pub use decrypt::decrypt_secret;
-pub use health::{health_check, not_found};
+pub use health::{health_check, not_found, ready_check};
 pub use rotate::rotate_secret;
 
 #[doc(hidden)]
