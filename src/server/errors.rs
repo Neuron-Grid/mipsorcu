@@ -17,6 +17,7 @@ pub enum ApiError {
     DecryptFailed,
     AuditAppendFailed,
     SupabaseError(SupabaseRpcError),
+    DbIntegrityViolation(String),
     InternalInvariantViolation(String),
     InternalError(String),
 }
@@ -31,6 +32,9 @@ impl fmt::Display for ApiError {
             Self::DecryptFailed => write!(formatter, "decrypt failed"),
             Self::AuditAppendFailed => write!(formatter, "audit append failed"),
             Self::SupabaseError(error) => write!(formatter, "{error}"),
+            Self::DbIntegrityViolation(message) => {
+                write!(formatter, "db integrity violation: {message}")
+            }
             Self::InternalInvariantViolation(message) => {
                 write!(formatter, "internal invariant violation: {message}")
             }
@@ -51,6 +55,9 @@ impl ApiError {
             Self::DecryptFailed => (StatusCode::BAD_REQUEST, "decrypt_failed"),
             Self::AuditAppendFailed => (StatusCode::INTERNAL_SERVER_ERROR, "audit_append_failed"),
             Self::SupabaseError(_) => (StatusCode::BAD_GATEWAY, "supabase_error"),
+            Self::DbIntegrityViolation(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "db_integrity_violation")
+            }
             Self::InternalInvariantViolation(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_invariant_violation",
@@ -68,9 +75,9 @@ impl ApiError {
             Self::DecryptFailed => "decrypt failed".to_owned(),
             Self::AuditAppendFailed => "audit append failed".to_owned(),
             Self::SupabaseError(_) => "upstream service error".to_owned(),
-            Self::InternalInvariantViolation(_) | Self::InternalError(_) => {
-                "internal error".to_owned()
-            }
+            Self::DbIntegrityViolation(_)
+            | Self::InternalInvariantViolation(_)
+            | Self::InternalError(_) => "internal error".to_owned(),
         }
     }
 }

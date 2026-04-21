@@ -2,6 +2,12 @@ use crate::auth::VerifiedJwtClaims;
 use crate::error::AuthorizationError;
 use crate::types::{OwnerUserId, SecretVersion};
 
+pub fn authorize_new_secret_create(claims: &VerifiedJwtClaims) -> Result<(), AuthorizationError> {
+    let _ = claims;
+
+    Ok(())
+}
+
 pub fn authorize_current_version_decrypt(
     claims: &VerifiedJwtClaims,
     owner_user_id: &OwnerUserId,

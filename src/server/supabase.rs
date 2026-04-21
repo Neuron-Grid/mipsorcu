@@ -87,7 +87,7 @@ impl SupabaseClient {
         secret_id: &str,
         raw_jwt: &RawJwt,
     ) -> Result<Vec<SecretVersionReadRow>, SupabaseRpcError> {
-        let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+        let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
         let url = format!(
             "{}/rest/v1/secret_versions?select={select}&secret_id=eq.{secret_id}",
             self.base_url
@@ -113,7 +113,7 @@ impl SupabaseClient {
     pub async fn fetch_restore_test_current_secret_version(
         &self,
     ) -> Result<Option<SecretVersionReadRow>, SupabaseRpcError> {
-        let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+        let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
         let url = format!(
             "{}/rest/v1/secret_versions?select={select}&order=created_at.desc&limit=100",
             self.base_url
@@ -200,6 +200,7 @@ pub struct SecretVersionReadRow {
     pub encrypted_data_key: String,
     pub key_version: i32,
     pub algorithm: String,
+    pub classification: String,
     pub nonce_or_iv: String,
     pub aad_context: Value,
     pub created_by_user_id: String,

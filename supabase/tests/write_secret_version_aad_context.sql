@@ -166,6 +166,7 @@ create function test_helpers.try_insert_secret_version(
     p_secret_id uuid,
     p_owner_user_id uuid,
     p_created_at timestamptz,
+    p_classification text,
     p_aad_context jsonb
 )
 returns text
@@ -194,6 +195,7 @@ begin
         encrypted_data_key,
         key_version,
         algorithm,
+        classification,
         nonce_or_iv,
         aad_context,
         created_by_user_id,
@@ -207,6 +209,7 @@ begin
         decode(repeat('bb', 73), 'hex'),
         1,
         'xchacha20-poly1305',
+        p_classification,
         decode(repeat('0a', 24), 'hex'),
         p_aad_context,
         p_owner_user_id,
@@ -362,6 +365,7 @@ select ok(
             '6e0e8400-e29b-41d4-a716-446655440000',
             'f47ac10b-58cc-4372-a567-0e02b2c3d479',
             '2026-04-08T12:00:00Z',
+            'confidential',
             test_helpers.aad_context(
                 '6e0e8400-e29b-41d4-a716-446655440000',
                 1,
@@ -372,6 +376,62 @@ select ok(
         )
     ) > 0,
     'direct secret_versions insert rejects aad_context extra keys'
+);
+
+select ok(
+    position(
+        'secret_versions_classification_matches_aad' in test_helpers.try_insert_secret_version(
+            '700e8400-e29b-41d4-a716-446655440000',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            '2026-04-08T12:00:00Z',
+            'restricted',
+            test_helpers.aad_context(
+                '700e8400-e29b-41d4-a716-446655440000',
+                1,
+                'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                'confidential',
+                '2026-04-08T12:00:00Z'
+            )
+        )
+    ) > 0,
+    'direct secret_versions insert rejects classification mismatch against aad_context'
+);
+
+select ok(
+    position(
+        'secret_versions_classification_non_blank' in test_helpers.try_insert_secret_version(
+            '710e8400-e29b-41d4-a716-446655440000',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            '2026-04-08T12:00:00Z',
+            '   ',
+            test_helpers.aad_context(
+                '710e8400-e29b-41d4-a716-446655440000',
+                1,
+                'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                '   ',
+                '2026-04-08T12:00:00Z'
+            )
+        )
+    ) > 0,
+    'direct secret_versions insert rejects blank classification'
+);
+
+select is(
+    test_helpers.try_insert_secret_version(
+        '720e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        '2026-04-08T12:00:00Z',
+        'confidential',
+        test_helpers.aad_context(
+            '720e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'direct secret_versions insert accepts matching classification and aad_context'
 );
 
 select is(

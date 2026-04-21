@@ -1,5 +1,6 @@
 use mipsorcu::{
     AuthorizationError, OwnerUserId, VerifiedJwtClaims, authorize_existing_secret_version_write,
+    authorize_new_secret_create,
 };
 
 const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -17,6 +18,13 @@ fn existing_secret_version_write_allows_owner() {
 
     let result =
         authorize_existing_secret_version_write(&claims_for(OWNER_USER_ID), &owner_user_id);
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn new_secret_create_allows_verified_user() {
+    let result = authorize_new_secret_create(&claims_for(OWNER_USER_ID));
 
     assert!(result.is_ok());
 }

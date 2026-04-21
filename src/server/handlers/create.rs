@@ -8,7 +8,9 @@ use crate::server::dto::{CreateSecretRequest, CreateSecretResponse};
 use crate::server::errors::ApiError;
 use crate::server::middleware::AuthenticatedUser;
 use crate::server::state::AppState;
-use crate::{NewSecretVersionInput, OwnerUserId, PreparedSecretVersion};
+use crate::{
+    NewSecretVersionInput, OwnerUserId, PreparedSecretVersion, authorize_new_secret_create,
+};
 
 use super::audit::{FailureAuditContext, failure_audit_metadata_for_attempted_secret};
 use super::parsing::{ParsedCreateSecretRequest, parse_create_secret_request};
@@ -29,6 +31,10 @@ pub async fn create_secret(
         None,
         AuditAction::EncryptCreate,
     );
+    authorize_new_secret_create(&auth.claims).map_err(|error| {
+        failure.log_and_record(&error, "authorize_new_secret_create");
+        ApiError::Forbidden("forbidden".to_owned())
+    })?;
 
     let prepared = prepare_secret_version(&state, owner_user_id.clone(), request)
         .await

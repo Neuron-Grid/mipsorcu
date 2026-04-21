@@ -108,21 +108,29 @@ pub(in crate::server) fn parse_decrypt_row(
     row: SecretVersionReadRow,
 ) -> Result<PreparedDecryptRow, ApiError> {
     validate_decrypt_row_invariants(&row)?;
-    let decoded = decode_secret_version_bytes(&row)?;
+    let decoded = decode_secret_version_bytes(&row).map_err(|_| {
+        ApiError::DbIntegrityViolation("secret version bytes are invalid".to_owned())
+    })?;
 
     Ok(PreparedDecryptRow {
-        secret_id: SecretId::parse(&row.secret_id).map_err(|_| ApiError::DecryptFailed)?,
+        secret_id: SecretId::parse(&row.secret_id)
+            .map_err(|_| ApiError::DbIntegrityViolation("secret_id is invalid".to_owned()))?,
         version: parse_secret_version(row.version)?,
         owner_user_id: OwnerUserId::parse(&row.secrets.owner_user_id)
-            .map_err(|_| ApiError::DecryptFailed)?,
-        classification: Classification::new(&row.secrets.classification)
-            .map_err(|_| ApiError::DecryptFailed)?,
-        created_at: CreatedAt::parse(&row.created_at).map_err(|_| ApiError::DecryptFailed)?,
+            .map_err(|_| ApiError::DbIntegrityViolation("owner_user_id is invalid".to_owned()))?,
+        classification: Classification::new(&row.classification).map_err(|_| {
+            ApiError::DbIntegrityViolation("secret version classification is invalid".to_owned())
+        })?,
+        created_at: CreatedAt::parse(&row.created_at)
+            .map_err(|_| ApiError::DbIntegrityViolation("created_at is invalid".to_owned()))?,
         key_version: parse_key_version(row.key_version)?,
-        encrypted_data_key: EncryptedDataKey::parse(&decoded.encrypted_data_key)
-            .map_err(|_| ApiError::DecryptFailed)?,
-        nonce_or_iv: Nonce::parse(&decoded.nonce_or_iv).map_err(|_| ApiError::DecryptFailed)?,
-        ciphertext: Ciphertext::new(decoded.ciphertext).map_err(|_| ApiError::DecryptFailed)?,
+        encrypted_data_key: EncryptedDataKey::parse(&decoded.encrypted_data_key).map_err(|_| {
+            ApiError::DbIntegrityViolation("encrypted_data_key is invalid".to_owned())
+        })?,
+        nonce_or_iv: Nonce::parse(&decoded.nonce_or_iv)
+            .map_err(|_| ApiError::DbIntegrityViolation("nonce_or_iv is invalid".to_owned()))?,
+        ciphertext: Ciphertext::new(decoded.ciphertext)
+            .map_err(|_| ApiError::DbIntegrityViolation("ciphertext is invalid".to_owned()))?,
         aad_context: row.aad_context,
     })
 }
@@ -149,15 +157,27 @@ pub(super) fn select_single_current_secret_version_row(
 
 fn validate_decrypt_row_invariants(row: &SecretVersionReadRow) -> Result<(), ApiError> {
     if row.algorithm != ALGORITHM_XCHACHA20_POLY1305 {
-        return Err(ApiError::DecryptFailed);
+        return Err(ApiError::DbIntegrityViolation(
+            "secret version algorithm is invalid".to_owned(),
+        ));
     }
 
     if row.secrets.current_version_id != row.id {
-        return Err(ApiError::DecryptFailed);
+        return Err(ApiError::DbIntegrityViolation(
+            "current_version_id does not match the selected version row".to_owned(),
+        ));
     }
 
     if row.created_by_user_id != row.secrets.owner_user_id {
-        return Err(ApiError::DecryptFailed);
+        return Err(ApiError::DbIntegrityViolation(
+            "created_by_user_id does not match owner_user_id".to_owned(),
+        ));
+    }
+
+    if row.classification != row.secrets.classification {
+        return Err(ApiError::DbIntegrityViolation(
+            "secret version classification does not match secret classification".to_owned(),
+        ));
     }
 
     Ok(())
@@ -177,14 +197,14 @@ fn parse_secret_version(value: i32) -> Result<SecretVersion, ApiError> {
     u32::try_from(value)
         .ok()
         .and_then(|parsed| SecretVersion::new(parsed).ok())
-        .ok_or(ApiError::DecryptFailed)
+        .ok_or_else(|| ApiError::DbIntegrityViolation("version is invalid".to_owned()))
 }
 
 fn parse_key_version(value: i32) -> Result<KeyVersion, ApiError> {
     u32::try_from(value)
         .ok()
         .and_then(|parsed| KeyVersion::new(parsed).ok())
-        .ok_or(ApiError::DecryptFailed)
+        .ok_or_else(|| ApiError::DbIntegrityViolation("key_version is invalid".to_owned()))
 }
 
 pub(super) fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {

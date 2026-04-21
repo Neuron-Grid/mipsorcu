@@ -22,6 +22,7 @@ pub use auth::{
 };
 pub use authorization::{
     authorize_current_version_decrypt, authorize_existing_secret_version_write,
+    authorize_new_secret_create,
 };
 pub use crypto::{
     ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, KeyWrapContext, decrypt_secret, encrypt_secret,

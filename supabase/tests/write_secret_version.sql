@@ -252,6 +252,17 @@ select is(
 
 select is(
     (
+        select sv.classification
+        from public.secret_versions sv
+        where sv.secret_id = '550e8400-e29b-41d4-a716-446655440000'
+            and sv.version = 1
+    ),
+    'confidential',
+    'secret_versions.classification stores RPC classification'
+);
+
+select is(
+    (
         select c.column_default::text
         from information_schema.columns c
         where c.table_schema = 'public'

@@ -26,6 +26,7 @@ fn valid_row() -> SecretVersionReadRow {
         encrypted_data_key: format!("\\x01{}", "00".repeat(72)),
         key_version: 1,
         algorithm: mipsorcu::ALGORITHM_XCHACHA20_POLY1305.to_owned(),
+        classification: "confidential".to_owned(),
         nonce_or_iv: format!("\\x{}", "00".repeat(24)),
         aad_context: json!({
             "aad_version": 1,
@@ -166,42 +167,49 @@ fn parse_decrypt_row_rejects_invalid_lengths_and_metadata() {
     bad_nonce.nonce_or_iv = "\\x00".to_owned();
     assert!(matches!(
         testing::parse_decrypt_row(bad_nonce),
-        Err(mipsorcu::server::errors::ApiError::DecryptFailed)
+        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(_))
     ));
 
     let mut empty_ciphertext = valid_row();
     empty_ciphertext.ciphertext = "\\x".to_owned();
     assert!(matches!(
         testing::parse_decrypt_row(empty_ciphertext),
-        Err(mipsorcu::server::errors::ApiError::DecryptFailed)
+        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(_))
     ));
 
     let mut owner_mismatch = valid_row();
     owner_mismatch.created_by_user_id = "f47ac10b-58cc-4372-a567-0e02b2c3d480".to_owned();
     assert!(matches!(
         testing::parse_decrypt_row(owner_mismatch),
-        Err(mipsorcu::server::errors::ApiError::DecryptFailed)
+        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(_))
     ));
 
     let mut bad_algorithm = valid_row();
     bad_algorithm.algorithm = "chacha20-poly1305".to_owned();
     assert!(matches!(
         testing::parse_decrypt_row(bad_algorithm),
-        Err(mipsorcu::server::errors::ApiError::DecryptFailed)
+        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(_))
     ));
 
     let mut non_current = valid_row();
     non_current.secrets.current_version_id = "750e8400-e29b-41d4-a716-446655440000".to_owned();
     assert!(matches!(
         testing::parse_decrypt_row(non_current),
-        Err(mipsorcu::server::errors::ApiError::DecryptFailed)
+        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(_))
+    ));
+
+    let mut classification_mismatch = valid_row();
+    classification_mismatch.classification = "restricted".to_owned();
+    assert!(matches!(
+        testing::parse_decrypt_row(classification_mismatch),
+        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(_))
     ));
 
     let mut bad_encrypted_data_key = valid_row();
     bad_encrypted_data_key.encrypted_data_key = "\\x01".to_owned();
     assert!(matches!(
         testing::parse_decrypt_row(bad_encrypted_data_key),
-        Err(mipsorcu::server::errors::ApiError::DecryptFailed)
+        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(_))
     ));
 }
 

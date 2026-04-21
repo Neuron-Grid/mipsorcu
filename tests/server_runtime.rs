@@ -87,6 +87,7 @@ fn prepared_restore_test_row(
             ),
             key_version: i32::try_from(prepared.key_version().get())?,
             algorithm: mipsorcu::ALGORITHM_XCHACHA20_POLY1305.to_owned(),
+            classification: prepared.classification().as_str().to_owned(),
             nonce_or_iv: format!("\\x{}", hex::encode(prepared.nonce_or_iv().as_bytes())),
             aad_context: prepared.aad_context().clone(),
             created_by_user_id: OWNER_USER_ID.to_owned(),

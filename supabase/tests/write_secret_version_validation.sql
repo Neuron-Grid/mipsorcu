@@ -166,6 +166,7 @@ create function test_helpers.try_insert_secret_version(
     p_secret_id uuid,
     p_owner_user_id uuid,
     p_created_at timestamptz,
+    p_classification text,
     p_aad_context jsonb
 )
 returns text
@@ -194,6 +195,7 @@ begin
         encrypted_data_key,
         key_version,
         algorithm,
+        classification,
         nonce_or_iv,
         aad_context,
         created_by_user_id,
@@ -207,6 +209,7 @@ begin
         decode(repeat('bb', 73), 'hex'),
         1,
         'xchacha20-poly1305',
+        p_classification,
         decode(repeat('0a', 24), 'hex'),
         p_aad_context,
         p_owner_user_id,
