@@ -98,6 +98,10 @@ impl AadV1 {
         )
     }
 
+    pub fn owner_user_id(&self) -> &OwnerUserId {
+        &self.owner_user_id
+    }
+
     pub fn canonical_json(&self) -> Result<String, AadError> {
         let created_at = self.created_at.as_rfc3339_utc()?;
         let owner_user_id = self.owner_user_id.as_canonical_string();

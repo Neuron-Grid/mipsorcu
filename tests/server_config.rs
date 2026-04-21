@@ -7,7 +7,7 @@ use mipsorcu::server::config::{
     AppConfig, ConfigError, load_config_from_sources, parse_audit_fallback_alert_threshold,
     parse_audit_fallback_archive_auto_delete_enabled, parse_audit_fallback_archive_retention_days,
     parse_audit_fallback_rotate_size, parse_audit_resend_interval, parse_dotenv_contents,
-    parse_jwks_refresh_interval, parse_restore_test_interval,
+    parse_jwks_refresh_interval, parse_restore_test_interval, parse_restore_test_sample_limit,
 };
 use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
 
@@ -297,6 +297,37 @@ fn restore_test_interval_rejects_zero_empty_and_non_numeric_values() {
 }
 
 #[test]
+fn restore_test_sample_limit_defaults_to_three() {
+    let limit = parse_restore_test_sample_limit(None).expect("default sample limit should be valid");
+
+    assert_eq!(limit, 3);
+}
+
+#[test]
+fn restore_test_sample_limit_accepts_positive_values() {
+    let limit = parse_restore_test_sample_limit(Some("5".to_owned()))
+        .expect("positive sample limit should be valid");
+
+    assert_eq!(limit, 5);
+}
+
+#[test]
+fn restore_test_sample_limit_rejects_zero_empty_and_non_numeric_values() {
+    assert!(matches!(
+        parse_restore_test_sample_limit(Some("0".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_restore_test_sample_limit(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_restore_test_sample_limit(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
 fn jwks_refresh_interval_defaults_to_sixty_minutes() {
     let interval = parse_jwks_refresh_interval(None).expect("default interval should be valid");
 
@@ -351,6 +382,7 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         audit_fallback_archive_auto_delete_enabled: false,
         audit_fallback_archive_retention: Duration::from_secs(90 * 24 * 60 * 60),
         restore_test_interval: Duration::from_secs(24 * 60 * 60),
+        restore_test_sample_limit: 3,
     };
 
     let output = format!("{config:?}");
@@ -364,6 +396,8 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("audit_fallback_archive_retention_days"));
     assert!(output.contains("90"));
     assert!(output.contains("restore_test_interval_seconds"));
+    assert!(output.contains("restore_test_sample_limit"));
+    assert!(output.contains("3"));
     assert!(output.contains("jwks_url"));
     assert!(output.contains("jwks_refresh_interval_seconds"));
     assert!(output.contains("300"));

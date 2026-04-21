@@ -12,8 +12,6 @@ pub use decrypt::decrypt_secret;
 pub use health::{health_check, not_found};
 pub use rotate::rotate_secret;
 
-pub(in crate::server) use read_row::{PreparedDecryptRow, parse_decrypt_row};
-
 #[doc(hidden)]
 pub mod testing {
     pub use super::read_row::PreparedDecryptRow;

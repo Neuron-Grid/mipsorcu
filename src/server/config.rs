@@ -16,6 +16,7 @@ const DEFAULT_AUDIT_FALLBACK_ROTATE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS: u64 = 90;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const DEFAULT_RESTORE_TEST_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const DEFAULT_RESTORE_TEST_SAMPLE_LIMIT: u32 = 3;
 const DEFAULT_JWKS_REFRESH_INTERVAL_SECONDS: u64 = 60 * 60;
 
 const ENV_LISTEN_ADDR: &str = "MIPSORCU_LISTEN_ADDR";
@@ -38,6 +39,7 @@ const ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED: &str =
 const ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS: &str =
     "MIPSORCU_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS";
 const ENV_RESTORE_TEST_INTERVAL_SECONDS: &str = "MIPSORCU_RESTORE_TEST_INTERVAL_SECONDS";
+const ENV_RESTORE_TEST_SAMPLE_LIMIT: &str = "MIPSORCU_RESTORE_TEST_SAMPLE_LIMIT";
 const ENV_JWKS_REFRESH_INTERVAL_SECONDS: &str = "MIPSORCU_JWKS_REFRESH_INTERVAL_SECONDS";
 
 #[doc(hidden)]
@@ -62,6 +64,7 @@ pub struct AppConfig {
     pub audit_fallback_archive_auto_delete_enabled: bool,
     pub audit_fallback_archive_retention: Duration,
     pub restore_test_interval: Duration,
+    pub restore_test_sample_limit: u32,
 }
 
 impl fmt::Debug for AppConfig {
@@ -110,6 +113,7 @@ impl fmt::Debug for AppConfig {
                 "restore_test_interval_seconds",
                 &self.restore_test_interval.as_secs(),
             )
+            .field("restore_test_sample_limit", &self.restore_test_sample_limit)
             .finish()
     }
 }
@@ -250,6 +254,11 @@ where
         dotenv,
         get_process_var,
     ))?;
+    let restore_test_sample_limit = parse_restore_test_sample_limit(optional_var(
+        ENV_RESTORE_TEST_SAMPLE_LIMIT,
+        dotenv,
+        get_process_var,
+    ))?;
 
     Ok(AppConfig {
         listen_addr,
@@ -270,6 +279,7 @@ where
         audit_fallback_archive_auto_delete_enabled,
         audit_fallback_archive_retention,
         restore_test_interval,
+        restore_test_sample_limit,
     })
 }
 
@@ -354,6 +364,28 @@ pub fn parse_restore_test_interval(value: Option<String>) -> Result<Duration, Co
         DEFAULT_RESTORE_TEST_INTERVAL_SECONDS,
     )
     .map(Duration::from_secs)
+}
+
+pub fn parse_restore_test_sample_limit(value: Option<String>) -> Result<u32, ConfigError> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_RESTORE_TEST_SAMPLE_LIMIT);
+    };
+
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|error| ConfigError::InvalidValue {
+            name: ENV_RESTORE_TEST_SAMPLE_LIMIT,
+            reason: error.to_string(),
+        })?;
+
+    if parsed == 0 {
+        return Err(ConfigError::InvalidValue {
+            name: ENV_RESTORE_TEST_SAMPLE_LIMIT,
+            reason: "value must be greater than zero".to_owned(),
+        });
+    }
+
+    Ok(parsed)
 }
 
 pub fn parse_jwks_refresh_interval(value: Option<String>) -> Result<Duration, ConfigError> {

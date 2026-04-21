@@ -110,32 +110,17 @@ impl SupabaseClient {
         Ok(rows)
     }
 
-    pub async fn fetch_restore_test_current_secret_version(
+    pub async fn call_sample_restore_test(
         &self,
-    ) -> Result<Option<SecretVersionReadRow>, SupabaseRpcError> {
-        let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
-        let url = format!(
-            "{}/rest/v1/secret_versions?select={select}&order=created_at.desc&limit=100",
-            self.base_url
-        );
-        let response = self
-            .http_client
-            .get(&url)
-            .header("apikey", &self.service_role_key)
-            .bearer_auth(&self.service_role_key)
-            .send()
-            .await
-            .map_err(SupabaseRpcError::Network)?;
-
-        let rows: Vec<SecretVersionReadRow> = ensure_success(response)
+        limit: u32,
+    ) -> Result<Vec<RestoreTestSampleRow>, SupabaseRpcError> {
+        let params = SampleRestoreTestParams { p_limit: limit };
+        let response = self.post_rpc("rpc_sample_restore_test", &params).await?;
+        ensure_success(response)
             .await?
             .json()
             .await
-            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
-
-        Ok(rows
-            .into_iter()
-            .find(|row| row.secrets.current_version_id == row.id))
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))
     }
 
     pub async fn check_connectivity(&self) -> bool {
@@ -215,6 +200,20 @@ pub struct SecretReadJoin {
     pub classification: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RestoreTestSampleRow {
+    pub id: String,
+    pub secret_id: String,
+    pub version: i32,
+    pub ciphertext: String,
+    pub encrypted_data_key: String,
+    pub key_version: i32,
+    pub nonce_or_iv: String,
+    pub aad_context: Value,
+    pub classification: String,
+    pub created_at: String,
+}
+
 #[derive(Serialize)]
 pub struct WriteSecretVersionParams {
     pub p_request_id: String,
@@ -253,6 +252,11 @@ struct AppendAuditEventParams {
     p_result: String,
     p_key_version: Option<u32>,
     p_metadata_json: Value,
+}
+
+#[derive(Serialize)]
+struct SampleRestoreTestParams {
+    p_limit: u32,
 }
 
 impl AppendAuditEventParams {

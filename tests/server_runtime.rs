@@ -9,7 +9,7 @@ use mipsorcu::server::runtime::{
     audit_fallback_size_alert, initialize_jwt_verifier_from_jwks_url, refresh_jwks_cache_once,
     run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
-use mipsorcu::server::supabase::{SecretReadJoin, SecretVersionReadRow};
+use mipsorcu::server::supabase::RestoreTestSampleRow;
 use mipsorcu::{
     Classification, CreatedAt, DeviceId, Jwks, JwksCache, KeyVersion, LocalAuditFallbackStore,
     MASTER_KEY_LENGTH, MasterKey, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
@@ -59,7 +59,7 @@ fn sample_master_key() -> MasterKey {
 
 fn prepared_restore_test_row(
     plaintext: Vec<u8>,
-) -> Result<(MasterKey, SecretVersionReadRow), Box<dyn std::error::Error>> {
+) -> Result<(MasterKey, RestoreTestSampleRow), Box<dyn std::error::Error>> {
     let master_key = sample_master_key();
     let prepared = prepare_new_secret_version(
         &master_key,
@@ -76,7 +76,7 @@ fn prepared_restore_test_row(
 
     Ok((
         master_key,
-        SecretVersionReadRow {
+        RestoreTestSampleRow {
             id: version_id.clone(),
             secret_id: prepared.secret_id().as_canonical_string(),
             version: i32::try_from(prepared.version().get())?,
@@ -86,17 +86,10 @@ fn prepared_restore_test_row(
                 hex::encode(prepared.encrypted_data_key().as_bytes())
             ),
             key_version: i32::try_from(prepared.key_version().get())?,
-            algorithm: mipsorcu::ALGORITHM_XCHACHA20_POLY1305.to_owned(),
             classification: prepared.classification().as_str().to_owned(),
             nonce_or_iv: format!("\\x{}", hex::encode(prepared.nonce_or_iv().as_bytes())),
             aad_context: prepared.aad_context().clone(),
-            created_by_user_id: OWNER_USER_ID.to_owned(),
             created_at: prepared.created_at().as_rfc3339_utc()?,
-            secrets: SecretReadJoin {
-                current_version_id: version_id,
-                owner_user_id: prepared.owner_user_id().as_canonical_string(),
-                classification: prepared.classification().as_str().to_owned(),
-            },
         },
     ))
 }
@@ -277,11 +270,13 @@ async fn refresh_jwks_cache_once_replaces_existing_cache_on_success() {
 
 #[test]
 fn restore_test_metadata_records_no_sample_reason_without_forbidden_keys() {
-    let metadata = runtime_testing::restore_test_metadata(0, Some("no_current_secret_versions"));
+    let metadata =
+        runtime_testing::restore_test_metadata(0, Some("no_current_secret_versions"), None);
 
     assert_eq!(
         metadata.as_value(),
         &json!({
+            "phase": "verify",
             "sample_count": 0,
             "reason": "no_current_secret_versions",
         })
@@ -290,13 +285,15 @@ fn restore_test_metadata_records_no_sample_reason_without_forbidden_keys() {
 
 #[test]
 fn restore_test_metadata_records_failure_code_without_forbidden_keys() {
-    let metadata = runtime_testing::restore_test_metadata(1, Some("decrypt_failed"));
+    let metadata = runtime_testing::restore_test_metadata(3, Some("decrypt_failed"), Some(2));
 
     assert_eq!(
         metadata.as_value(),
         &json!({
-            "sample_count": 1,
+            "phase": "verify",
+            "sample_count": 3,
             "error_code": "decrypt_failed",
+            "failed_version": 2,
         })
     );
 }
@@ -321,7 +318,7 @@ fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::
         "aad_version": 1,
         "secret_id": row.secret_id.clone(),
         "version": row.version,
-        "owner_user_id": row.secrets.owner_user_id.clone(),
+        "owner_user_id": OWNER_USER_ID,
         "classification": "tampered",
         "created_at": row.created_at.clone(),
     });

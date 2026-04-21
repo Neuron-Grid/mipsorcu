@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::aad::AadV1;
 use crate::audit::{
     ArchiveSweepOutcome, AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata,
     AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditResult, LocalAuditFallbackStore,
@@ -11,7 +12,7 @@ use crate::auth::{
     JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, VerifiedJwtClaims, fetch_jwks,
 };
 use crate::decrypt_current_secret_version;
-use crate::read::DecryptCurrentSecretVersionInput;
+use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
 use axum::Router;
 use axum::routing::{get, post};
 use tokio::sync::watch;
@@ -23,9 +24,12 @@ use tracing_subscriber::fmt;
 use crate::server::config;
 use crate::server::errors::ApiError;
 use crate::server::handlers;
-use crate::server::handlers::PreparedDecryptRow;
 use crate::server::state::AppState;
-use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
+use crate::server::supabase::{RestoreTestSampleRow, SupabaseAuditAppender, SupabaseClient};
+use crate::{
+    Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
+    SecretId, SecretVersion,
+};
 
 const AUDIT_ARCHIVE_SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -98,6 +102,7 @@ pub async fn run() {
         config.audit_fallback_archive_auto_delete_enabled;
     let audit_fallback_archive_retention = config.audit_fallback_archive_retention;
     let restore_test_interval = config.restore_test_interval;
+    let restore_test_sample_limit = config.restore_test_sample_limit;
     let audit_resend_recorder = audit_recorder.clone();
     tokio::spawn(run_audit_resend_loop(
         audit_resend_recorder,
@@ -121,6 +126,7 @@ pub async fn run() {
     tokio::spawn(run_restore_test_loop(
         restore_test_state,
         restore_test_interval,
+        restore_test_sample_limit,
         shutdown_sender.subscribe(),
     ));
 
@@ -257,9 +263,10 @@ fn jwks_fetch_error_kind(error: &JwksFetchError) -> &'static str {
 async fn run_restore_test_loop(
     state: AppState,
     interval_duration: Duration,
+    sample_limit: u32,
     mut shutdown_receiver: watch::Receiver<bool>,
 ) {
-    run_restore_test_once(&state).await;
+    run_restore_test_once(&state, sample_limit).await;
 
     let mut interval = tokio::time::interval(interval_duration);
     interval.tick().await;
@@ -273,13 +280,13 @@ async fn run_restore_test_loop(
                 }
             }
             _ = interval.tick() => {
-                run_restore_test_once(&state).await;
+                run_restore_test_once(&state, sample_limit).await;
             }
         }
     }
 }
 
-pub async fn run_restore_test_once(state: &AppState) {
+pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
     let request_id = match RequestId::generate() {
         Ok(request_id) => request_id,
         Err(error) => {
@@ -294,13 +301,12 @@ pub async fn run_restore_test_once(state: &AppState) {
         }
     };
 
-    let row = match state
+    let sample_rows = match state
         .supabase_client
-        .fetch_restore_test_current_secret_version()
+        .call_sample_restore_test(sample_limit)
         .await
     {
-        Ok(Some(row)) => row,
-        Ok(None) => {
+        Ok(rows) if rows.is_empty() => {
             record_restore_test_audit(
                 state,
                 &request_id,
@@ -308,7 +314,7 @@ pub async fn run_restore_test_once(state: &AppState) {
                     result: AuditResult::Success,
                     target_secret_id: None,
                     key_version: None,
-                    metadata: restore_test_metadata(0, Some("no_current_secret_versions")),
+                    metadata: restore_test_metadata(0, Some("no_current_secret_versions"), None),
                     error_code: None,
                 },
             )
@@ -321,7 +327,8 @@ pub async fn run_restore_test_once(state: &AppState) {
             );
             return;
         }
-        Err(error) => {
+        Ok(rows) => rows,
+        Err(_error) => {
             record_restore_test_audit(
                 state,
                 &request_id,
@@ -329,117 +336,284 @@ pub async fn run_restore_test_once(state: &AppState) {
                     result: AuditResult::Failure,
                     target_secret_id: None,
                     key_version: None,
-                    metadata: restore_test_metadata(0, Some("candidate_fetch_failed")),
-                    error_code: Some("candidate_fetch_failed"),
+                    metadata: restore_test_metadata(0, Some("sample_fetch_failed"), None),
+                    error_code: Some("sample_fetch_failed"),
                 },
             )
             .await;
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
-                error = %error,
                 action = "restore_test",
                 result = "failure",
-                error_code = "candidate_fetch_failed",
+                error_code = "sample_fetch_failed",
                 sample_count = 0,
-                "restore test candidate fetch failed"
+                "restore test sample fetch failed"
             );
             return;
         }
     };
 
-    let parsed = match handlers::parse_decrypt_row(row) {
-        Ok(parsed) => parsed,
-        Err(error) => {
+    let sample_count = sample_rows.len() as u64;
+
+    for sample_row in sample_rows {
+        let failure_context = restore_test_failure_context_from_raw(&sample_row);
+        let prepared = match parse_restore_test_sample(sample_row) {
+            Ok(prepared) => prepared,
+            Err(_) => {
+                let log_target_secret_id = failure_context
+                    .target_secret_id
+                    .as_ref()
+                    .map(SecretId::as_canonical_string);
+                let log_key_version = failure_context.key_version.map(KeyVersion::get);
+                record_restore_test_audit(
+                    state,
+                    &request_id,
+                    RestoreTestAudit {
+                        result: AuditResult::Failure,
+                        target_secret_id: failure_context.target_secret_id,
+                        key_version: failure_context.key_version,
+                        metadata: restore_test_metadata(
+                            sample_count,
+                            Some("row_validation_failed"),
+                            failure_context.failed_version,
+                        ),
+                        error_code: Some("row_validation_failed"),
+                    },
+                )
+                .await;
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    target_secret_id = log_target_secret_id.as_deref(),
+                    key_version = log_key_version,
+                    failed_version = failure_context.failed_version,
+                    action = "restore_test",
+                    result = "failure",
+                    error_code = "row_validation_failed",
+                    sample_count = sample_count,
+                    "restore test row validation failed"
+                );
+                return;
+            }
+        };
+
+        let failure_context = RestoreTestFailureContext::from_prepared(&prepared);
+        let input = build_restore_test_decrypt_input(prepared);
+        let master_key = state.master_key.clone();
+        let decrypt_result =
+            tokio::task::spawn_blocking(move || decrypt_current_secret_version(&master_key, input))
+                .await
+                .map_err(|error| ApiError::InternalError(error.to_string()))
+                .and_then(|result| result.map_err(ApiError::from));
+
+        if decrypt_result.is_err() {
             record_restore_test_audit(
                 state,
                 &request_id,
                 RestoreTestAudit {
                     result: AuditResult::Failure,
-                    target_secret_id: None,
-                    key_version: None,
-                    metadata: restore_test_metadata(1, Some("row_validation_failed")),
-                    error_code: Some("row_validation_failed"),
-                },
-            )
-            .await;
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                error = %error,
-                action = "restore_test",
-                result = "failure",
-                error_code = "row_validation_failed",
-                sample_count = 1,
-                "restore test row validation failed"
-            );
-            return;
-        }
-    };
-
-    let target_secret_id = parsed.secret_id().clone();
-    let key_version = parsed.key_version();
-    let input = build_restore_test_decrypt_input(parsed);
-    let master_key = state.master_key.clone();
-    let decrypt_result =
-        tokio::task::spawn_blocking(move || decrypt_current_secret_version(&master_key, input))
-            .await
-            .map_err(|error| ApiError::InternalError(error.to_string()))
-            .and_then(|result| result.map_err(ApiError::from));
-
-    match decrypt_result {
-        Ok(plaintext) => {
-            drop(plaintext);
-            record_restore_test_audit(
-                state,
-                &request_id,
-                RestoreTestAudit {
-                    result: AuditResult::Success,
-                    target_secret_id: Some(target_secret_id.clone()),
-                    key_version: Some(key_version),
-                    metadata: restore_test_metadata(1, None),
-                    error_code: None,
-                },
-            )
-            .await;
-            tracing::info!(
-                request_id = %request_id.as_canonical_string(),
-                target_secret_id = %target_secret_id.as_canonical_string(),
-                key_version = key_version.get(),
-                action = "restore_test",
-                result = "success",
-                sample_count = 1,
-            );
-        }
-        Err(error) => {
-            record_restore_test_audit(
-                state,
-                &request_id,
-                RestoreTestAudit {
-                    result: AuditResult::Failure,
-                    target_secret_id: Some(target_secret_id.clone()),
-                    key_version: Some(key_version),
-                    metadata: restore_test_metadata(1, Some("decrypt_failed")),
+                    target_secret_id: failure_context.target_secret_id.clone(),
+                    key_version: failure_context.key_version,
+                    metadata: restore_test_metadata(
+                        sample_count,
+                        Some("decrypt_failed"),
+                        failure_context.failed_version,
+                    ),
                     error_code: Some("decrypt_failed"),
                 },
             )
             .await;
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
-                target_secret_id = %target_secret_id.as_canonical_string(),
-                key_version = key_version.get(),
-                error = %error,
+                target_secret_id = failure_context
+                    .target_secret_id
+                    .as_ref()
+                    .map(SecretId::as_canonical_string)
+                    .as_deref(),
+                key_version = failure_context.key_version.map(KeyVersion::get),
+                failed_version = failure_context.failed_version,
                 action = "restore_test",
                 result = "failure",
                 error_code = "decrypt_failed",
-                sample_count = 1,
+                sample_count = sample_count,
                 "restore test decrypt failed"
             );
+            return;
+        }
+    }
+
+    record_restore_test_audit(
+        state,
+        &request_id,
+        RestoreTestAudit {
+            result: AuditResult::Success,
+            target_secret_id: None,
+            key_version: None,
+            metadata: restore_test_metadata(sample_count, None, None),
+            error_code: None,
+        },
+    )
+    .await;
+    tracing::info!(
+        request_id = %request_id.as_canonical_string(),
+        action = "restore_test",
+        result = "success",
+        sample_count = sample_count,
+    );
+}
+
+struct PreparedRestoreTestSample {
+    secret_id: SecretId,
+    version: SecretVersion,
+    owner_user_id: OwnerUserId,
+    classification: Classification,
+    created_at: CreatedAt,
+    key_version: KeyVersion,
+    encrypted_data_key: EncryptedDataKey,
+    nonce_or_iv: Nonce,
+    ciphertext: Ciphertext,
+    aad_context: serde_json::Value,
+}
+
+fn parse_restore_test_sample(
+    row: RestoreTestSampleRow,
+) -> Result<PreparedRestoreTestSample, ApiError> {
+    let stored_aad = AadV1::from_stored_context(&row.aad_context)
+        .map_err(|_| ApiError::DbIntegrityViolation("restore test aad_context is invalid".to_owned()))?;
+    let secret_id = SecretId::parse(&row.secret_id)
+        .map_err(|_| ApiError::DbIntegrityViolation("restore test secret_id is invalid".to_owned()))?;
+    let version = parse_restore_test_secret_version(row.version)?;
+    let classification = Classification::new(&row.classification).map_err(|_| {
+        ApiError::DbIntegrityViolation("restore test classification is invalid".to_owned())
+    })?;
+    let created_at = CreatedAt::parse(&row.created_at)
+        .map_err(|_| ApiError::DbIntegrityViolation("restore test created_at is invalid".to_owned()))?;
+    let owner_user_id = stored_aad.owner_user_id().clone();
+    let row_aad = AadV1::from_row_metadata(
+        secret_id.clone(),
+        version,
+        owner_user_id.clone(),
+        classification.clone(),
+        created_at.clone(),
+    );
+    let stored_bytes = stored_aad.canonical_bytes().map_err(|_| {
+        ApiError::DbIntegrityViolation("restore test aad_context is invalid".to_owned())
+    })?;
+    let row_bytes = row_aad.canonical_bytes().map_err(|_| {
+        ApiError::DbIntegrityViolation("restore test aad_context does not match row".to_owned())
+    })?;
+
+    if stored_bytes != row_bytes {
+        return Err(ApiError::DbIntegrityViolation(
+            "restore test aad_context does not match row".to_owned(),
+        ));
+    }
+
+    Ok(PreparedRestoreTestSample {
+        secret_id,
+        version,
+        owner_user_id,
+        classification,
+        created_at,
+        key_version: parse_restore_test_key_version(row.key_version)?,
+        encrypted_data_key: EncryptedDataKey::parse(&decode_restore_test_bytea(
+            &row.encrypted_data_key,
+            "encrypted_data_key",
+        )?)
+        .map_err(|_| {
+            ApiError::DbIntegrityViolation(
+                "restore test encrypted_data_key is invalid".to_owned(),
+            )
+        })?,
+        nonce_or_iv: Nonce::parse(&decode_restore_test_bytea(&row.nonce_or_iv, "nonce_or_iv")?)
+            .map_err(|_| {
+                ApiError::DbIntegrityViolation("restore test nonce_or_iv is invalid".to_owned())
+            })?,
+        ciphertext: Ciphertext::new(decode_restore_test_bytea(&row.ciphertext, "ciphertext")?)
+            .map_err(|_| {
+                ApiError::DbIntegrityViolation("restore test ciphertext is invalid".to_owned())
+            })?,
+        aad_context: row.aad_context,
+    })
+}
+
+fn build_restore_test_decrypt_input(
+    row: PreparedRestoreTestSample,
+) -> DecryptCurrentSecretVersionInput {
+    let claims = VerifiedJwtClaims::from_verified_subject(row.owner_user_id.clone());
+
+    DecryptCurrentSecretVersionInput::new(DecryptCurrentSecretVersionInputParts {
+        claims,
+        secret_id: row.secret_id,
+        version: row.version,
+        current_version: row.version,
+        owner_user_id: row.owner_user_id,
+        classification: row.classification,
+        created_at: row.created_at,
+        key_version: row.key_version,
+        encrypted_data_key: row.encrypted_data_key,
+        nonce_or_iv: row.nonce_or_iv,
+        ciphertext: row.ciphertext,
+        aad_context: row.aad_context,
+    })
+}
+
+fn decode_restore_test_bytea(value: &str, field: &'static str) -> Result<Vec<u8>, ApiError> {
+    let Some(hex_value) = value.strip_prefix("\\x") else {
+        return Err(ApiError::DbIntegrityViolation(format!(
+            "restore test {field} is invalid"
+        )));
+    };
+
+    hex::decode(hex_value).map_err(|_| {
+        ApiError::DbIntegrityViolation(format!("restore test {field} is invalid"))
+    })
+}
+
+fn parse_restore_test_secret_version(value: i32) -> Result<SecretVersion, ApiError> {
+    u32::try_from(value)
+        .ok()
+        .and_then(|parsed| SecretVersion::new(parsed).ok())
+        .ok_or_else(|| {
+            ApiError::DbIntegrityViolation("restore test version is invalid".to_owned())
+        })
+}
+
+fn parse_restore_test_key_version(value: i32) -> Result<KeyVersion, ApiError> {
+    u32::try_from(value)
+        .ok()
+        .and_then(|parsed| KeyVersion::new(parsed).ok())
+        .ok_or_else(|| {
+            ApiError::DbIntegrityViolation("restore test key_version is invalid".to_owned())
+        })
+}
+
+struct RestoreTestFailureContext {
+    target_secret_id: Option<SecretId>,
+    key_version: Option<KeyVersion>,
+    failed_version: Option<u32>,
+}
+
+impl RestoreTestFailureContext {
+    fn from_prepared(prepared: &PreparedRestoreTestSample) -> Self {
+        Self {
+            target_secret_id: Some(prepared.secret_id.clone()),
+            key_version: Some(prepared.key_version),
+            failed_version: Some(prepared.version.get()),
         }
     }
 }
 
-fn build_restore_test_decrypt_input(row: PreparedDecryptRow) -> DecryptCurrentSecretVersionInput {
-    let claims = VerifiedJwtClaims::from_verified_subject(row.owner_user_id().clone());
-    row.into_decrypt_input(claims)
+fn restore_test_failure_context_from_raw(row: &RestoreTestSampleRow) -> RestoreTestFailureContext {
+    RestoreTestFailureContext {
+        target_secret_id: SecretId::parse(&row.secret_id).ok(),
+        key_version: u32::try_from(row.key_version)
+            .ok()
+            .and_then(|parsed| KeyVersion::new(parsed).ok()),
+        failed_version: u32::try_from(row.version)
+            .ok()
+            .and_then(|parsed| SecretVersion::new(parsed).ok())
+            .map(SecretVersion::get),
+    }
 }
 
 struct RestoreTestAudit {
@@ -531,17 +705,25 @@ async fn record_restore_test_audit(
     }
 }
 
-fn restore_test_metadata(sample_count: u64, error_code: Option<&'static str>) -> AuditMetadata {
+fn restore_test_metadata(
+    sample_count: u64,
+    error_code: Option<&'static str>,
+    failed_version: Option<u32>,
+) -> AuditMetadata {
     let value = match error_code {
         Some("no_current_secret_versions") => serde_json::json!({
+            "phase": "verify",
             "sample_count": sample_count,
             "reason": "no_current_secret_versions",
         }),
         Some(code) => serde_json::json!({
+            "phase": "verify",
             "sample_count": sample_count,
             "error_code": code,
+            "failed_version": failed_version,
         }),
         None => serde_json::json!({
+            "phase": "verify",
             "sample_count": sample_count,
         }),
     };
@@ -838,12 +1020,12 @@ pub mod testing {
     use crate::auth::JwksCache;
     use crate::read::DecryptCurrentSecretVersionInput;
     use crate::server::errors::ApiError;
-    use crate::server::supabase::SecretVersionReadRow;
+    use crate::server::supabase::RestoreTestSampleRow;
 
     pub fn build_restore_test_decrypt_input(
-        row: SecretVersionReadRow,
+        row: RestoreTestSampleRow,
     ) -> Result<DecryptCurrentSecretVersionInput, ApiError> {
-        let parsed = super::handlers::parse_decrypt_row(row)?;
+        let parsed = super::parse_restore_test_sample(row)?;
 
         Ok(super::build_restore_test_decrypt_input(parsed))
     }
@@ -851,8 +1033,9 @@ pub mod testing {
     pub fn restore_test_metadata(
         sample_count: u64,
         error_code: Option<&'static str>,
+        failed_version: Option<u32>,
     ) -> AuditMetadata {
-        super::restore_test_metadata(sample_count, error_code)
+        super::restore_test_metadata(sample_count, error_code, failed_version)
     }
 
     pub async fn run_jwks_refresh_loop(
