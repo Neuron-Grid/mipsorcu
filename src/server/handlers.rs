@@ -6,8 +6,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
-    AuditRecordOutcome, AuditResult, RequestId,
+    AuditAction, AuditEvent, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
+    AuditRecordError, AuditRecordOutcome, AuditResult, RequestId,
 };
 use crate::auth::{RawJwt, VerifiedJwtClaims};
 use crate::authorize_existing_secret_version_write;
@@ -94,12 +94,14 @@ pub async fn create_secret(
                 "supabase RPC failed"
             );
 
-            record_failure_audit_nonblocking(
+            let metadata_json = failure_audit_metadata_for_attempted_secret(prepared.secret_id());
+            record_failure_audit_nonblocking_with_metadata(
                 &state,
                 &request_id,
                 Some(&owner_user_id),
-                Some(prepared.secret_id()),
+                None,
                 AuditAction::EncryptCreate,
+                metadata_json,
             );
 
             Err(ApiError::from(rpc_error))
@@ -727,6 +729,24 @@ fn record_failure_audit_nonblocking(
     target_secret_id: Option<&SecretId>,
     action: AuditAction,
 ) {
+    record_failure_audit_nonblocking_with_metadata(
+        state,
+        request_id,
+        actor_user_id,
+        target_secret_id,
+        action,
+        AuditMetadata::empty(),
+    );
+}
+
+fn record_failure_audit_nonblocking_with_metadata(
+    state: &AppState,
+    request_id: &RequestId,
+    actor_user_id: Option<&OwnerUserId>,
+    target_secret_id: Option<&SecretId>,
+    action: AuditAction,
+    metadata_json: AuditMetadata,
+) {
     let audit_event_id = match AuditEventId::generate() {
         Ok(id) => id,
         Err(error) => {
@@ -735,17 +755,14 @@ fn record_failure_audit_nonblocking(
         }
     };
 
-    let event = match AuditEvent::new(AuditEventParts {
+    let event = match build_failure_audit_event(
         audit_event_id,
-        request_id: request_id.clone(),
-        actor_user_id: actor_user_id.cloned(),
-        actor_device_id: None,
+        request_id,
+        actor_user_id,
+        target_secret_id,
         action,
-        target_secret_id: target_secret_id.cloned(),
-        result: AuditResult::Failure,
-        key_version: None,
-        metadata_json: AuditMetadata::empty(),
-    }) {
+        metadata_json,
+    ) {
         Ok(event) => event,
         Err(error) => {
             tracing::error!(error = %error, "failed to construct audit event");
@@ -777,6 +794,39 @@ fn record_failure_audit_nonblocking(
     });
 }
 
+fn build_failure_audit_event(
+    audit_event_id: AuditEventId,
+    request_id: &RequestId,
+    actor_user_id: Option<&OwnerUserId>,
+    target_secret_id: Option<&SecretId>,
+    action: AuditAction,
+    metadata_json: AuditMetadata,
+) -> Result<AuditEvent, AuditEventError> {
+    AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: request_id.clone(),
+        actor_user_id: actor_user_id.cloned(),
+        actor_device_id: None,
+        action,
+        target_secret_id: target_secret_id.cloned(),
+        result: AuditResult::Failure,
+        key_version: None,
+        metadata_json,
+    })
+}
+
+fn failure_audit_metadata_for_attempted_secret(secret_id: &SecretId) -> AuditMetadata {
+    AuditMetadata::empty()
+        .with_attempted_secret_id(secret_id)
+        .unwrap_or_else(|error| {
+            tracing::error!(
+                error = %error,
+                "failed to construct attempted secret audit metadata"
+            );
+            AuditMetadata::empty()
+        })
+}
+
 fn available_disk_space_mb(path: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
@@ -806,8 +856,12 @@ mod tests {
     use crate::server::supabase::SecretReadJoin;
 
     const SECRET_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const AUDIT_EVENT_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const REQUEST_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const CREATED_AT: &str = "2026-04-08T12:00:00Z";
+
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
     fn valid_row() -> SecretVersionReadRow {
         SecretVersionReadRow {
@@ -835,6 +889,57 @@ mod tests {
                 classification: "confidential".to_owned(),
             },
         }
+    }
+
+    #[test]
+    fn failure_audit_event_allows_attempted_secret_without_fk_target() -> TestResult<()> {
+        let request_id = RequestId::parse(REQUEST_ID)?;
+        let actor_user_id = OwnerUserId::parse(OWNER_USER_ID)?;
+        let secret_id = SecretId::parse(SECRET_ID)?;
+        let metadata_json = AuditMetadata::empty().with_attempted_secret_id(&secret_id)?;
+
+        let event = build_failure_audit_event(
+            AuditEventId::parse(AUDIT_EVENT_ID)?,
+            &request_id,
+            Some(&actor_user_id),
+            None,
+            AuditAction::EncryptCreate,
+            metadata_json,
+        )?;
+
+        assert!(event.target_secret_id().is_none());
+        assert_eq!(
+            event.metadata_json().as_value()["attempted_secret_id"],
+            SECRET_ID
+        );
+        assert_eq!(event.action(), AuditAction::EncryptCreate);
+        assert_eq!(event.result(), AuditResult::Failure);
+
+        Ok(())
+    }
+
+    #[test]
+    fn failure_audit_event_keeps_existing_secret_target_for_other_failures() -> TestResult<()> {
+        let request_id = RequestId::parse(REQUEST_ID)?;
+        let actor_user_id = OwnerUserId::parse(OWNER_USER_ID)?;
+        let target_secret_id = SecretId::parse(SECRET_ID)?;
+
+        let event = build_failure_audit_event(
+            AuditEventId::parse(AUDIT_EVENT_ID)?,
+            &request_id,
+            Some(&actor_user_id),
+            Some(&target_secret_id),
+            AuditAction::Decrypt,
+            AuditMetadata::empty(),
+        )?;
+
+        assert_eq!(
+            event.target_secret_id().map(SecretId::as_canonical_string),
+            Some(SECRET_ID.to_owned())
+        );
+        assert_eq!(event.metadata_json().as_value(), &serde_json::json!({}));
+
+        Ok(())
     }
 
     #[test]

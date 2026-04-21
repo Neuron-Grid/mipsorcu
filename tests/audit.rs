@@ -249,6 +249,63 @@ fn metadata_rejects_non_object_and_forbidden_keys_recursively() {
 }
 
 #[test]
+fn metadata_adds_attempted_secret_id_as_canonical_uuid() -> TestResult<()> {
+    let secret_id = SecretId::parse(TARGET_SECRET_ID)?;
+    let metadata = AuditMetadata::new(json!({ "error_code": "write_rpc_failed" }))?
+        .with_attempted_secret_id(&secret_id)?;
+
+    assert_eq!(metadata.as_value()["error_code"], "write_rpc_failed");
+    assert_eq!(
+        metadata.as_value()["attempted_secret_id"],
+        secret_id.as_canonical_string()
+    );
+    assert!(AuditMetadata::new(metadata.as_value().clone()).is_ok());
+
+    Ok(())
+}
+
+#[test]
+fn fallback_json_keeps_null_target_and_attempted_secret_metadata() -> TestResult<()> {
+    let path = temp_jsonl_path("attempted-secret-null-target");
+    let recorder = AuditRecorder::new(
+        FakeAppender::always_err(),
+        LocalAuditFallbackStore::new(path.clone()),
+    );
+    let secret_id = SecretId::parse(TARGET_SECRET_ID)?;
+    let event = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+        action: AuditAction::EncryptCreate,
+        target_secret_id: None,
+        result: AuditResult::Failure,
+        key_version: None,
+        metadata_json: AuditMetadata::empty().with_attempted_secret_id(&secret_id)?,
+    })?;
+
+    let outcome = recorder.record(&event)?;
+
+    assert_eq!(outcome, AuditRecordOutcome::FallbackSucceeded);
+    let lines = read_json_lines(&path)?;
+    assert_eq!(lines.len(), 1);
+    let line = lines[0].as_object().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "fallback line should be a JSON object",
+        )
+    })?;
+    assert!(line.contains_key("target_secret_id"));
+    assert!(line["target_secret_id"].is_null());
+    assert_eq!(
+        line["metadata_json"]["attempted_secret_id"],
+        TARGET_SECRET_ID
+    );
+
+    Ok(())
+}
+
+#[test]
 fn recorder_does_not_write_fallback_when_appender_succeeds() -> TestResult<()> {
     let path = temp_jsonl_path("success-no-fallback");
     let recorder = AuditRecorder::new(

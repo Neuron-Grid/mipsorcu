@@ -172,6 +172,20 @@ impl AuditMetadata {
         Self(json!({}))
     }
 
+    pub fn with_attempted_secret_id(self, secret_id: &SecretId) -> Result<Self, AuditEventError> {
+        let mut object = self
+            .0
+            .as_object()
+            .cloned()
+            .ok_or(AuditEventError::MetadataMustBeObject)?;
+        object.insert(
+            "attempted_secret_id".to_owned(),
+            Value::String(secret_id.as_canonical_string()),
+        );
+
+        Self::new(Value::Object(object))
+    }
+
     pub fn as_value(&self) -> &Value {
         &self.0
     }
