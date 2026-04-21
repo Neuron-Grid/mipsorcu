@@ -828,182 +828,47 @@ fn local_audit_store_error_kind(error: &LocalAuditStoreError) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
+#[doc(hidden)]
+pub mod testing {
+    use std::time::Duration;
 
-    use super::*;
-    use crate::server::supabase::SecretReadJoin;
-    use crate::{
-        Classification, CreatedAt, DeviceId, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
-        NewSecretVersionInput, OwnerUserId, Plaintext, SecretDecryptError,
-        prepare_new_secret_version,
-    };
+    use tokio::sync::watch;
 
-    const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-    const CLASSIFICATION: &str = "confidential";
-    const CREATED_AT: &str = "2026-04-08T12:00:00Z";
-    const DEVICE_ID: &str = "sbc-device-1";
+    use crate::audit::AuditMetadata;
+    use crate::auth::JwksCache;
+    use crate::read::DecryptCurrentSecretVersionInput;
+    use crate::server::errors::ApiError;
+    use crate::server::supabase::SecretVersionReadRow;
 
-    fn sample_master_key() -> MasterKey {
-        MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH])
+    pub fn build_restore_test_decrypt_input(
+        row: SecretVersionReadRow,
+    ) -> Result<DecryptCurrentSecretVersionInput, ApiError> {
+        let parsed = super::handlers::parse_decrypt_row(row)?;
+
+        Ok(super::build_restore_test_decrypt_input(parsed))
     }
 
-    fn prepared_row(
-        plaintext: Vec<u8>,
-    ) -> Result<(MasterKey, PreparedDecryptRow), Box<dyn std::error::Error>> {
-        let master_key = sample_master_key();
-        let prepared = prepare_new_secret_version(
-            &master_key,
-            NewSecretVersionInput::new(
-                OwnerUserId::parse(OWNER_USER_ID)?,
-                Classification::new(CLASSIFICATION)?,
-                DeviceId::new(DEVICE_ID)?,
-                CreatedAt::parse(CREATED_AT)?,
-                KeyVersion::new(1)?,
-                Plaintext::new(plaintext),
-            ),
-        )?;
-        let version_id = "650e8400-e29b-41d4-a716-446655440000".to_owned();
-        let row = crate::server::supabase::SecretVersionReadRow {
-            id: version_id.clone(),
-            secret_id: prepared.secret_id().as_canonical_string(),
-            version: i32::try_from(prepared.version().get())?,
-            ciphertext: format!("\\x{}", hex::encode(prepared.ciphertext().as_bytes())),
-            encrypted_data_key: format!(
-                "\\x{}",
-                hex::encode(prepared.encrypted_data_key().as_bytes())
-            ),
-            key_version: i32::try_from(prepared.key_version().get())?,
-            algorithm: crate::ALGORITHM_XCHACHA20_POLY1305.to_owned(),
-            nonce_or_iv: format!("\\x{}", hex::encode(prepared.nonce_or_iv().as_bytes())),
-            aad_context: prepared.aad_context().clone(),
-            created_by_user_id: OWNER_USER_ID.to_owned(),
-            created_at: prepared.created_at().as_rfc3339_utc()?,
-            secrets: SecretReadJoin {
-                current_version_id: version_id,
-                owner_user_id: prepared.owner_user_id().as_canonical_string(),
-                classification: prepared.classification().as_str().to_owned(),
-            },
-        };
-
-        Ok((master_key, handlers::parse_decrypt_row(row)?))
+    pub fn restore_test_metadata(
+        sample_count: u64,
+        error_code: Option<&'static str>,
+    ) -> AuditMetadata {
+        super::restore_test_metadata(sample_count, error_code)
     }
 
-    #[test]
-    fn restore_test_metadata_records_no_sample_reason_without_forbidden_keys() {
-        let metadata = restore_test_metadata(0, Some("no_current_secret_versions"));
-
-        assert_eq!(
-            metadata.as_value(),
-            &json!({
-                "sample_count": 0,
-                "reason": "no_current_secret_versions",
-            })
-        );
-    }
-
-    #[test]
-    fn restore_test_metadata_records_failure_code_without_forbidden_keys() {
-        let metadata = restore_test_metadata(1, Some("decrypt_failed"));
-
-        assert_eq!(
-            metadata.as_value(),
-            &json!({
-                "sample_count": 1,
-                "error_code": "decrypt_failed",
-            })
-        );
-    }
-
-    #[test]
-    fn restore_test_input_round_trips_existing_encrypted_sample()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let plaintext = b"restore test sample".to_vec();
-        let (master_key, row) = prepared_row(plaintext.clone())?;
-        let input = build_restore_test_decrypt_input(row);
-
-        let decrypted = decrypt_current_secret_version(&master_key, input)?;
-
-        assert_eq!(decrypted.as_bytes(), plaintext.as_slice());
-        Ok(())
-    }
-
-    #[test]
-    fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::Error>> {
-        let (master_key, mut row) = prepared_row(b"restore test sample".to_vec())?;
-        row.set_aad_context(json!({
-            "aad_version": 1,
-            "secret_id": row.secret_id().as_canonical_string(),
-            "version": row.version().get(),
-            "owner_user_id": row.owner_user_id().as_canonical_string(),
-            "classification": "tampered",
-            "created_at": row.created_at().as_rfc3339_utc()?,
-        }));
-        let input = build_restore_test_decrypt_input(row);
-
-        let result = decrypt_current_secret_version(&master_key, input);
-
-        assert!(matches!(
-            result,
-            Err(SecretDecryptError::Integrity(
-                crate::DecryptIntegrityError::AadContextMismatch
-            ))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn restore_test_input_rejects_ciphertext_tampering() -> Result<(), Box<dyn std::error::Error>> {
-        let (master_key, mut row) = prepared_row(b"restore test sample".to_vec())?;
-        let mut bytes = row.ciphertext().as_bytes().to_vec();
-        let first = bytes
-            .first_mut()
-            .ok_or(crate::CryptoError::DecryptionFailed)?;
-        *first ^= 1;
-        row.set_ciphertext(crate::Ciphertext::new(bytes)?);
-        let input = build_restore_test_decrypt_input(row);
-
-        let result = decrypt_current_secret_version(&master_key, input);
-
-        assert!(matches!(
-            result,
-            Err(SecretDecryptError::Crypto(
-                crate::CryptoError::DecryptionFailed
-            ))
-        ));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn jwks_refresh_loop_stops_on_shutdown_signal() {
-        let jwks = crate::Jwks::new(vec![crate::Jwk::new(
-            "RSA",
-            "test-key",
-            Some("RS256".to_owned()),
-            Some("sig".to_owned()),
-            "abc",
-            "AQAB",
-        )])
-        .expect("test JWKS should be valid");
-        let cache = JwksCache::new(jwks);
-        let client = reqwest::Client::new();
-        let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-        let task = tokio::spawn(run_jwks_refresh_loop(
+    pub async fn run_jwks_refresh_loop(
+        cache: JwksCache,
+        http_client: reqwest::Client,
+        jwks_url: String,
+        interval_duration: Duration,
+        shutdown_receiver: watch::Receiver<bool>,
+    ) {
+        super::run_jwks_refresh_loop(
             cache,
-            client,
-            "http://127.0.0.1:1/jwks".to_owned(),
-            Duration::from_secs(60),
+            http_client,
+            jwks_url,
+            interval_duration,
             shutdown_receiver,
-        ));
-
-        shutdown_sender
-            .send(true)
-            .expect("shutdown signal should send");
-
-        tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .expect("JWKS refresh loop should stop promptly")
-            .expect("JWKS refresh loop task should not panic");
+        )
+        .await;
     }
 }

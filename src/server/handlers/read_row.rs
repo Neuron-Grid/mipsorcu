@@ -42,11 +42,6 @@ impl PreparedDecryptRow {
         &self.owner_user_id
     }
 
-    #[cfg(test)]
-    pub(in crate::server) fn created_at(&self) -> &CreatedAt {
-        &self.created_at
-    }
-
     pub fn key_version(&self) -> KeyVersion {
         self.key_version
     }
@@ -61,16 +56,6 @@ impl PreparedDecryptRow {
 
     pub fn ciphertext(&self) -> &Ciphertext {
         &self.ciphertext
-    }
-
-    #[cfg(test)]
-    pub(in crate::server) fn set_aad_context(&mut self, aad_context: serde_json::Value) {
-        self.aad_context = aad_context;
-    }
-
-    #[cfg(test)]
-    pub(in crate::server) fn set_ciphertext(&mut self, ciphertext: Ciphertext) {
-        self.ciphertext = ciphertext;
     }
 
     pub fn into_current_secret_version_state(self) -> CurrentSecretVersionState {

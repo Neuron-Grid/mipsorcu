@@ -3,12 +3,20 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use mipsorcu::server::runtime::testing as runtime_testing;
 use mipsorcu::server::runtime::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
     audit_fallback_size_alert, initialize_jwt_verifier_from_jwks_url, refresh_jwks_cache_once,
     run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
-use mipsorcu::{Jwks, JwksCache, LocalAuditFallbackStore, RolloverOutcome};
+use mipsorcu::server::supabase::{SecretReadJoin, SecretVersionReadRow};
+use mipsorcu::{
+    Classification, CreatedAt, DeviceId, Jwks, JwksCache, KeyVersion, LocalAuditFallbackStore,
+    MASTER_KEY_LENGTH, MasterKey, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
+    SecretDecryptError, prepare_new_secret_version,
+};
+use serde_json::json;
+use tokio::sync::watch;
 
 fn temp_path(test_name: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -38,6 +46,58 @@ fn archive_file_count(path: &Path) -> usize {
     fs::read_dir(path)
         .expect("archive directory should be readable")
         .count()
+}
+
+const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+const CLASSIFICATION: &str = "confidential";
+const CREATED_AT: &str = "2026-04-08T12:00:00Z";
+const DEVICE_ID: &str = "sbc-device-1";
+
+fn sample_master_key() -> MasterKey {
+    MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH])
+}
+
+fn prepared_restore_test_row(
+    plaintext: Vec<u8>,
+) -> Result<(MasterKey, SecretVersionReadRow), Box<dyn std::error::Error>> {
+    let master_key = sample_master_key();
+    let prepared = prepare_new_secret_version(
+        &master_key,
+        NewSecretVersionInput::new(
+            OwnerUserId::parse(OWNER_USER_ID)?,
+            Classification::new(CLASSIFICATION)?,
+            DeviceId::new(DEVICE_ID)?,
+            CreatedAt::parse(CREATED_AT)?,
+            KeyVersion::new(1)?,
+            Plaintext::new(plaintext),
+        ),
+    )?;
+    let version_id = "650e8400-e29b-41d4-a716-446655440000".to_owned();
+
+    Ok((
+        master_key,
+        SecretVersionReadRow {
+            id: version_id.clone(),
+            secret_id: prepared.secret_id().as_canonical_string(),
+            version: i32::try_from(prepared.version().get())?,
+            ciphertext: format!("\\x{}", hex::encode(prepared.ciphertext().as_bytes())),
+            encrypted_data_key: format!(
+                "\\x{}",
+                hex::encode(prepared.encrypted_data_key().as_bytes())
+            ),
+            key_version: i32::try_from(prepared.key_version().get())?,
+            algorithm: mipsorcu::ALGORITHM_XCHACHA20_POLY1305.to_owned(),
+            nonce_or_iv: format!("\\x{}", hex::encode(prepared.nonce_or_iv().as_bytes())),
+            aad_context: prepared.aad_context().clone(),
+            created_by_user_id: OWNER_USER_ID.to_owned(),
+            created_at: prepared.created_at().as_rfc3339_utc()?,
+            secrets: SecretReadJoin {
+                current_version_id: version_id,
+                owner_user_id: prepared.owner_user_id().as_canonical_string(),
+                classification: prepared.classification().as_str().to_owned(),
+            },
+        },
+    ))
 }
 
 #[test]
@@ -212,6 +272,127 @@ async fn refresh_jwks_cache_once_replaces_existing_cache_on_success() {
 
     let snapshot = cache.snapshot().expect("cache should remain readable");
     assert_eq!(snapshot.keys()[0].key_id(), "refreshed-key");
+}
+
+#[test]
+fn restore_test_metadata_records_no_sample_reason_without_forbidden_keys() {
+    let metadata = runtime_testing::restore_test_metadata(0, Some("no_current_secret_versions"));
+
+    assert_eq!(
+        metadata.as_value(),
+        &json!({
+            "sample_count": 0,
+            "reason": "no_current_secret_versions",
+        })
+    );
+}
+
+#[test]
+fn restore_test_metadata_records_failure_code_without_forbidden_keys() {
+    let metadata = runtime_testing::restore_test_metadata(1, Some("decrypt_failed"));
+
+    assert_eq!(
+        metadata.as_value(),
+        &json!({
+            "sample_count": 1,
+            "error_code": "decrypt_failed",
+        })
+    );
+}
+
+#[test]
+fn restore_test_input_round_trips_existing_encrypted_sample()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = b"restore test sample".to_vec();
+    let (master_key, row) = prepared_restore_test_row(plaintext.clone())?;
+    let input = runtime_testing::build_restore_test_decrypt_input(row)?;
+
+    let decrypted = mipsorcu::decrypt_current_secret_version(&master_key, input)?;
+
+    assert_eq!(decrypted.as_bytes(), plaintext.as_slice());
+    Ok(())
+}
+
+#[test]
+fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::Error>> {
+    let (master_key, mut row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
+    row.aad_context = json!({
+        "aad_version": 1,
+        "secret_id": row.secret_id.clone(),
+        "version": row.version,
+        "owner_user_id": row.secrets.owner_user_id.clone(),
+        "classification": "tampered",
+        "created_at": row.created_at.clone(),
+    });
+    let input = runtime_testing::build_restore_test_decrypt_input(row)?;
+
+    let result = mipsorcu::decrypt_current_secret_version(&master_key, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Integrity(
+            mipsorcu::DecryptIntegrityError::AadContextMismatch
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn restore_test_input_rejects_ciphertext_tampering() -> Result<(), Box<dyn std::error::Error>> {
+    let (master_key, mut row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
+    let mut ciphertext = hex::decode(
+        row.ciphertext
+            .strip_prefix("\\x")
+            .ok_or(mipsorcu::CryptoError::DecryptionFailed)?,
+    )?;
+    let first = ciphertext
+        .first_mut()
+        .ok_or(mipsorcu::CryptoError::DecryptionFailed)?;
+    *first ^= 1;
+    row.ciphertext = format!("\\x{}", hex::encode(ciphertext));
+    let input = runtime_testing::build_restore_test_decrypt_input(row)?;
+
+    let result = mipsorcu::decrypt_current_secret_version(&master_key, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Crypto(
+            mipsorcu::CryptoError::DecryptionFailed
+        ))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn jwks_refresh_loop_stops_on_shutdown_signal() {
+    let jwks = Jwks::new(vec![mipsorcu::Jwk::new(
+        "RSA",
+        "test-key",
+        Some("RS256".to_owned()),
+        Some("sig".to_owned()),
+        "abc",
+        "AQAB",
+    )])
+    .expect("test JWKS should be valid");
+    let cache = JwksCache::new(jwks);
+    let client = reqwest::Client::new();
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let task = tokio::spawn(runtime_testing::run_jwks_refresh_loop(
+        cache,
+        client,
+        "http://127.0.0.1:1/jwks".to_owned(),
+        Duration::from_secs(60),
+        shutdown_receiver,
+    ));
+
+    shutdown_sender
+        .send(true)
+        .expect("shutdown signal should send");
+
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("JWKS refresh loop should stop promptly")
+        .expect("JWKS refresh loop task should not panic");
 }
 
 fn spawn_single_response_server(status: u16, body: &'static str) -> String {
