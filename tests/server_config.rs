@@ -1,13 +1,106 @@
+use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use mipsorcu::server::config::{
-    AppConfig, ConfigError, parse_audit_fallback_alert_threshold,
+    AppConfig, ConfigError, load_config_from_sources, parse_audit_fallback_alert_threshold,
     parse_audit_fallback_archive_auto_delete_enabled, parse_audit_fallback_archive_retention_days,
-    parse_audit_fallback_rotate_size, parse_audit_resend_interval, parse_jwks_refresh_interval,
-    parse_restore_test_interval,
+    parse_audit_fallback_rotate_size, parse_audit_resend_interval, parse_dotenv_contents,
+    parse_jwks_refresh_interval, parse_restore_test_interval,
 };
 use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
+
+fn base_dotenv() -> HashMap<String, String> {
+    HashMap::from([
+        (
+            "MIPSORCU_MASTER_KEY".to_owned(),
+            hex::encode([7u8; MASTER_KEY_LENGTH]),
+        ),
+        ("MIPSORCU_KEY_VERSION".to_owned(), "1".to_owned()),
+        (
+            "MIPSORCU_SUPABASE_URL".to_owned(),
+            "https://from-dotenv.supabase.co".to_owned(),
+        ),
+        (
+            "MIPSORCU_SUPABASE_SERVICE_ROLE_KEY".to_owned(),
+            "service-role-secret".to_owned(),
+        ),
+        (
+            "MIPSORCU_SUPABASE_PUBLISHABLE_KEY".to_owned(),
+            "publishable-secret".to_owned(),
+        ),
+        (
+            "MIPSORCU_JWT_ISSUER".to_owned(),
+            "https://example.supabase.co/auth/v1".to_owned(),
+        ),
+        (
+            "MIPSORCU_JWT_AUDIENCE".to_owned(),
+            "authenticated".to_owned(),
+        ),
+        (
+            "MIPSORCU_JWKS_URL".to_owned(),
+            "https://example.supabase.co/auth/v1/.well-known/jwks.json".to_owned(),
+        ),
+    ])
+}
+
+#[test]
+fn parse_dotenv_contents_supports_unquoted_and_quoted_values() {
+    let contents = r#"
+MIPSORCU_SUPABASE_URL=https://from-dotenv.supabase.co
+MIPSORCU_SUPABASE_SERVICE_ROLE_KEY="service role"
+export MIPSORCU_SUPABASE_PUBLISHABLE_KEY='publishable key'
+"#;
+
+    let dotenv = parse_dotenv_contents(contents, Path::new(".env")).expect("dotenv should parse");
+
+    assert_eq!(
+        dotenv.get("MIPSORCU_SUPABASE_URL"),
+        Some(&"https://from-dotenv.supabase.co".to_owned())
+    );
+    assert_eq!(
+        dotenv.get("MIPSORCU_SUPABASE_SERVICE_ROLE_KEY"),
+        Some(&"service role".to_owned())
+    );
+    assert_eq!(
+        dotenv.get("MIPSORCU_SUPABASE_PUBLISHABLE_KEY"),
+        Some(&"publishable key".to_owned())
+    );
+}
+
+#[test]
+fn load_config_from_sources_uses_dotenv_for_missing_process_vars() {
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let config =
+        load_config_from_sources(&get_process_var, &base_dotenv()).expect("config should load");
+
+    assert_eq!(config.listen_addr, "127.0.0.1:3000".parse().unwrap());
+    assert_eq!(config.supabase_url, "https://from-dotenv.supabase.co");
+}
+
+#[test]
+fn load_config_from_sources_prefers_process_env_over_dotenv() {
+    let process_env = HashMap::from([
+        (
+            "MIPSORCU_SUPABASE_URL".to_owned(),
+            "https://from-process.supabase.co".to_owned(),
+        ),
+        (
+            "MIPSORCU_LISTEN_ADDR".to_owned(),
+            "127.0.0.1:4000".to_owned(),
+        ),
+    ]);
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let config =
+        load_config_from_sources(&get_process_var, &base_dotenv()).expect("config should load");
+
+    assert_eq!(config.listen_addr, "127.0.0.1:4000".parse().unwrap());
+    assert_eq!(config.supabase_url, "https://from-process.supabase.co");
+}
 
 #[test]
 fn audit_resend_interval_defaults_to_sixty_seconds() {
