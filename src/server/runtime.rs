@@ -11,7 +11,7 @@ use crate::auth::{
     JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, VerifiedJwtClaims, fetch_jwks,
 };
 use crate::decrypt_current_secret_version;
-use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
+use crate::read::DecryptCurrentSecretVersionInput;
 use axum::Router;
 use axum::routing::{get, post};
 use tokio::sync::watch;
@@ -375,8 +375,8 @@ pub async fn run_restore_test_once(state: &AppState) {
         }
     };
 
-    let target_secret_id = parsed.secret_id.clone();
-    let key_version = parsed.key_version;
+    let target_secret_id = parsed.secret_id().clone();
+    let key_version = parsed.key_version();
     let input = build_restore_test_decrypt_input(parsed);
     let master_key = state.master_key.clone();
     let decrypt_result =
@@ -438,20 +438,8 @@ pub async fn run_restore_test_once(state: &AppState) {
 }
 
 fn build_restore_test_decrypt_input(row: PreparedDecryptRow) -> DecryptCurrentSecretVersionInput {
-    DecryptCurrentSecretVersionInput::new(DecryptCurrentSecretVersionInputParts {
-        claims: VerifiedJwtClaims::from_verified_subject(row.owner_user_id.clone()),
-        secret_id: row.secret_id,
-        version: row.version,
-        current_version: row.version,
-        owner_user_id: row.owner_user_id,
-        classification: row.classification,
-        created_at: row.created_at,
-        key_version: row.key_version,
-        encrypted_data_key: row.encrypted_data_key,
-        nonce_or_iv: row.nonce_or_iv,
-        ciphertext: row.ciphertext,
-        aad_context: row.aad_context,
-    })
+    let claims = VerifiedJwtClaims::from_verified_subject(row.owner_user_id().clone());
+    row.into_decrypt_input(claims)
 }
 
 struct RestoreTestAudit {
@@ -944,14 +932,14 @@ mod tests {
     #[test]
     fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::Error>> {
         let (master_key, mut row) = prepared_row(b"restore test sample".to_vec())?;
-        row.aad_context = json!({
+        row.set_aad_context(json!({
             "aad_version": 1,
-            "secret_id": row.secret_id.as_canonical_string(),
-            "version": row.version.get(),
-            "owner_user_id": row.owner_user_id.as_canonical_string(),
+            "secret_id": row.secret_id().as_canonical_string(),
+            "version": row.version().get(),
+            "owner_user_id": row.owner_user_id().as_canonical_string(),
             "classification": "tampered",
-            "created_at": row.created_at.as_rfc3339_utc()?,
-        });
+            "created_at": row.created_at().as_rfc3339_utc()?,
+        }));
         let input = build_restore_test_decrypt_input(row);
 
         let result = decrypt_current_secret_version(&master_key, input);
@@ -968,12 +956,12 @@ mod tests {
     #[test]
     fn restore_test_input_rejects_ciphertext_tampering() -> Result<(), Box<dyn std::error::Error>> {
         let (master_key, mut row) = prepared_row(b"restore test sample".to_vec())?;
-        let mut bytes = row.ciphertext.as_bytes().to_vec();
+        let mut bytes = row.ciphertext().as_bytes().to_vec();
         let first = bytes
             .first_mut()
             .ok_or(crate::CryptoError::DecryptionFailed)?;
         *first ^= 1;
-        row.ciphertext = crate::Ciphertext::new(bytes)?;
+        row.set_ciphertext(crate::Ciphertext::new(bytes)?);
         let input = build_restore_test_decrypt_input(row);
 
         let result = decrypt_current_secret_version(&master_key, input);
