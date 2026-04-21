@@ -41,7 +41,7 @@ async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() 
         Json(CreateSecretRequest {
             classification: "confidential".to_owned(),
             device_id: "sbc-device-1".to_owned(),
-            plaintext: "64756d6d7920736563726574".to_owned(),
+            plaintext_hex: "64756d6d7920736563726574".to_owned(),
         }),
     )
     .await;

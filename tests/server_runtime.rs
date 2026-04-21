@@ -1,22 +1,30 @@
 use std::fs;
 use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mipsorcu::server::runtime::testing as runtime_testing;
 use mipsorcu::server::runtime::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
     audit_fallback_size_alert, initialize_jwt_verifier_from_jwks_url, refresh_jwks_cache_once,
     run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
-use mipsorcu::server::supabase::RestoreTestSampleRow;
+use mipsorcu::server::state::AppState;
+use mipsorcu::server::supabase::{RestoreTestSampleRow, SupabaseAuditAppender, SupabaseClient};
 use mipsorcu::{
-    Classification, CreatedAt, DeviceId, Jwks, JwksCache, KeyVersion, LocalAuditFallbackStore,
-    MASTER_KEY_LENGTH, MasterKey, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
-    SecretDecryptError, prepare_new_secret_version,
+    AuditRecorder, Classification, CreatedAt, DeviceId, Jwk, Jwks, JwksCache, JwtVerifier,
+    JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore, MASTER_KEY_LENGTH, MasterKey,
+    NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome, SecretDecryptError,
+    prepare_new_secret_version,
 };
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{Value, json};
 use tokio::sync::watch;
+use tracing_subscriber::EnvFilter;
 
 fn temp_path(test_name: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -52,6 +60,98 @@ const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const CLASSIFICATION: &str = "confidential";
 const CREATED_AT: &str = "2026-04-08T12:00:00Z";
 const DEVICE_ID: &str = "sbc-device-1";
+const JWT_KEY_ID: &str = "test-key-1";
+const JWT_ISSUER: &str = "https://project-ref.supabase.co/auth/v1";
+const JWT_AUDIENCE: &str = "authenticated";
+const RSA_MODULUS: &str = "0cOAzuft7zMhmD42QSngblYMsfhQD5IqUDK2S8sZw_TM0tNaPvMj-JqyM1bx4PaWDDjX018m8ys7wmOFSyfrl0TpWFzFMwUxLzsTgM1izd_a_Kk1IBRUREuYuAHr1TDZOoXqGncTC6xb-Jd4n58zjxsB3wO3OFBn_qP_Wsv4oPhiqLcya1UdyXEO905iIkigCdDa7VT7T6ogTrR-RGqZHON05UYXCmqSfAUBTy6dHowjQio0eHLUYAhDTv5q7oIcvb_SHbL-W-Q6GqsdFlQXJMXydSsTqBwlxs_7fSbOPqGfTxUeEzN5kyH1kn78oRK-toDT-ASKyu3Uh9sMV7fdqw";
+const RSA_EXPONENT: &str = "AQAB";
+const RSA_PRIVATE_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDRw4DO5+3vMyGY
+PjZBKeBuVgyx+FAPkipQMrZLyxnD9MzS01o+8yP4mrIzVvHg9pYMONfTXybzKzvC
+Y4VLJ+uXROlYXMUzBTEvOxOAzWLN39r8qTUgFFRES5i4AevVMNk6heoadxMLrFv4
+l3ifnzOPGwHfA7c4UGf+o/9ay/ig+GKotzJrVR3JcQ73TmIiSKAJ0NrtVPtPqiBO
+tH5Eapkc43TlRhcKapJ8BQFPLp0ejCNCKjR4ctRgCENO/mrughy9v9Idsv5b5Doa
+qx0WVBckxfJ1KxOoHCXGz/t9Js4+oZ9PFR4TM3mTIfWSfvyhEr62gNP4BIrK7dSH
+2wxXt92rAgMBAAECggEAAewnItm/dZRomg5ixDH7Rc52Oy55yDmbyc/y4sPx+d1J
+25EUdt/yT4XEAaAFcQ+YWgcJ6aFgsV2ztrkooqd8XcWfRQJop2pEaOsMecg6ZIVb
+WF9SD660liY5OE8UxSw3gpnfKy5/MrBno6tDuNI4oq2gndWP9IisHsFDBqcUD1dQ
+5wUILJiQwI4wW0Bm5MHkzMjuSx0W5ZwkRjfc8EI17mbmBYQD56l6NJsiPatvYn2T
+dFeW/jtPhnX8xXslxIDlKgdT/HODUE/azNJKw8vzDWjTAbSejuEJriZXcQxvtZfN
+YY6P9Au5IQsjamJdas75PzF6XhT6QODatnxVV7ySPQKBgQDpSxX8wVwF/qHFk0YM
+59ACc71kOkkkaT2Hc1fCoZPYbgYR4seO2cOkkRpiFoi5HrA5lNEoQBJJIJvtoL/4
+cLSFIWRqGNtvH/NDoGEeF7GSn2i0LCb2jX5vuiY3bSlEj2JHiFTwizsmwhydokQM
+jFKzDBJ+snk6gddUx1DgKaMMVwKBgQDmLiKiSwI615c3fCAEXP5UakK9VwjpkYAp
+KIIz/RIokcW7+NP1xbFtj/06M7O4IasLOvugMPDzN/WJQ/gzA1m+bajwl22f7lRn
+l4GMnFztVmGptTg+EzU0GORkRd3boEtwpd2FZ/WhfaTLP8BGIcvNu7frdGbpkcWK
+iVNqtjNkzQKBgD9FO+tWzYxaqKka7g6l+AYSObUrEZcsa6GGqLCCfcRe4oqLRK/7
+Y1IIgG1Fy0LZjdWwBKGz7sGidGeYBzhr6KmKit8zap/SvHkE0BIHPwOS9CSZLOAF
+M9s9UwwJMP4FHRRlZxPtztcOIhCmZ2o3zF3+0i1GXhZ+DFZT0B1bbXr1AoGBANC5
+XSaVpfv9q13g7JeITAf4I3TWC3rhOboYxZinD2RCa2+8f1gKYI3dV98DKyD5RsT0
+Q2BLgPLL95b1T4fSrfqELgGdDwdLcrZNKGh9EbcV8ZGWht2jRUdsmw5iXH/fpwkL
+Hwjt8Er0SA8WTCBMXSa95lVYREngqaSqSj4l4gyxAoGBAMf4zUq0pOLJA2rk9k7f
+P7LJUPgASNpxGsG/FBDE+rTQl1tqVgHsI20KULCrQ5a2ob4sGlGfF8p2M5s5dcoM
+fgr74PXMRn15mEnR/ieIFJEIIKAqG+eJE8E4wtXf8L3swtrg1s2mYe3km/Ly0gNH
+o6OiVJrW2fR4F3HzG53Td7eh
+-----END PRIVATE KEY-----"#;
+
+#[derive(Debug, Clone)]
+struct CapturedRequest {
+    method: String,
+    path: String,
+    body: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TestClaims {
+    sub: String,
+    iss: String,
+    aud: String,
+    exp: u64,
+}
+
+#[derive(Clone, Default)]
+struct SharedLogBuffer {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+struct SharedLogWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedLogBuffer {
+    fn contents(&self) -> String {
+        let bytes = self
+            .bytes
+            .lock()
+            .expect("log buffer lock should be available");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
+    type Writer = SharedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SharedLogWriter {
+            bytes: self.bytes.clone(),
+        }
+    }
+}
+
+impl Write for SharedLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut bytes = self
+            .bytes
+            .lock()
+            .expect("log buffer lock should be available");
+        bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn sample_master_key() -> MasterKey {
     MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH])
@@ -92,6 +192,179 @@ fn prepared_restore_test_row(
             created_at: prepared.created_at().as_rfc3339_utc()?,
         },
     ))
+}
+
+fn decrypt_row_json(plaintext: &[u8]) -> Result<(String, Value), Box<dyn std::error::Error>> {
+    let master_key = sample_master_key();
+    let prepared = prepare_new_secret_version(
+        &master_key,
+        NewSecretVersionInput::new(
+            OwnerUserId::parse(OWNER_USER_ID)?,
+            Classification::new(CLASSIFICATION)?,
+            DeviceId::new(DEVICE_ID)?,
+            CreatedAt::parse(CREATED_AT)?,
+            KeyVersion::new(1)?,
+            Plaintext::new(plaintext.to_vec()),
+        ),
+    )?;
+    let version_id = "650e8400-e29b-41d4-a716-446655440000".to_owned();
+
+    let secret_id = prepared.secret_id().as_canonical_string();
+
+    Ok((
+        secret_id.clone(),
+        json!([{
+            "id": version_id,
+            "secret_id": secret_id,
+            "version": i32::try_from(prepared.version().get())?,
+            "ciphertext": format!("\\x{}", hex::encode(prepared.ciphertext().as_bytes())),
+            "encrypted_data_key": format!(
+                "\\x{}",
+                hex::encode(prepared.encrypted_data_key().as_bytes())
+            ),
+            "key_version": i32::try_from(prepared.key_version().get())?,
+            "algorithm": mipsorcu::ALGORITHM_XCHACHA20_POLY1305,
+            "classification": prepared.classification().as_str(),
+            "nonce_or_iv": format!("\\x{}", hex::encode(prepared.nonce_or_iv().as_bytes())),
+            "aad_context": prepared.aad_context(),
+            "created_by_user_id": prepared.owner_user_id().as_canonical_string(),
+            "created_at": prepared.created_at().as_rfc3339_utc()?,
+            "secrets": {
+                "current_version_id": "650e8400-e29b-41d4-a716-446655440000",
+                "owner_user_id": prepared.owner_user_id().as_canonical_string(),
+                "classification": prepared.classification().as_str(),
+            }
+        }]),
+    ))
+}
+
+fn test_jwt_verifier() -> Result<JwtVerifier, Box<dyn std::error::Error>> {
+    Ok(JwtVerifier::new(
+        JwtVerifierConfig::new(JWT_ISSUER, JWT_AUDIENCE)?,
+        Jwks::new(vec![Jwk::new(
+            "RSA",
+            JWT_KEY_ID,
+            Some("RS256".to_owned()),
+            Some("sig".to_owned()),
+            RSA_MODULUS,
+            RSA_EXPONENT,
+        )])?,
+    ))
+}
+
+fn valid_token() -> Result<String, Box<dyn std::error::Error>> {
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(JWT_KEY_ID.to_owned());
+    let key = EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY_PEM.as_bytes())?;
+
+    Ok(encode(
+        &header,
+        &TestClaims {
+            sub: OWNER_USER_ID.to_owned(),
+            iss: JWT_ISSUER.to_owned(),
+            aud: JWT_AUDIENCE.to_owned(),
+            exp: 4_102_444_800,
+        },
+        &key,
+    )?)
+}
+
+fn test_app_state(
+    supabase_url: &str,
+    audit_fallback_path: PathBuf,
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    let http_client = reqwest::Client::new();
+    let supabase_client = Arc::new(SupabaseClient::new(
+        http_client,
+        supabase_url.to_owned(),
+        "service-role-key",
+        "publishable-key",
+    ));
+    let audit_appender =
+        SupabaseAuditAppender::new(supabase_client.clone(), tokio::runtime::Handle::current());
+    let audit_recorder = Arc::new(AuditRecorder::new(
+        audit_appender,
+        LocalAuditFallbackStore::new(audit_fallback_path.clone()),
+    ));
+
+    Ok(AppState {
+        master_key: Arc::new(sample_master_key()),
+        key_version: KeyVersion::new(1)?,
+        jwt_verifier: Arc::new(test_jwt_verifier()?),
+        supabase_client,
+        audit_recorder,
+        audit_fallback_path,
+    })
+}
+
+async fn spawn_app(
+    state: AppState,
+) -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let app = runtime_testing::build_app(state);
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("test app should serve requests");
+    });
+
+    Ok((format!("http://{addr}"), handle))
+}
+
+fn spawn_supabase_read_and_audit_server(
+    secret_versions_body: String,
+    audit_status: u16,
+    audit_body: &'static str,
+) -> Result<
+    (
+        String,
+        mpsc::Receiver<CapturedRequest>,
+        thread::JoinHandle<std::io::Result<()>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let is_secret_read = request.path.starts_with("/rest/v1/secret_versions");
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if is_secret_read {
+                write_http_response(&mut stream, 200, "OK", &secret_versions_body)?;
+            } else if audit_status == 200 {
+                write_http_response(&mut stream, 200, "OK", audit_body)?;
+            } else {
+                write_http_response(
+                    &mut stream,
+                    audit_status,
+                    "Internal Server Error",
+                    audit_body,
+                )?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn build_log_subscriber(buffer: SharedLogBuffer) -> impl tracing::Subscriber + Send + Sync {
+    tracing_subscriber::fmt()
+        .json()
+        .with_writer(buffer)
+        .with_env_filter(EnvFilter::new("info"))
+        .finish()
 }
 
 #[test]
@@ -313,7 +586,7 @@ fn restore_test_input_round_trips_existing_encrypted_sample()
 
 #[test]
 fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::Error>> {
-    let (master_key, mut row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
+    let (_, mut row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
     row.aad_context = json!({
         "aad_version": 1,
         "secret_id": row.secret_id.clone(),
@@ -322,15 +595,12 @@ fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::
         "classification": "tampered",
         "created_at": row.created_at.clone(),
     });
-    let input = runtime_testing::build_restore_test_decrypt_input(row)?;
-
-    let result = mipsorcu::decrypt_current_secret_version(&master_key, input);
+    let result = runtime_testing::build_restore_test_decrypt_input(row);
 
     assert!(matches!(
         result,
-        Err(SecretDecryptError::Integrity(
-            mipsorcu::DecryptIntegrityError::AadContextMismatch
-        ))
+        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(message))
+            if message == "restore test aad_context does not match row"
     ));
     Ok(())
 }
@@ -393,13 +663,176 @@ async fn jwks_refresh_loop_stops_on_shutdown_signal() {
         .expect("JWKS refresh loop task should not panic");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn decrypt_endpoint_returns_plaintext_hex_encoding_and_no_store_when_audit_falls_back() {
+    let plaintext = b"router secret";
+    let (secret_id, row_json) =
+        decrypt_row_json(plaintext).expect("decrypt row JSON should be constructed");
+    let body = row_json.to_string();
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_read_and_audit_server(body, 500, r#"{"error":"audit failed"}"#)
+            .expect("Supabase test server should start");
+    let fallback_path = temp_path("decrypt-fallback-success.jsonl");
+    let state = test_app_state(&supabase_url, fallback_path.clone())
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{secret_id}/decrypt"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("decrypt request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+
+    let json: Value = response
+        .json()
+        .await
+        .expect("decrypt response should be JSON");
+    assert_eq!(json["secret_id"], Value::String(secret_id.clone()));
+    assert_eq!(json["version"], Value::from(1));
+    assert_eq!(json["plaintext_hex"], Value::String(hex::encode(plaintext)));
+    assert_eq!(json["encoding"], Value::String("hex".to_owned()));
+
+    let read_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret read request should be captured");
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("audit append request should be captured");
+    assert_eq!(read_request.method, "GET");
+    assert!(read_request.path.starts_with("/rest/v1/secret_versions"));
+    assert_eq!(audit_request.method, "POST");
+    assert!(
+        audit_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_append_audit_event")
+    );
+    assert!(audit_request.body.is_some());
+
+    let fallback_contents =
+        fs::read_to_string(&fallback_path).expect("fallback JSON Lines file should exist");
+    assert!(fallback_contents.contains(r#""action":"decrypt""#));
+    assert!(fallback_contents.contains(r#""delivery_status":"pending""#));
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn decrypt_endpoint_still_succeeds_when_primary_and_fallback_audit_both_fail() {
+    let plaintext = b"both fail secret";
+    let (secret_id, row_json) =
+        decrypt_row_json(plaintext).expect("decrypt row JSON should be constructed");
+    let body = row_json.to_string();
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_read_and_audit_server(body, 500, r#"{"error":"audit failed"}"#)
+            .expect("Supabase test server should start");
+    let fallback_path = temp_path("decrypt-fallback-both-fail");
+    fs::create_dir(&fallback_path).expect("fallback path should be a directory");
+    let state = test_app_state(&supabase_url, fallback_path.clone())
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{secret_id}/decrypt"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("decrypt request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let json: Value = response
+        .json()
+        .await
+        .expect("decrypt response should be JSON");
+    assert_eq!(json["plaintext_hex"], Value::String(hex::encode(plaintext)));
+
+    let read_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret read request should be captured");
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("audit append request should be captured");
+    assert_eq!(read_request.method, "GET");
+    assert_eq!(audit_request.method, "POST");
+    assert!(!fallback_path.is_file());
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn trace_layer_does_not_log_response_body_or_authorization_values() {
+    let plaintext = b"never-log-this";
+    let plaintext_hex = hex::encode(plaintext);
+    let (secret_id, row_json) =
+        decrypt_row_json(plaintext).expect("decrypt row JSON should be constructed");
+    let body = row_json.to_string();
+    let (supabase_url, _receiver, server_thread) =
+        spawn_supabase_read_and_audit_server(body, 200, r#"{"status":"ok"}"#)
+            .expect("Supabase test server should start");
+    let fallback_path = temp_path("decrypt-log-redaction.jsonl");
+    let state =
+        test_app_state(&supabase_url, fallback_path).expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let log_buffer = SharedLogBuffer::default();
+    let subscriber = build_log_subscriber(log_buffer.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{secret_id}/decrypt"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("decrypt request should succeed");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let _ = response
+        .text()
+        .await
+        .expect("response body should be readable");
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+
+    let logs = log_buffer.contents();
+    assert!(!logs.contains("plaintext_hex"));
+    assert!(!logs.contains(&plaintext_hex));
+    assert!(!logs.contains(&token));
+    assert!(!logs.contains("Authorization"));
+    assert!(!logs.contains("authorization"));
+}
+
 fn spawn_single_response_server(status: u16, body: &'static str) -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("test server should bind to a local port");
+    let listener =
+        TcpListener::bind("127.0.0.1:0").expect("test server should bind to a local port");
     let addr = listener
         .local_addr()
         .expect("test server local address should be available");
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         let (mut stream, _) = listener
             .accept()
             .expect("test server should accept one connection");
@@ -413,4 +846,91 @@ fn spawn_single_response_server(status: u16, body: &'static str) -> String {
     });
 
     format!("http://{addr}/jwks")
+}
+
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 1024];
+
+    let header_end = loop {
+        let bytes_read = stream.read(&mut chunk)?;
+        if bytes_read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed before headers were complete",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..bytes_read]);
+
+        if let Some(index) = find_header_end(&buffer) {
+            break index;
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+    let content_length = content_length(&headers)?.unwrap_or(0);
+    let body_start = header_end + 4;
+    let body_end = body_start + content_length;
+
+    while buffer.len() < body_end {
+        let bytes_read = stream.read(&mut chunk)?;
+        if bytes_read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed before body was complete",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..bytes_read]);
+    }
+
+    let request_line = headers.lines().next().unwrap_or_default();
+    let method = request_line
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+    let body = if content_length == 0 {
+        None
+    } else {
+        Some(serde_json::from_slice(&buffer[body_start..body_end])?)
+    };
+
+    Ok(CapturedRequest { method, path, body })
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn content_length(headers: &str) -> std::io::Result<Option<usize>> {
+    headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                Some(value.trim().parse::<usize>())
+            } else {
+                None
+            }
+        })
+        .transpose()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes())
 }

@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender};
 use crate::auth::RawJwt;
+use crate::{SecretId, SecretVersion};
 
 #[derive(Debug)]
 pub enum SupabaseRpcError {
@@ -62,7 +63,7 @@ impl SupabaseClient {
     pub async fn call_write_secret_version(
         &self,
         params: &WriteSecretVersionParams,
-    ) -> Result<WriteSecretVersionResponse, SupabaseRpcError> {
+    ) -> Result<WriteSecretVersionOutcome, SupabaseRpcError> {
         let response = self.post_rpc("rpc_write_secret_version", params).await?;
         let rows: Vec<WriteSecretVersionResponse> = ensure_success(response)
             .await?
@@ -70,7 +71,10 @@ impl SupabaseClient {
             .await
             .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
 
-        rows.into_iter().next().ok_or(SupabaseRpcError::EmptyResult)
+        rows.into_iter()
+            .next()
+            .ok_or(SupabaseRpcError::EmptyResult)
+            .and_then(WriteSecretVersionOutcome::try_from)
     }
 
     pub async fn call_append_audit_event(
@@ -84,10 +88,11 @@ impl SupabaseClient {
 
     pub async fn fetch_current_secret_version_for_user(
         &self,
-        secret_id: &str,
+        secret_id: &SecretId,
         raw_jwt: &RawJwt,
     ) -> Result<Vec<SecretVersionReadRow>, SupabaseRpcError> {
         let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+        let secret_id = secret_id.as_canonical_string();
         let url = format!(
             "{}/rest/v1/secret_versions?select={select}&secret_id=eq.{secret_id}",
             self.base_url
@@ -233,12 +238,63 @@ pub struct WriteSecretVersionParams {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct WriteSecretVersionResponse {
-    pub secret_id: String,
-    pub secret_version_id: String,
-    pub version: i32,
+struct WriteSecretVersionResponse {
+    secret_id: String,
+    secret_version_id: String,
+    version: i32,
     #[allow(dead_code)]
-    pub purged_version_ids: Vec<String>,
+    purged_version_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct WriteSecretVersionOutcome {
+    secret_id: SecretId,
+    secret_version_id: String,
+    version: SecretVersion,
+    purged_version_ids: Vec<String>,
+}
+
+impl WriteSecretVersionOutcome {
+    pub fn secret_id(&self) -> &SecretId {
+        &self.secret_id
+    }
+
+    pub fn secret_version_id(&self) -> &str {
+        &self.secret_version_id
+    }
+
+    pub fn version(&self) -> SecretVersion {
+        self.version
+    }
+
+    #[allow(dead_code)]
+    pub fn purged_version_ids(&self) -> &[String] {
+        &self.purged_version_ids
+    }
+}
+
+impl TryFrom<WriteSecretVersionResponse> for WriteSecretVersionOutcome {
+    type Error = SupabaseRpcError;
+
+    fn try_from(response: WriteSecretVersionResponse) -> Result<Self, Self::Error> {
+        let version = u32::try_from(response.version)
+            .ok()
+            .and_then(|value| SecretVersion::new(value).ok())
+            .ok_or_else(|| {
+                SupabaseRpcError::InvalidResponse("write RPC returned invalid version".to_owned())
+            })?;
+
+        let secret_id = SecretId::parse(&response.secret_id).map_err(|_| {
+            SupabaseRpcError::InvalidResponse("write RPC returned invalid secret_id".to_owned())
+        })?;
+
+        Ok(Self {
+            secret_id,
+            secret_version_id: response.secret_version_id,
+            version,
+            purged_version_ids: response.purged_version_ids,
+        })
+    }
 }
 
 #[derive(Serialize)]

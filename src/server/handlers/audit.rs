@@ -4,7 +4,6 @@ use crate::audit::{
     AuditAction, AuditEvent, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
     AuditRecordError, AuditRecordOutcome, AuditResult, RequestId,
 };
-use crate::server::errors::ApiError;
 use crate::server::state::AppState;
 use crate::{KeyVersion, OwnerUserId, SecretId};
 
@@ -102,10 +101,22 @@ pub(super) async fn record_success_audit(
     actor_user_id: &OwnerUserId,
     target_secret_id: &SecretId,
     key_version: KeyVersion,
-) -> Result<(), ApiError> {
-    let audit_event_id =
-        AuditEventId::generate().map_err(|error| ApiError::InternalError(error.to_string()))?;
-    let event = AuditEvent::new(AuditEventParts {
+) {
+    let audit_event_id = match AuditEventId::generate() {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %target_secret_id.as_canonical_string(),
+                error = %error,
+                action = AuditAction::Decrypt.as_str(),
+                result = "success",
+                "failed to generate decrypt success audit event id"
+            );
+            return;
+        }
+    };
+    let event = match AuditEvent::new(AuditEventParts {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: Some(actor_user_id.clone()),
@@ -115,46 +126,78 @@ pub(super) async fn record_success_audit(
         result: AuditResult::Success,
         key_version: Some(key_version),
         metadata_json: AuditMetadata::empty(),
-    })
-    .map_err(|error| ApiError::InternalError(error.to_string()))?;
+    }) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %target_secret_id.as_canonical_string(),
+                error = %error,
+                action = AuditAction::Decrypt.as_str(),
+                result = "success",
+                "failed to construct decrypt success audit event"
+            );
+            return;
+        }
+    };
 
     let recorder = state.audit_recorder.clone();
-    let outcome = tokio::task::spawn_blocking(move || recorder.record(&event))
-        .await
-        .map_err(|error| ApiError::InternalError(error.to_string()))?
-        .map_err(|error| match error {
-            AuditRecordError::PrimaryAndFallbackFailed { .. } => {
-                tracing::error!(
-                    error = %error,
-                    audit_record_outcome = "both_failed",
-                    "decrypt success audit recording failed"
-                );
-                ApiError::AuditAppendFailed
-            }
-            AuditRecordError::ResendReadFailed(_) | AuditRecordError::ResendMarkSentFailed(_) => {
-                tracing::error!(
-                    error = %error,
-                    audit_record_outcome = "unexpected_resend_error",
-                    "decrypt success audit recording failed"
-                );
-                ApiError::AuditAppendFailed
-            }
-        })?;
-
-    match outcome {
-        AuditRecordOutcome::PrimarySucceeded => {
+    match tokio::task::spawn_blocking(move || recorder.record(&event)).await {
+        Ok(Ok(AuditRecordOutcome::PrimarySucceeded)) => {
             tracing::info!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %target_secret_id.as_canonical_string(),
+                action = AuditAction::Decrypt.as_str(),
+                result = "success",
                 audit_record_outcome = "primary_succeeded",
                 "decrypt success audit recorded"
             );
-            Ok(())
         }
-        AuditRecordOutcome::FallbackSucceeded => {
+        Ok(Ok(AuditRecordOutcome::FallbackSucceeded)) => {
             tracing::warn!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %target_secret_id.as_canonical_string(),
+                action = AuditAction::Decrypt.as_str(),
+                result = "success",
                 audit_record_outcome = "fallback_succeeded",
                 "decrypt success audit recorded to local fallback"
             );
-            Ok(())
+        }
+        Ok(Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. })) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %target_secret_id.as_canonical_string(),
+                error = %error,
+                action = AuditAction::Decrypt.as_str(),
+                result = "success",
+                audit_record_outcome = "both_failed",
+                "decrypt success audit recording failed"
+            );
+        }
+        Ok(Err(
+            error @ (AuditRecordError::ResendReadFailed(_)
+            | AuditRecordError::ResendMarkSentFailed(_)),
+        )) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %target_secret_id.as_canonical_string(),
+                error = %error,
+                action = AuditAction::Decrypt.as_str(),
+                result = "success",
+                audit_record_outcome = "unexpected_resend_error",
+                "decrypt success audit recording failed"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %target_secret_id.as_canonical_string(),
+                error = %error,
+                action = AuditAction::Decrypt.as_str(),
+                result = "success",
+                audit_record_outcome = "spawn_failed",
+                "decrypt success audit task failed"
+            );
         }
     }
 }

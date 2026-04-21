@@ -97,7 +97,7 @@ pub(super) async fn fetch_single_current_secret_version(
 ) -> Result<PreparedDecryptRow, ApiError> {
     let rows = state
         .supabase_client
-        .fetch_current_secret_version_for_user(&secret_id.as_canonical_string(), raw_jwt)
+        .fetch_current_secret_version_for_user(secret_id, raw_jwt)
         .await
         .map_err(ApiError::from)?;
 

@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateSecretRequest {
     pub classification: String,
     pub device_id: String,
-    pub plaintext: String,
+    pub plaintext_hex: String,
 }
 
 #[derive(Serialize)]
@@ -15,9 +16,10 @@ pub struct CreateSecretResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RotateSecretRequest {
     pub device_id: String,
-    pub plaintext: String,
+    pub plaintext_hex: String,
 }
 
 #[derive(Serialize)]
@@ -31,7 +33,19 @@ pub struct RotateSecretResponse {
 pub struct DecryptSecretResponse {
     pub secret_id: String,
     pub version: u32,
-    pub plaintext: String,
+    pub plaintext_hex: String,
+    pub encoding: &'static str,
+}
+
+impl DecryptSecretResponse {
+    pub fn new(secret_id: String, version: u32, plaintext: &[u8]) -> Self {
+        Self {
+            secret_id,
+            version,
+            plaintext_hex: hex::encode(plaintext),
+            encoding: "hex",
+        }
+    }
 }
 
 #[derive(Serialize)]

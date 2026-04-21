@@ -34,16 +34,6 @@ pub(super) fn generate_request_id() -> Result<RequestId, ApiError> {
     RequestId::generate().map_err(|error| ApiError::InternalError(error.to_string()))
 }
 
-pub(super) fn parse_write_response_version(value: i32) -> Result<u32, ApiError> {
-    u32::try_from(value)
-        .ok()
-        .and_then(|parsed| crate::SecretVersion::new(parsed).ok())
-        .map(crate::SecretVersion::get)
-        .ok_or_else(|| {
-            ApiError::InternalInvariantViolation("write RPC returned invalid version".to_owned())
-        })
-}
-
 fn encode_bytea(bytes: &[u8]) -> String {
     format!("\\x{}", hex::encode(bytes))
 }

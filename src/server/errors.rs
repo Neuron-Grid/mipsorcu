@@ -15,7 +15,6 @@ pub enum ApiError {
     NotFound(String),
     BadRequest(String),
     DecryptFailed,
-    AuditAppendFailed,
     SupabaseError(SupabaseRpcError),
     DbIntegrityViolation(String),
     InternalInvariantViolation(String),
@@ -30,7 +29,6 @@ impl fmt::Display for ApiError {
             Self::NotFound(message) => write!(formatter, "not found: {message}"),
             Self::BadRequest(message) => write!(formatter, "bad request: {message}"),
             Self::DecryptFailed => write!(formatter, "decrypt failed"),
-            Self::AuditAppendFailed => write!(formatter, "audit append failed"),
             Self::SupabaseError(error) => write!(formatter, "{error}"),
             Self::DbIntegrityViolation(message) => {
                 write!(formatter, "db integrity violation: {message}")
@@ -53,7 +51,6 @@ impl ApiError {
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::DecryptFailed => (StatusCode::BAD_REQUEST, "decrypt_failed"),
-            Self::AuditAppendFailed => (StatusCode::INTERNAL_SERVER_ERROR, "audit_append_failed"),
             Self::SupabaseError(_) => (StatusCode::BAD_GATEWAY, "supabase_error"),
             Self::DbIntegrityViolation(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "db_integrity_violation")
@@ -73,7 +70,6 @@ impl ApiError {
             | Self::NotFound(message)
             | Self::BadRequest(message) => message.clone(),
             Self::DecryptFailed => "decrypt failed".to_owned(),
-            Self::AuditAppendFailed => "audit append failed".to_owned(),
             Self::SupabaseError(_) => "upstream service error".to_owned(),
             Self::DbIntegrityViolation(_)
             | Self::InternalInvariantViolation(_)

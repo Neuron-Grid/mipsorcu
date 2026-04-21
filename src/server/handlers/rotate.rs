@@ -14,7 +14,7 @@ use crate::{ExistingSecretVersionInput, PreparedSecretVersion};
 use super::audit::FailureAuditContext;
 use super::parsing::{ParsedRotateSecretRequest, parse_rotate_secret_request, parse_secret_id};
 use super::read_row::fetch_single_current_secret_version;
-use super::shared::{build_rpc_params, generate_request_id, parse_write_response_version};
+use super::shared::{build_rpc_params, generate_request_id};
 
 pub async fn rotate_secret(
     State(state): State<AppState>,
@@ -60,11 +60,10 @@ pub async fn rotate_secret(
 
     match rpc_result {
         Ok(response) => {
-            let response_version = parse_write_response_version(response.version)?;
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
-                secret_id = %response.secret_id,
-                version = response_version,
+                secret_id = %response.secret_id().as_canonical_string(),
+                version = response.version().get(),
                 action = AuditAction::EncryptRotate.as_str(),
                 result = "success",
             );
@@ -72,9 +71,9 @@ pub async fn rotate_secret(
             Ok((
                 StatusCode::CREATED,
                 Json(RotateSecretResponse {
-                    secret_id: response.secret_id,
-                    version: response_version,
-                    secret_version_id: response.secret_version_id,
+                    secret_id: response.secret_id().as_canonical_string(),
+                    version: response.version().get(),
+                    secret_version_id: response.secret_version_id().to_owned(),
                 }),
             ))
         }

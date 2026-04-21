@@ -14,7 +14,7 @@ use crate::{
 
 use super::audit::{FailureAuditContext, failure_audit_metadata_for_attempted_secret};
 use super::parsing::{ParsedCreateSecretRequest, parse_create_secret_request};
-use super::shared::{build_rpc_params, generate_request_id, parse_write_response_version};
+use super::shared::{build_rpc_params, generate_request_id};
 
 pub async fn create_secret(
     State(state): State<AppState>,
@@ -51,11 +51,10 @@ pub async fn create_secret(
 
     match rpc_result {
         Ok(response) => {
-            let response_version = parse_write_response_version(response.version)?;
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
-                secret_id = %response.secret_id,
-                version = response_version,
+                secret_id = %response.secret_id().as_canonical_string(),
+                version = response.version().get(),
                 action = AuditAction::EncryptCreate.as_str(),
                 result = "success",
             );
@@ -63,9 +62,9 @@ pub async fn create_secret(
             Ok((
                 StatusCode::CREATED,
                 Json(CreateSecretResponse {
-                    secret_id: response.secret_id,
-                    version: response_version,
-                    secret_version_id: response.secret_version_id,
+                    secret_id: response.secret_id().as_canonical_string(),
+                    version: response.version().get(),
+                    secret_version_id: response.secret_version_id().to_owned(),
                 }),
             ))
         }

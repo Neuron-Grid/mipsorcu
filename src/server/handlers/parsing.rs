@@ -26,7 +26,7 @@ pub(super) fn parse_create_secret_request(
     Ok(ParsedCreateSecretRequest {
         classification: parse_classification(&body.classification)?,
         device_id: parse_device_id(&body.device_id)?,
-        plaintext: parse_hex_plaintext(&body.plaintext)?,
+        plaintext: parse_hex_plaintext(&body.plaintext_hex)?,
         created_at: current_created_at()?,
     })
 }
@@ -36,7 +36,7 @@ pub(super) fn parse_rotate_secret_request(
 ) -> Result<ParsedRotateSecretRequest, ApiError> {
     Ok(ParsedRotateSecretRequest {
         device_id: parse_device_id(&body.device_id)?,
-        plaintext: parse_hex_plaintext(&body.plaintext)?,
+        plaintext: parse_hex_plaintext(&body.plaintext_hex)?,
         created_at: current_created_at()?,
     })
 }
@@ -56,7 +56,7 @@ fn parse_device_id(value: &str) -> Result<DeviceId, ApiError> {
 fn parse_hex_plaintext(value: &str) -> Result<Plaintext, ApiError> {
     hex::decode(value)
         .map(Plaintext::new)
-        .map_err(|error| ApiError::BadRequest(format!("invalid plaintext encoding: {error}")))
+        .map_err(|error| ApiError::BadRequest(format!("invalid plaintext_hex encoding: {error}")))
 }
 
 fn current_created_at() -> Result<CreatedAt, ApiError> {

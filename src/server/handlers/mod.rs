@@ -19,7 +19,7 @@ pub mod testing {
     use crate::audit::{
         AuditAction, AuditEvent, AuditEventError, AuditEventId, AuditMetadata, RequestId,
     };
-    use crate::server::dto::RotateSecretRequest;
+    use crate::server::dto::{CreateSecretRequest, RotateSecretRequest};
     use crate::server::errors::ApiError;
     use crate::server::supabase::SecretVersionReadRow;
     use crate::{OwnerUserId, SecretId};
@@ -52,15 +52,15 @@ pub mod testing {
         super::read_row::select_single_current_secret_version_row(rows)
     }
 
+    pub fn validate_create_secret_request(body: CreateSecretRequest) -> Result<(), ApiError> {
+        super::parsing::parse_create_secret_request(body).map(|_| ())
+    }
+
     pub fn validate_rotate_secret_request(body: RotateSecretRequest) -> Result<(), ApiError> {
         super::parsing::parse_rotate_secret_request(body).map(|_| ())
     }
 
     pub fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {
         super::read_row::decode_bytea(value)
-    }
-
-    pub fn parse_write_response_version(value: i32) -> Result<u32, ApiError> {
-        super::shared::parse_write_response_version(value)
     }
 }

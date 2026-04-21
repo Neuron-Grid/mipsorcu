@@ -1,13 +1,13 @@
 use std::error::Error;
 
-use mipsorcu::server::dto::RotateSecretRequest;
+use mipsorcu::server::dto::{CreateSecretRequest, RotateSecretRequest};
 use mipsorcu::server::handlers::testing;
 use mipsorcu::server::supabase::{SecretReadJoin, SecretVersionReadRow};
 use mipsorcu::{
     AuditAction, AuditEventId, AuditMetadata, AuditResult, ENCRYPTED_DATA_KEY_LENGTH, OwnerUserId,
     RequestId, SecretId,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 const SECRET_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 const AUDIT_EVENT_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -214,10 +214,37 @@ fn parse_decrypt_row_rejects_invalid_lengths_and_metadata() {
 }
 
 #[test]
-fn validate_rotate_secret_request_rejects_invalid_device_id_and_plaintext() {
+fn create_and_rotate_request_dto_require_plaintext_hex() {
+    let create = serde_json::from_value::<CreateSecretRequest>(json!({
+        "classification": "confidential",
+        "device_id": "sbc-device-1",
+        "plaintext": "00"
+    }));
+    let rotate = serde_json::from_value::<RotateSecretRequest>(json!({
+        "device_id": "sbc-device-1",
+        "plaintext": "00"
+    }));
+
+    assert!(create.is_err());
+    assert!(rotate.is_err());
+}
+
+#[test]
+fn validate_create_and_rotate_requests_reject_invalid_plaintext_hex() {
+    let invalid_create = CreateSecretRequest {
+        classification: "confidential".to_owned(),
+        device_id: "sbc-device-1".to_owned(),
+        plaintext_hex: "not hex".to_owned(),
+    };
+    assert!(matches!(
+        testing::validate_create_secret_request(invalid_create),
+        Err(mipsorcu::server::errors::ApiError::BadRequest(message))
+            if message.contains("plaintext_hex")
+    ));
+
     let invalid_device_id = RotateSecretRequest {
         device_id: "   ".to_owned(),
-        plaintext: "00".to_owned(),
+        plaintext_hex: "00".to_owned(),
     };
     assert!(matches!(
         testing::validate_rotate_secret_request(invalid_device_id),
@@ -226,11 +253,12 @@ fn validate_rotate_secret_request_rejects_invalid_device_id_and_plaintext() {
 
     let invalid_plaintext = RotateSecretRequest {
         device_id: "sbc-device-1".to_owned(),
-        plaintext: "not hex".to_owned(),
+        plaintext_hex: "not hex".to_owned(),
     };
     assert!(matches!(
         testing::validate_rotate_secret_request(invalid_plaintext),
-        Err(mipsorcu::server::errors::ApiError::BadRequest(_))
+        Err(mipsorcu::server::errors::ApiError::BadRequest(message))
+            if message.contains("plaintext_hex")
     ));
 }
 
@@ -251,17 +279,17 @@ fn decode_bytea_requires_postgres_hex_prefix() {
 }
 
 #[test]
-fn parse_write_response_version_rejects_non_positive_values() {
+fn decrypt_secret_response_serializes_plaintext_hex_and_encoding() {
+    let response =
+        mipsorcu::server::dto::DecryptSecretResponse::new(SECRET_ID.to_owned(), 3, b"dummy secret");
+
+    let value = serde_json::to_value(response).expect("response should serialize");
+
+    assert_eq!(value["secret_id"], Value::String(SECRET_ID.to_owned()));
+    assert_eq!(value["version"], Value::from(3));
     assert_eq!(
-        testing::parse_write_response_version(1).expect("valid version"),
-        1
+        value["plaintext_hex"],
+        Value::String("64756d6d7920736563726574".to_owned())
     );
-    assert!(matches!(
-        testing::parse_write_response_version(0),
-        Err(mipsorcu::server::errors::ApiError::InternalInvariantViolation(_))
-    ));
-    assert!(matches!(
-        testing::parse_write_response_version(-1),
-        Err(mipsorcu::server::errors::ApiError::InternalInvariantViolation(_))
-    ));
+    assert_eq!(value["encoding"], Value::String("hex".to_owned()));
 }

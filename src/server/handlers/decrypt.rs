@@ -1,5 +1,6 @@
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
+use axum::http::{HeaderMap, HeaderValue, header};
 
 use crate::audit::AuditAction;
 use crate::decrypt_current_secret_version as decrypt_current_secret_version_with_master_key;
@@ -18,7 +19,7 @@ pub async fn decrypt_secret(
     State(state): State<AppState>,
     AxumPath(secret_id): AxumPath<String>,
     auth: AuthenticatedUser,
-) -> Result<Json<DecryptSecretResponse>, ApiError> {
+) -> Result<(HeaderMap, Json<DecryptSecretResponse>), ApiError> {
     let request_id = generate_request_id()?;
     let requested_secret_id = parse_secret_id(&secret_id)?;
     let actor_user_id = auth.claims.subject_user_id().clone();
@@ -50,7 +51,7 @@ pub async fn decrypt_secret(
         &response_secret_id,
         key_version,
     )
-    .await?;
+    .await;
 
     tracing::info!(
         request_id = %request_id.as_canonical_string(),
@@ -60,11 +61,17 @@ pub async fn decrypt_secret(
         result = "success",
     );
 
-    Ok(Json(DecryptSecretResponse {
-        secret_id: response_secret_id.as_canonical_string(),
-        version: version.get(),
-        plaintext: hex::encode(plaintext.as_bytes()),
-    }))
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+    Ok((
+        headers,
+        Json(DecryptSecretResponse::new(
+            response_secret_id.as_canonical_string(),
+            version.get(),
+            plaintext.as_bytes(),
+        )),
+    ))
 }
 
 async fn decrypt_prepared_input(

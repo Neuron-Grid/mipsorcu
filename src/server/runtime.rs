@@ -16,8 +16,11 @@ use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionI
 use axum::Router;
 use axum::routing::{get, post};
 use tokio::sync::watch;
+use tower_http::LatencyUnit;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{
+    DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
+};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 
@@ -138,23 +141,7 @@ async fn serve_app(
     listen_addr: std::net::SocketAddr,
     shutdown_sender: watch::Sender<bool>,
 ) {
-    let app = Router::new()
-        .route("/v1/secrets", post(handlers::create_secret))
-        .route(
-            "/v1/secrets/{secret_id}/versions",
-            post(handlers::rotate_secret),
-        )
-        .route(
-            "/v1/secrets/{secret_id}/decrypt",
-            post(handlers::decrypt_secret),
-        )
-        .route("/health", get(handlers::health_check))
-        .fallback(handlers::not_found)
-        .layer(SetSensitiveRequestHeadersLayer::new([
-            http::header::AUTHORIZATION,
-        ]))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(listen_addr)
         .await
@@ -172,6 +159,41 @@ async fn serve_app(
             tracing::error!(error = %error, "server error");
             std::process::exit(1);
         });
+}
+
+fn build_app(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/secrets", post(handlers::create_secret))
+        .route(
+            "/v1/secrets/{secret_id}/versions",
+            post(handlers::rotate_secret),
+        )
+        .route(
+            "/v1/secrets/{secret_id}/decrypt",
+            post(handlers::decrypt_secret),
+        )
+        .route("/health", get(handlers::health_check))
+        .fallback(handlers::not_found)
+        .layer(SetSensitiveRequestHeadersLayer::new([
+            http::header::AUTHORIZATION,
+        ]))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().include_headers(false))
+                .on_request(DefaultOnRequest::new().level(tracing::Level::INFO))
+                .on_response(
+                    DefaultOnResponse::new()
+                        .level(tracing::Level::INFO)
+                        .include_headers(false)
+                        .latency_unit(LatencyUnit::Millis),
+                )
+                .on_failure(
+                    DefaultOnFailure::new()
+                        .level(tracing::Level::ERROR)
+                        .latency_unit(LatencyUnit::Millis),
+                ),
+        )
+        .with_state(state)
 }
 
 pub async fn initialize_jwt_verifier_from_jwks_url(
@@ -477,16 +499,19 @@ struct PreparedRestoreTestSample {
 fn parse_restore_test_sample(
     row: RestoreTestSampleRow,
 ) -> Result<PreparedRestoreTestSample, ApiError> {
-    let stored_aad = AadV1::from_stored_context(&row.aad_context)
-        .map_err(|_| ApiError::DbIntegrityViolation("restore test aad_context is invalid".to_owned()))?;
-    let secret_id = SecretId::parse(&row.secret_id)
-        .map_err(|_| ApiError::DbIntegrityViolation("restore test secret_id is invalid".to_owned()))?;
+    let stored_aad = AadV1::from_stored_context(&row.aad_context).map_err(|_| {
+        ApiError::DbIntegrityViolation("restore test aad_context is invalid".to_owned())
+    })?;
+    let secret_id = SecretId::parse(&row.secret_id).map_err(|_| {
+        ApiError::DbIntegrityViolation("restore test secret_id is invalid".to_owned())
+    })?;
     let version = parse_restore_test_secret_version(row.version)?;
     let classification = Classification::new(&row.classification).map_err(|_| {
         ApiError::DbIntegrityViolation("restore test classification is invalid".to_owned())
     })?;
-    let created_at = CreatedAt::parse(&row.created_at)
-        .map_err(|_| ApiError::DbIntegrityViolation("restore test created_at is invalid".to_owned()))?;
+    let created_at = CreatedAt::parse(&row.created_at).map_err(|_| {
+        ApiError::DbIntegrityViolation("restore test created_at is invalid".to_owned())
+    })?;
     let owner_user_id = stored_aad.owner_user_id().clone();
     let row_aad = AadV1::from_row_metadata(
         secret_id.clone(),
@@ -520,9 +545,7 @@ fn parse_restore_test_sample(
             "encrypted_data_key",
         )?)
         .map_err(|_| {
-            ApiError::DbIntegrityViolation(
-                "restore test encrypted_data_key is invalid".to_owned(),
-            )
+            ApiError::DbIntegrityViolation("restore test encrypted_data_key is invalid".to_owned())
         })?,
         nonce_or_iv: Nonce::parse(&decode_restore_test_bytea(&row.nonce_or_iv, "nonce_or_iv")?)
             .map_err(|_| {
@@ -564,18 +587,15 @@ fn decode_restore_test_bytea(value: &str, field: &'static str) -> Result<Vec<u8>
         )));
     };
 
-    hex::decode(hex_value).map_err(|_| {
-        ApiError::DbIntegrityViolation(format!("restore test {field} is invalid"))
-    })
+    hex::decode(hex_value)
+        .map_err(|_| ApiError::DbIntegrityViolation(format!("restore test {field} is invalid")))
 }
 
 fn parse_restore_test_secret_version(value: i32) -> Result<SecretVersion, ApiError> {
     u32::try_from(value)
         .ok()
         .and_then(|parsed| SecretVersion::new(parsed).ok())
-        .ok_or_else(|| {
-            ApiError::DbIntegrityViolation("restore test version is invalid".to_owned())
-        })
+        .ok_or_else(|| ApiError::DbIntegrityViolation("restore test version is invalid".to_owned()))
 }
 
 fn parse_restore_test_key_version(value: i32) -> Result<KeyVersion, ApiError> {
@@ -1014,12 +1034,14 @@ fn local_audit_store_error_kind(error: &LocalAuditStoreError) -> &'static str {
 pub mod testing {
     use std::time::Duration;
 
+    use axum::Router;
     use tokio::sync::watch;
 
     use crate::audit::AuditMetadata;
     use crate::auth::JwksCache;
     use crate::read::DecryptCurrentSecretVersionInput;
     use crate::server::errors::ApiError;
+    use crate::server::state::AppState;
     use crate::server::supabase::RestoreTestSampleRow;
 
     pub fn build_restore_test_decrypt_input(
@@ -1036,6 +1058,10 @@ pub mod testing {
         failed_version: Option<u32>,
     ) -> AuditMetadata {
         super::restore_test_metadata(sample_count, error_code, failed_version)
+    }
+
+    pub fn build_app(state: AppState) -> Router {
+        super::build_app(state)
     }
 
     pub async fn run_jwks_refresh_loop(
