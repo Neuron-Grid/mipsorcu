@@ -9,8 +9,8 @@ use flate2::read::GzDecoder;
 use mipsorcu::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventError, AuditEventId,
     AuditEventParts, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditRecorder,
-    AuditResult, DeviceId, KeyVersion, LocalAuditFallbackStore, OwnerUserId, RequestId,
-    RolloverOutcome, SecretId,
+    AuditResult, DeviceId, FORBIDDEN_AUDIT_METADATA_KEYS, KeyVersion, LocalAuditFallbackStore,
+    OwnerUserId, RequestId, RolloverOutcome, SecretId,
 };
 use serde_json::{Value, json};
 
@@ -245,6 +245,24 @@ fn metadata_rejects_non_object_and_forbidden_keys_recursively() {
         })),
         Err(AuditEventError::ForbiddenMetadataKey { key }) if key == "encrypted_data_key"
     ));
+    assert!(matches!(
+        AuditMetadata::new(json!({
+            "safe": [
+                {
+                    "plain_text": "do-not-store"
+                }
+            ]
+        })),
+        Err(AuditEventError::ForbiddenMetadataKey { key }) if key == "plain_text"
+    ));
+    assert!(matches!(
+        AuditMetadata::new(json!({
+            "safe": {
+                "DeCrYpTeD_dAtA": "do-not-store"
+            }
+        })),
+        Err(AuditEventError::ForbiddenMetadataKey { key }) if key == "DeCrYpTeD_dAtA"
+    ));
     assert!(AuditMetadata::new(json!({ "error_code": "denied" })).is_ok());
 }
 
@@ -262,6 +280,20 @@ fn metadata_adds_attempted_secret_id_as_canonical_uuid() -> TestResult<()> {
     assert!(AuditMetadata::new(metadata.as_value().clone()).is_ok());
 
     Ok(())
+}
+
+#[test]
+fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
+    assert!(FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"plain_text"));
+    assert!(FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"decrypted_data"));
+    assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"attempted_secret_id"));
+    assert!(
+        AuditMetadata::new(json!({
+            "attempted_secret_id": TARGET_SECRET_ID,
+            "error_code": "write_rpc_failed"
+        }))
+        .is_ok()
+    );
 }
 
 #[test]

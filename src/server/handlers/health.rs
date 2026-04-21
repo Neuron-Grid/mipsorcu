@@ -13,8 +13,33 @@ use crate::server::state::AppState;
 
 const FAILURE_AUDIT_BOTH_FAILED_TTL: Duration = Duration::from_secs(5 * 60);
 
-pub async fn health_check() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "up" })
+pub async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
+    let now = OffsetDateTime::now_utc();
+    let snapshot = state.readiness_state.snapshot();
+    let supabase_max_age = state
+        .health_readiness_poll_interval
+        .checked_mul(2)
+        .unwrap_or(Duration::MAX);
+    let supabase_reachable =
+        snapshot.supabase_reachable && snapshot.supabase_is_fresh(now, supabase_max_age);
+    let master_key_loaded = true;
+    let disk_free_mb = available_disk_space_mb(state.audit_fallback_store.path());
+    let is_up = supabase_reachable && master_key_loaded;
+    let status = if is_up {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(HealthResponse {
+            status: if is_up { "up" } else { "down" },
+            supabase_reachable,
+            master_key_loaded,
+            disk_free_mb,
+        }),
+    )
 }
 
 pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<ReadyResponse>) {

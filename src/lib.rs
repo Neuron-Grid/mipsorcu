@@ -13,8 +13,9 @@ pub use aad::AadV1;
 pub use audit::{
     ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent, AuditEventAppender,
     AuditEventError, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
-    AuditRecordOutcome, AuditRecorder, AuditResult, LocalAuditFallbackStore, LocalAuditStoreError,
-    RequestId, ResendAuditSummary, RolloverArchive, RolloverOutcome, SweptArchive,
+    AuditRecordOutcome, AuditRecorder, AuditResult, FORBIDDEN_AUDIT_METADATA_KEYS,
+    LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary, RolloverArchive,
+    RolloverOutcome, SweptArchive,
 };
 pub use auth::{
     Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,

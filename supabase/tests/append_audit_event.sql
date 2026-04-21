@@ -494,6 +494,72 @@ select ok(
     'direct audit_events insert rejects forbidden metadata keys recursively'
 );
 
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000028',
+        '00000000-0000-4000-8000-000000000028',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'decrypt',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        1,
+        '{"nested":[{"plain_text":"leak"}]}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects synchronized plain_text key recursively'
+);
+
+select ok(
+    position(
+        'audit_events_metadata_json_no_forbidden_keys' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000029',
+            '00000000-0000-4000-8000-000000000029',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'sbc-device-1',
+            'decrypt',
+            '550e8400-e29b-41d4-a716-446655440000',
+            'failure',
+            1,
+            '{"nested":[{"plain_text":"leak"}]}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects synchronized plain_text key recursively'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000030',
+        '00000000-0000-4000-8000-000000000030',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'decrypt',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        1,
+        '{"nested":[{"DeCrYpTeD_dAtA":"leak"}]}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects synchronized decrypted_data key case-insensitively'
+);
+
+select ok(
+    position(
+        'audit_events_metadata_json_no_forbidden_keys' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000031',
+            '00000000-0000-4000-8000-000000000031',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'sbc-device-1',
+            'decrypt',
+            '550e8400-e29b-41d4-a716-446655440000',
+            'failure',
+            1,
+            '{"nested":[{"DeCrYpTeD_dAtA":"leak"}]}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects synchronized decrypted_data key case-insensitively'
+);
+
 select * from finish();
 
 rollback;

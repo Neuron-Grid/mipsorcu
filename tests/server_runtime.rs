@@ -597,6 +597,9 @@ async fn health_endpoint_returns_minimal_liveness_and_does_not_call_supabase() {
         spawn_capture_server(Duration::from_millis(250)).expect("capture server should start");
     let state = test_app_state(&supabase_url, temp_path("health-minimal"))
         .expect("test app state should be created");
+    state
+        .readiness_state
+        .record_supabase_probe_result_at(true, OffsetDateTime::now_utc());
     let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
 
     let response = reqwest::get(format!("{app_url}/health"))
@@ -616,7 +619,46 @@ async fn health_endpoint_returns_minimal_liveness_and_does_not_call_supabase() {
     join_result.expect("capture server should exit cleanly");
 
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(body, json!({ "status": "up" }));
+    assert_eq!(body["status"], "up");
+    assert_eq!(body["supabase_reachable"], true);
+    assert_eq!(body["master_key_loaded"], true);
+    assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert!(body.get("fallback_writable").is_none());
+    assert!(body.get("audit_fallback_pending").is_none());
+    assert!(body.get("supabase_last_checked_at").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn health_endpoint_returns_service_unavailable_when_supabase_state_is_unhealthy() {
+    let (supabase_url, receiver, server_thread) =
+        spawn_capture_server(Duration::from_millis(250)).expect("capture server should start");
+    let state = test_app_state(&supabase_url, temp_path("health-unhealthy"))
+        .expect("test app state should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::get(format!("{app_url}/health"))
+        .await
+        .expect("health request should succeed");
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .expect("health response should be JSON");
+
+    app_task.abort();
+    assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err());
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["status"], "down");
+    assert_eq!(body["supabase_reachable"], false);
+    assert_eq!(body["master_key_loaded"], true);
+    assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -8,7 +8,7 @@ use crate::types::{DeviceId, KeyVersion, OwnerUserId, SecretId};
 use super::error::{AuditAppendError, AuditEventError, LocalAuditStoreError};
 use super::fallback::{DeliveryStatus, current_occurred_at};
 
-const FORBIDDEN_METADATA_KEYS: &[&str] = &[
+pub const FORBIDDEN_AUDIT_METADATA_KEYS: &[&str] = &[
     "plaintext",
     "plain_text",
     "decrypted",
@@ -364,7 +364,7 @@ fn reject_forbidden_metadata_keys(value: &Value) -> Result<(), AuditEventError> 
 
 fn is_forbidden_metadata_key(key: &str) -> bool {
     let normalized = key.trim().to_ascii_lowercase();
-    FORBIDDEN_METADATA_KEYS
+    FORBIDDEN_AUDIT_METADATA_KEYS
         .iter()
         .any(|forbidden| normalized == *forbidden)
 }
