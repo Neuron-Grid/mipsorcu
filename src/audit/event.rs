@@ -64,6 +64,10 @@ impl RequestId {
         Ok(Self(uuid))
     }
 
+    pub fn nil() -> Self {
+        Self(Uuid::nil())
+    }
+
     pub fn parse(value: &str) -> Result<Self, AuditEventError> {
         Uuid::parse_str(value)
             .map(Self)

@@ -30,10 +30,6 @@ pub(super) fn build_rpc_params(
     })
 }
 
-pub(super) fn generate_request_id() -> Result<RequestId, ApiError> {
-    RequestId::generate().map_err(|error| ApiError::InternalError(error.to_string()))
-}
-
 fn encode_bytea(bytes: &[u8]) -> String {
     format!("\\x{}", hex::encode(bytes))
 }

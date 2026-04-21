@@ -102,6 +102,12 @@ struct CapturedRequest {
     body: Option<Value>,
 }
 
+type TestServerHandle = (
+    String,
+    mpsc::Receiver<CapturedRequest>,
+    thread::JoinHandle<std::io::Result<()>>,
+);
+
 #[derive(Debug, Clone, Serialize)]
 struct TestClaims {
     sub: String,
@@ -320,14 +326,7 @@ fn spawn_supabase_read_and_audit_server(
     secret_versions_body: String,
     audit_status: u16,
     audit_body: &'static str,
-) -> Result<
-    (
-        String,
-        mpsc::Receiver<CapturedRequest>,
-        thread::JoinHandle<std::io::Result<()>>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
@@ -363,16 +362,34 @@ fn spawn_supabase_read_and_audit_server(
     Ok((format!("http://{addr}"), receiver, thread))
 }
 
+fn spawn_supabase_single_request_server(
+    status: u16,
+    reason: &'static str,
+    body: &'static str,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let request = read_http_request(&mut stream)?;
+        sender.send(request).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "captured request receiver was dropped",
+            )
+        })?;
+        write_http_response(&mut stream, status, reason, body)?;
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
 fn spawn_capture_server(
     idle_timeout: Duration,
-) -> Result<
-    (
-        String,
-        mpsc::Receiver<CapturedRequest>,
-        thread::JoinHandle<std::io::Result<()>>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
@@ -1039,6 +1056,262 @@ async fn decrypt_endpoint_still_succeeds_when_primary_and_fallback_audit_both_fa
         .join()
         .expect("Supabase test server thread should join")
         .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn create_endpoint_maps_upstream_401_to_502_with_request_id() {
+    let (supabase_url, receiver, server_thread) = spawn_supabase_single_request_server(
+        401,
+        "Unauthorized",
+        r#"{"error":"upstream denied create"}"#,
+    )
+    .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("create-upstream-401"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("create request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(
+        json["code"],
+        Value::String("upstream_dependency_failed".to_owned())
+    );
+    let request_id = json["request_id"]
+        .as_str()
+        .expect("error response should include request_id");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+    assert!(
+        !json
+            .as_object()
+            .is_some_and(|object| object.contains_key("error"))
+    );
+
+    let write_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("write RPC request should be captured");
+    assert_eq!(write_request.method, "POST");
+    assert!(
+        write_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_write_secret_version")
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rotate_endpoint_maps_upstream_403_to_502_with_request_id() {
+    let (secret_id, row_json) =
+        decrypt_row_json(b"rotate seed secret").expect("decrypt row JSON should be constructed");
+    let (supabase_url, receiver, server_thread) = spawn_supabase_read_and_audit_server(
+        row_json.to_string(),
+        403,
+        r#"{"error":"upstream denied rotate"}"#,
+    )
+    .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("rotate-upstream-403"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{secret_id}/versions"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("rotate request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(
+        json["code"],
+        Value::String("upstream_dependency_failed".to_owned())
+    );
+    let request_id = json["request_id"]
+        .as_str()
+        .expect("error response should include request_id");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+    assert!(
+        !json
+            .as_object()
+            .is_some_and(|object| object.contains_key("error"))
+    );
+
+    let read_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret read request should be captured");
+    let write_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("write RPC request should be captured");
+    assert_eq!(read_request.method, "GET");
+    assert_eq!(write_request.method, "POST");
+    assert!(
+        write_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_write_secret_version")
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn decrypt_endpoint_maps_upstream_404_to_502_with_request_id() {
+    let (supabase_url, receiver, server_thread) = spawn_supabase_single_request_server(
+        404,
+        "Not Found",
+        r#"{"error":"upstream secret missing"}"#,
+    )
+    .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("decrypt-upstream-404"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let secret_id = "550e8400-e29b-41d4-a716-446655440000";
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{secret_id}/decrypt"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("decrypt request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(
+        json["code"],
+        Value::String("upstream_dependency_failed".to_owned())
+    );
+    let request_id = json["request_id"]
+        .as_str()
+        .expect("error response should include request_id");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+    assert!(
+        !json
+            .as_object()
+            .is_some_and(|object| object.contains_key("error"))
+    );
+
+    let read_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret read request should be captured");
+    assert_eq!(read_request.method, "GET");
+    assert!(read_request.path.starts_with("/rest/v1/secret_versions"));
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn create_endpoint_missing_authorization_returns_401_with_request_id() {
+    let state = test_app_state("http://127.0.0.1:1", temp_path("create-auth-missing"))
+        .expect("test app state should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets"))
+        .json(&json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("create request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(json["code"], Value::String("unauthorized".to_owned()));
+    let request_id = json["request_id"]
+        .as_str()
+        .expect("error response should include request_id");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+    assert!(
+        !json
+            .as_object()
+            .is_some_and(|object| object.contains_key("error"))
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn create_endpoint_rejects_invalid_json_with_request_id() {
+    let state = test_app_state("http://127.0.0.1:1", temp_path("create-invalid-json"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets"))
+        .bearer_auth(&token)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{")
+        .send()
+        .await
+        .expect("create request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(json["code"], Value::String("bad_request".to_owned()));
+    let request_id = json["request_id"]
+        .as_str()
+        .expect("error response should include request_id");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+    assert!(
+        !json
+            .as_object()
+            .is_some_and(|object| object.contains_key("error"))
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
 }
 
 #[tokio::test(flavor = "current_thread")]

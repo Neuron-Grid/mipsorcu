@@ -260,6 +260,43 @@ fn validate_create_and_rotate_requests_reject_invalid_plaintext_hex() {
         Err(mipsorcu::server::errors::ApiError::BadRequest(message))
             if message.contains("plaintext_hex")
     ));
+
+    let uppercase_plaintext = RotateSecretRequest {
+        device_id: "sbc-device-1".to_owned(),
+        plaintext_hex: "AA".to_owned(),
+    };
+    assert!(matches!(
+        testing::validate_rotate_secret_request(uppercase_plaintext),
+        Err(mipsorcu::server::errors::ApiError::BadRequest(message))
+            if message.contains("plaintext_hex")
+    ));
+
+    let odd_length_plaintext = CreateSecretRequest {
+        classification: "confidential".to_owned(),
+        device_id: "sbc-device-1".to_owned(),
+        plaintext_hex: "abc".to_owned(),
+    };
+    assert!(matches!(
+        testing::validate_create_secret_request(odd_length_plaintext),
+        Err(mipsorcu::server::errors::ApiError::BadRequest(message))
+            if message.contains("plaintext_hex")
+    ));
+}
+
+#[test]
+fn validate_create_and_rotate_requests_accept_lowercase_plaintext_hex() {
+    let valid_create = CreateSecretRequest {
+        classification: "confidential".to_owned(),
+        device_id: "sbc-device-1".to_owned(),
+        plaintext_hex: "00aa11ff".to_owned(),
+    };
+    let valid_rotate = RotateSecretRequest {
+        device_id: "sbc-device-1".to_owned(),
+        plaintext_hex: "00aa11ff".to_owned(),
+    };
+
+    assert!(testing::validate_create_secret_request(valid_create).is_ok());
+    assert!(testing::validate_rotate_secret_request(valid_rotate).is_ok());
 }
 
 #[test]

@@ -3,12 +3,26 @@ use crate::crypto::ALGORITHM_XCHACHA20_POLY1305;
 use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
 use crate::server::errors::ApiError;
 use crate::server::state::AppState;
-use crate::server::supabase::SecretVersionReadRow;
+use crate::server::supabase::{SecretVersionReadRow, SupabaseRpcError};
 use crate::types::{
     Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
     SecretId, SecretVersion,
 };
 use crate::write::CurrentSecretVersionState;
+
+pub(super) enum FetchCurrentSecretVersionError {
+    Upstream(SupabaseRpcError),
+    Api(ApiError),
+}
+
+impl From<FetchCurrentSecretVersionError> for ApiError {
+    fn from(error: FetchCurrentSecretVersionError) -> Self {
+        match error {
+            FetchCurrentSecretVersionError::Upstream(error) => Self::from(error),
+            FetchCurrentSecretVersionError::Api(error) => error,
+        }
+    }
+}
 
 pub struct PreparedDecryptRow {
     secret_id: SecretId,
@@ -94,14 +108,16 @@ pub(super) async fn fetch_single_current_secret_version(
     state: &AppState,
     secret_id: &SecretId,
     raw_jwt: &RawJwt,
-) -> Result<PreparedDecryptRow, ApiError> {
+) -> Result<PreparedDecryptRow, FetchCurrentSecretVersionError> {
     let rows = state
         .supabase_client
         .fetch_current_secret_version_for_user(secret_id, raw_jwt)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(FetchCurrentSecretVersionError::Upstream)?;
 
-    select_single_current_secret_version_row(rows).and_then(parse_decrypt_row)
+    select_single_current_secret_version_row(rows)
+        .and_then(parse_decrypt_row)
+        .map_err(FetchCurrentSecretVersionError::Api)
 }
 
 pub(in crate::server) fn parse_decrypt_row(

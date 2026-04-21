@@ -54,6 +54,16 @@ fn parse_device_id(value: &str) -> Result<DeviceId, ApiError> {
 }
 
 fn parse_hex_plaintext(value: &str) -> Result<Plaintext, ApiError> {
+    if !value.len().is_multiple_of(2)
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(ApiError::BadRequest(
+            "invalid plaintext_hex encoding: must be lowercase hex with even length".to_owned(),
+        ));
+    }
+
     hex::decode(value)
         .map(Plaintext::new)
         .map_err(|error| ApiError::BadRequest(format!("invalid plaintext_hex encoding: {error}")))

@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::fmt;
 
+use crate::audit::RequestId;
 use crate::error::{JwtVerificationError, SecretDecryptError, SecretWriteError};
 
 use super::dto::ApiErrorResponse;
@@ -14,6 +15,8 @@ pub enum ApiError {
     Forbidden(String),
     NotFound(String),
     BadRequest(String),
+    UnsupportedMediaType(String),
+    PayloadTooLarge(String),
     DecryptFailed,
     SupabaseError(SupabaseRpcError),
     DbIntegrityViolation(String),
@@ -28,6 +31,10 @@ impl fmt::Display for ApiError {
             Self::Forbidden(message) => write!(formatter, "forbidden: {message}"),
             Self::NotFound(message) => write!(formatter, "not found: {message}"),
             Self::BadRequest(message) => write!(formatter, "bad request: {message}"),
+            Self::UnsupportedMediaType(message) => {
+                write!(formatter, "unsupported media type: {message}")
+            }
+            Self::PayloadTooLarge(message) => write!(formatter, "payload too large: {message}"),
             Self::DecryptFailed => write!(formatter, "decrypt failed"),
             Self::SupabaseError(error) => write!(formatter, "{error}"),
             Self::DbIntegrityViolation(message) => {
@@ -50,8 +57,12 @@ impl ApiError {
             Self::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            Self::UnsupportedMediaType(_) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
+            }
+            Self::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             Self::DecryptFailed => (StatusCode::BAD_REQUEST, "decrypt_failed"),
-            Self::SupabaseError(_) => (StatusCode::BAD_GATEWAY, "supabase_error"),
+            Self::SupabaseError(_) => (StatusCode::BAD_GATEWAY, "upstream_dependency_failed"),
             Self::DbIntegrityViolation(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "db_integrity_violation")
             }
@@ -63,29 +74,14 @@ impl ApiError {
         }
     }
 
-    fn client_message(&self) -> String {
-        match self {
-            Self::Unauthorized(message)
-            | Self::Forbidden(message)
-            | Self::NotFound(message)
-            | Self::BadRequest(message) => message.clone(),
-            Self::DecryptFailed => "decrypt failed".to_owned(),
-            Self::SupabaseError(_) => "upstream service error".to_owned(),
-            Self::DbIntegrityViolation(_)
-            | Self::InternalInvariantViolation(_)
-            | Self::InternalError(_) => "internal error".to_owned(),
-        }
+    pub fn with_request_id(self, request_id: &RequestId) -> RequestAwareApiError {
+        RequestAwareApiError::new(self, request_id.clone())
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, code) = self.status_and_code();
-        let body = ApiErrorResponse {
-            error: self.client_message(),
-            code: code.to_owned(),
-        };
-        (status, Json(body)).into_response()
+        self.with_request_id(&RequestId::nil()).into_response()
     }
 }
 
@@ -119,17 +115,47 @@ impl From<SecretDecryptError> for ApiError {
 
 impl From<SupabaseRpcError> for ApiError {
     fn from(error: SupabaseRpcError) -> Self {
-        match error {
-            SupabaseRpcError::NonSuccessStatus { status: 401, .. } => {
-                Self::Unauthorized("unauthorized".to_owned())
-            }
-            SupabaseRpcError::NonSuccessStatus { status: 403, .. } => {
-                Self::Forbidden("forbidden".to_owned())
-            }
-            SupabaseRpcError::NonSuccessStatus { status: 404, .. } => {
-                Self::NotFound("not found".to_owned())
-            }
-            other => Self::SupabaseError(other),
-        }
+        Self::SupabaseError(error)
     }
 }
+
+#[derive(Debug)]
+pub struct RequestAwareApiError {
+    error: ApiError,
+    request_id: RequestId,
+}
+
+impl RequestAwareApiError {
+    pub fn new(error: ApiError, request_id: RequestId) -> Self {
+        Self { error, request_id }
+    }
+
+    pub fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+}
+
+impl fmt::Display for RequestAwareApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for RequestAwareApiError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl IntoResponse for RequestAwareApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = self.error.status_and_code();
+        let body = ApiErrorResponse {
+            code: code.to_owned(),
+            request_id: self.request_id.as_canonical_string(),
+        };
+        (status, Json(body)).into_response()
+    }
+}
+
+pub type ServerResult<T> = Result<T, RequestAwareApiError>;

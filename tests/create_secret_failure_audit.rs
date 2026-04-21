@@ -6,16 +6,15 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::Json;
 use axum::extract::State;
 use mipsorcu::server::dto::CreateSecretRequest;
 use mipsorcu::server::handlers::create_secret;
-use mipsorcu::server::middleware::AuthenticatedUser;
+use mipsorcu::server::middleware::{AuthenticatedUser, RequestContext, RequestJson};
 use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use mipsorcu::{
     AuditRecorder, Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore,
-    MASTER_KEY_LENGTH, MasterKey, OwnerUserId, RawJwt, VerifiedJwtClaims,
+    MASTER_KEY_LENGTH, MasterKey, OwnerUserId, RawJwt, RequestId, VerifiedJwtClaims,
 };
 use serde_json::Value;
 
@@ -37,8 +36,9 @@ async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() 
 
     let result = create_secret(
         State(state),
+        RequestContext::new(RequestId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?),
         auth,
-        Json(CreateSecretRequest {
+        RequestJson(CreateSecretRequest {
             classification: "confidential".to_owned(),
             device_id: "sbc-device-1".to_owned(),
             plaintext_hex: "64756d6d7920736563726574".to_owned(),

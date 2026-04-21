@@ -13,6 +13,12 @@ struct CapturedRequest {
     headers: HashMap<String, String>,
 }
 
+type ProbeServer = (
+    String,
+    mpsc::Receiver<CapturedRequest>,
+    thread::JoinHandle<std::io::Result<()>>,
+);
+
 #[test]
 fn supabase_error_display_does_not_expose_response_body() {
     let error = SupabaseRpcError::NonSuccessStatus {
@@ -24,6 +30,21 @@ fn supabase_error_display_does_not_expose_response_body() {
 
     assert!(rendered.contains("status 400"));
     assert!(rendered.contains("response body length"));
+    assert!(!rendered.contains("secret internal upstream details"));
+}
+
+#[test]
+fn supabase_error_debug_does_not_expose_response_body() {
+    let error = SupabaseRpcError::NonSuccessStatus {
+        status: 403,
+        body: "secret internal upstream details".to_owned(),
+    };
+
+    let rendered = format!("{error:?}");
+
+    assert!(rendered.contains("NonSuccessStatus"));
+    assert!(rendered.contains("403"));
+    assert!(rendered.contains("body_len"));
     assert!(!rendered.contains("secret internal upstream details"));
 }
 
@@ -128,16 +149,7 @@ async fn readiness_probe_does_not_retry_on_non_auth_failure() {
     );
 }
 
-fn spawn_probe_server(
-    statuses: Vec<u16>,
-) -> Result<
-    (
-        String,
-        mpsc::Receiver<CapturedRequest>,
-        thread::JoinHandle<std::io::Result<()>>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+fn spawn_probe_server(statuses: Vec<u16>) -> Result<ProbeServer, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();

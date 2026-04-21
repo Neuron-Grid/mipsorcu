@@ -5,10 +5,13 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::server::dto::{ApiErrorResponse, HealthResponse, ReadyResponse};
+use crate::server::dto::{HealthResponse, ReadyResponse};
+use crate::server::errors::ApiError;
+use crate::server::middleware::RequestContext;
 use crate::server::state::AppState;
 
 const FAILURE_AUDIT_BOTH_FAILED_TTL: Duration = Duration::from_secs(5 * 60);
@@ -83,14 +86,10 @@ pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<Rea
     )
 }
 
-pub async fn not_found() -> (StatusCode, Json<ApiErrorResponse>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ApiErrorResponse {
-            error: "not found".to_owned(),
-            code: "not_found".to_owned(),
-        }),
-    )
+pub async fn not_found(request_context: RequestContext) -> impl IntoResponse {
+    ApiError::NotFound("not found".to_owned())
+        .with_request_id(request_context.request_id())
+        .into_response()
 }
 
 fn available_disk_space_mb(path: &Path) -> Option<u64> {
@@ -123,10 +122,7 @@ async fn audit_fallback_pending_count(state: &AppState) -> u64 {
     match tokio::task::spawn_blocking(move || {
         fallback_store
             .pending_events()
-            .map(|events| match u64::try_from(events.len()) {
-                Ok(count) => count,
-                Err(_) => u64::MAX,
-            })
+            .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
     })
     .await
     {

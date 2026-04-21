@@ -5,6 +5,7 @@ use crate::audit::{
     AuditRecordError, AuditRecordOutcome, AuditResult, RequestId,
 };
 use crate::server::state::AppState;
+use crate::server::supabase::SupabaseRpcError;
 use crate::{KeyVersion, OwnerUserId, SecretId};
 
 pub(super) struct FailureAuditContext<'a> {
@@ -84,14 +85,57 @@ impl<'a> FailureAuditContext<'a> {
         self.record();
     }
 
-    pub(super) fn log_and_record_with_metadata(
-        &self,
-        error: &impl Display,
-        stage: &'static str,
-        metadata_json: AuditMetadata,
-    ) {
-        self.log(error, stage);
-        self.record_with_metadata(metadata_json);
+    pub(super) fn log_upstream_failure(&self, error: &SupabaseRpcError, stage: &'static str) {
+        match (self.target_secret_id, error.upstream_status()) {
+            (Some(secret_id), Some(upstream_status)) => {
+                tracing::error!(
+                    request_id = %self.request_id.as_canonical_string(),
+                    secret_id = %secret_id.as_canonical_string(),
+                    error = %error,
+                    action = self.action.as_str(),
+                    result = "failure",
+                    error_code = "upstream_dependency_failed",
+                    upstream_status,
+                    stage,
+                    "request handling failed"
+                );
+            }
+            (Some(secret_id), None) => {
+                tracing::error!(
+                    request_id = %self.request_id.as_canonical_string(),
+                    secret_id = %secret_id.as_canonical_string(),
+                    error = %error,
+                    action = self.action.as_str(),
+                    result = "failure",
+                    error_code = "upstream_dependency_failed",
+                    stage,
+                    "request handling failed"
+                );
+            }
+            (None, Some(upstream_status)) => {
+                tracing::error!(
+                    request_id = %self.request_id.as_canonical_string(),
+                    error = %error,
+                    action = self.action.as_str(),
+                    result = "failure",
+                    error_code = "upstream_dependency_failed",
+                    upstream_status,
+                    stage,
+                    "request handling failed"
+                );
+            }
+            (None, None) => {
+                tracing::error!(
+                    request_id = %self.request_id.as_canonical_string(),
+                    error = %error,
+                    action = self.action.as_str(),
+                    result = "failure",
+                    error_code = "upstream_dependency_failed",
+                    stage,
+                    "request handling failed"
+                );
+            }
+        }
     }
 }
 

@@ -5,73 +5,90 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use crate::audit::AuditAction;
 use crate::decrypt_current_secret_version as decrypt_current_secret_version_with_master_key;
 use crate::server::dto::DecryptSecretResponse;
-use crate::server::errors::ApiError;
-use crate::server::middleware::AuthenticatedUser;
+use crate::server::errors::{ApiError, ServerResult};
+use crate::server::middleware::{AuthenticatedUser, RequestContext};
 use crate::server::state::AppState;
 use crate::types::Plaintext;
 
 use super::audit::{FailureAuditContext, record_success_audit};
 use super::parsing::parse_secret_id;
-use super::read_row::fetch_single_current_secret_version;
-use super::shared::generate_request_id;
+use super::read_row::{FetchCurrentSecretVersionError, fetch_single_current_secret_version};
 
 pub async fn decrypt_secret(
     State(state): State<AppState>,
+    request_context: RequestContext,
     AxumPath(secret_id): AxumPath<String>,
     auth: AuthenticatedUser,
-) -> Result<(HeaderMap, Json<DecryptSecretResponse>), ApiError> {
-    let request_id = generate_request_id()?;
-    let requested_secret_id = parse_secret_id(&secret_id)?;
-    let actor_user_id = auth.claims.subject_user_id().clone();
-    let failure = FailureAuditContext::new(
-        &state,
-        &request_id,
-        Some(&actor_user_id),
-        Some(&requested_secret_id),
-        AuditAction::Decrypt,
-    );
+) -> ServerResult<(HeaderMap, Json<DecryptSecretResponse>)> {
+    let request_id = request_context.into_request_id();
 
-    let row = fetch_single_current_secret_version(&state, &requested_secret_id, &auth.raw_jwt)
-        .await
-        .inspect_err(|error| failure.log_and_record(error, "fetch_current_secret_version"))?;
+    async {
+        let requested_secret_id = parse_secret_id(&secret_id)?;
+        let actor_user_id = auth.claims.subject_user_id().clone();
+        let failure = FailureAuditContext::new(
+            &state,
+            &request_id,
+            Some(&actor_user_id),
+            Some(&requested_secret_id),
+            AuditAction::Decrypt,
+        );
 
-    let key_version = row.key_version();
-    let response_secret_id = row.secret_id().clone();
-    let version = row.version();
-    let input = row.into_decrypt_input(auth.claims);
+        let row = fetch_single_current_secret_version(&state, &requested_secret_id, &auth.raw_jwt)
+            .await
+            .map_err(|error| match error {
+                FetchCurrentSecretVersionError::Upstream(rpc_error) => {
+                    failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
+                    failure.record();
+                    ApiError::from(rpc_error)
+                }
+                FetchCurrentSecretVersionError::Api(api_error) => {
+                    failure.log_and_record(&api_error, "fetch_current_secret_version");
+                    api_error
+                }
+            })?;
 
-    let plaintext = decrypt_prepared_input(&state, input)
-        .await
-        .inspect_err(|error| failure.log_and_record(error, "decrypt_current_secret_version"))?;
+        let key_version = row.key_version();
+        let response_secret_id = row.secret_id().clone();
+        let version = row.version();
+        let input = row.into_decrypt_input(auth.claims);
 
-    record_success_audit(
-        &state,
-        &request_id,
-        &actor_user_id,
-        &response_secret_id,
-        key_version,
-    )
-    .await;
+        let plaintext = decrypt_prepared_input(&state, input)
+            .await
+            .inspect_err(|error| {
+                failure.log_and_record(&error, "decrypt_current_secret_version");
+            })?;
 
-    tracing::info!(
-        request_id = %request_id.as_canonical_string(),
-        secret_id = %response_secret_id.as_canonical_string(),
-        version = version.get(),
-        action = AuditAction::Decrypt.as_str(),
-        result = "success",
-    );
+        record_success_audit(
+            &state,
+            &request_id,
+            &actor_user_id,
+            &response_secret_id,
+            key_version,
+        )
+        .await;
 
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        tracing::info!(
+            request_id = %request_id.as_canonical_string(),
+            secret_id = %response_secret_id.as_canonical_string(),
+            version = version.get(),
+            action = AuditAction::Decrypt.as_str(),
+            result = "success",
+        );
 
-    Ok((
-        headers,
-        Json(DecryptSecretResponse::new(
-            response_secret_id.as_canonical_string(),
-            version.get(),
-            plaintext.as_bytes(),
-        )),
-    ))
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+        Ok((
+            headers,
+            Json(DecryptSecretResponse::new(
+                response_secret_id.as_canonical_string(),
+                version.get(),
+                plaintext.as_bytes(),
+            )),
+        ))
+    }
+    .await
+    .map_err(|error: ApiError| error.with_request_id(&request_id))
 }
 
 async fn decrypt_prepared_input(

@@ -27,6 +27,7 @@ use tracing_subscriber::fmt;
 use crate::server::config;
 use crate::server::errors::ApiError;
 use crate::server::handlers;
+use crate::server::middleware;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{RestoreTestSampleRow, SupabaseAuditAppender, SupabaseClient};
 use crate::{
@@ -185,6 +186,9 @@ fn build_app(state: AppState) -> Router {
         .route("/health", get(handlers::health_check))
         .route("/ready", get(handlers::ready_check))
         .fallback(handlers::not_found)
+        .layer(axum::middleware::from_fn(
+            middleware::attach_request_context,
+        ))
         .layer(SetSensitiveRequestHeadersLayer::new([
             http::header::AUTHORIZATION,
         ]))

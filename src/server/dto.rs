@@ -70,6 +70,6 @@ pub struct ReadyResponse {
 
 #[derive(Serialize)]
 pub struct ApiErrorResponse {
-    pub error: String,
     pub code: String,
+    pub request_id: String,
 }

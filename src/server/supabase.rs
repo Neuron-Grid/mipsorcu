@@ -10,7 +10,6 @@ use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender};
 use crate::auth::RawJwt;
 use crate::{SecretId, SecretVersion};
 
-#[derive(Debug)]
 pub enum SupabaseRpcError {
     Network(reqwest::Error),
     NonSuccessStatus { status: u16, body: String },
@@ -38,6 +37,36 @@ impl fmt::Display for SupabaseRpcError {
 }
 
 impl std::error::Error for SupabaseRpcError {}
+
+impl SupabaseRpcError {
+    pub fn upstream_status(&self) -> Option<u16> {
+        match self {
+            Self::NonSuccessStatus { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for SupabaseRpcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Network(error) => formatter
+                .debug_struct("Network")
+                .field("error", &error.to_string())
+                .finish(),
+            Self::NonSuccessStatus { status, body } => formatter
+                .debug_struct("NonSuccessStatus")
+                .field("status", status)
+                .field("body_len", &body.len())
+                .finish(),
+            Self::InvalidResponse(message) => formatter
+                .debug_struct("InvalidResponse")
+                .field("message", message)
+                .finish(),
+            Self::EmptyResult => formatter.write_str("EmptyResult"),
+        }
+    }
+}
 
 pub struct SupabaseClient {
     http_client: reqwest::Client,
