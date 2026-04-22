@@ -263,10 +263,10 @@ select is(
         '550e8400-e29b-41d4-a716-446655440000',
         'success',
         1,
-        '{"source":"sql-test"}'::jsonb
+        '{"source":"sql-test","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
     ),
     'ok',
-    'append audit RPC accepts valid audit event'
+    'append audit RPC accepts valid audit event with canonical source_event_at'
 );
 
 select is(
@@ -279,7 +279,7 @@ select is(
         '550e8400-e29b-41d4-a716-446655440000',
         'success',
         1,
-        '{"source":"sql-test"}'::jsonb
+        '{"source":"sql-test","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
     ),
     'ok',
     'append audit RPC treats identical audit_event_id replay as idempotent'
@@ -339,6 +339,22 @@ select is(
 
 select is(
     test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000015',
+        '00000000-0000-4000-8000-000000000015',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'decrypt',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        '{"source":"sql-test","source_event_at":"2026-04-08T12:00:01Z"}'::jsonb
+    ),
+    'audit_event_id_conflict',
+    'append audit RPC rejects same audit_event_id when source_event_at differs'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
         '10000000-0000-4000-8000-000000000016',
         '00000000-0000-4000-8000-000000000016',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
@@ -383,6 +399,38 @@ select is(
     ),
     'invalid_rpc_input',
     'append audit RPC rejects non-object metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000019',
+        '00000000-0000-4000-8000-000000000019',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'decrypt',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        '{"source_event_at":"2026-04-08T12:00:00+00:00"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects non-canonical source_event_at offset'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000020',
+        '00000000-0000-4000-8000-000000000020',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'decrypt',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        '{"source_event_at":"2026-04-08 12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects malformed source_event_at'
 );
 
 select is(
@@ -492,6 +540,23 @@ select ok(
         )
     ) > 0,
     'direct audit_events insert rejects forbidden metadata keys recursively'
+);
+
+select ok(
+    position(
+        'audit_events_metadata_json_source_event_at_valid' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000027',
+            '00000000-0000-4000-8000-000000000030',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'sbc-device-1',
+            'decrypt',
+            '550e8400-e29b-41d4-a716-446655440000',
+            'failure',
+            1,
+            '{"source_event_at":"2026-04-08T12:00:00+00:00"}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects non-canonical source_event_at via table constraint'
 );
 
 select is(

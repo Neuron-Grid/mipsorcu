@@ -10,7 +10,7 @@ use mipsorcu::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventError, AuditEventId,
     AuditEventParts, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditRecorder,
     AuditResult, DeviceId, FORBIDDEN_AUDIT_METADATA_KEYS, KeyVersion, LocalAuditFallbackStore,
-    OwnerUserId, RequestId, RolloverOutcome, SecretId,
+    OwnerUserId, RequestId, RolloverOutcome, SecretId, SourceEventAt,
 };
 use serde_json::{Value, json};
 
@@ -287,6 +287,7 @@ fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
     assert!(FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"plain_text"));
     assert!(FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"decrypted_data"));
     assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"attempted_secret_id"));
+    assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"source_event_at"));
     assert!(
         AuditMetadata::new(json!({
             "attempted_secret_id": TARGET_SECRET_ID,
@@ -294,6 +295,33 @@ fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
         }))
         .is_ok()
     );
+}
+
+#[test]
+fn metadata_canonicalizes_source_event_at_and_rejects_invalid_forms() -> TestResult<()> {
+    let metadata = AuditMetadata::new(json!({
+        "error_code": "write_rpc_failed",
+        "source_event_at": "2026-04-08T12:00:00+00:00"
+    }))?;
+
+    assert_eq!(
+        metadata.as_value()["source_event_at"],
+        Value::String("2026-04-08T12:00:00Z".to_owned())
+    );
+    assert!(matches!(
+        AuditMetadata::new(json!({
+            "source_event_at": "2026-04-08T21:00:00+09:00"
+        })),
+        Err(AuditEventError::InvalidSourceEventAt)
+    ));
+    assert!(matches!(
+        AuditMetadata::new(json!({
+            "source_event_at": 42
+        })),
+        Err(AuditEventError::InvalidSourceEventAt)
+    ));
+
+    Ok(())
 }
 
 #[test]
@@ -360,8 +388,16 @@ fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
         FakeAppender::always_err(),
         LocalAuditFallbackStore::new(path.clone()),
     );
+    let event = sample_event()?;
+    let expected_source_event_at = event
+        .metadata_json()
+        .as_value()
+        .get("source_event_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| std::io::Error::other("source_event_at must exist"))?
+        .to_owned();
 
-    let outcome = recorder.record(&sample_event()?)?;
+    let outcome = recorder.record(&event)?;
 
     assert_eq!(outcome, AuditRecordOutcome::FallbackSucceeded);
     let lines = read_json_lines(&path)?;
@@ -377,6 +413,11 @@ fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
     assert_eq!(lines[0]["delivery_status"], "pending");
     assert!(lines[0]["occurred_at"].as_str().is_some());
     assert!(lines[0]["metadata_json"].is_object());
+    assert_eq!(
+        lines[0]["metadata_json"]["source_event_at"],
+        Value::String(expected_source_event_at.clone())
+    );
+    assert!(SourceEventAt::parse(&expected_source_event_at).is_ok());
 
     Ok(())
 }
@@ -429,7 +470,15 @@ fn pending_tracking_uses_audit_event_id_not_request_id() -> TestResult<()> {
 fn resend_success_appends_sent_marker_without_deleting_pending_line() -> TestResult<()> {
     let path = temp_jsonl_path("resend-success");
     let store = LocalAuditFallbackStore::new(path.clone());
-    store.append_pending(&sample_event()?)?;
+    let event = sample_event()?;
+    let expected_source_event_at = event
+        .metadata_json()
+        .as_value()
+        .get("source_event_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| std::io::Error::other("source_event_at must exist"))?
+        .to_owned();
+    store.append_pending(&event)?;
     let recorder = AuditRecorder::new(FakeAppender::always_ok(), store.clone());
 
     let summary = recorder.resend_pending()?;
@@ -442,6 +491,14 @@ fn resend_success_appends_sent_marker_without_deleting_pending_line() -> TestRes
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["delivery_status"], "pending");
     assert_eq!(lines[1]["delivery_status"], "sent");
+    assert_eq!(
+        lines[0]["metadata_json"]["source_event_at"],
+        Value::String(expected_source_event_at.clone())
+    );
+    assert_eq!(
+        lines[1]["metadata_json"]["source_event_at"],
+        Value::String(expected_source_event_at)
+    );
     assert_eq!(store.pending_events()?.len(), 0);
 
     let second_summary = recorder.resend_pending()?;

@@ -19,7 +19,7 @@ use mipsorcu::{
     AuditRecorder, Classification, CreatedAt, DeviceId, Jwk, Jwks, JwksCache, JwtVerifier,
     JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore, MASTER_KEY_LENGTH, MasterKey,
     NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome, SecretDecryptError,
-    prepare_new_secret_version,
+    SourceEventAt, prepare_new_secret_version,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -43,7 +43,7 @@ fn write_file(path: &Path, bytes: &[u8]) {
 
 fn valid_audit_fallback_line(audit_event_id: &str, delivery_status: &str) -> String {
     format!(
-        r#"{{"audit_event_id":"{audit_event_id}","request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","actor_user_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479","actor_device_id":"sbc-device-1","action":"decrypt","target_secret_id":"550e8400-e29b-41d4-a716-446655440000","result":"failure","key_version":1,"metadata_json":{{"error_code":"decrypt_failed"}},"occurred_at":"2026-04-08T12:00:00Z","delivery_status":"{delivery_status}"}}"#
+        r#"{{"audit_event_id":"{audit_event_id}","request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","actor_user_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479","actor_device_id":"sbc-device-1","action":"decrypt","target_secret_id":"550e8400-e29b-41d4-a716-446655440000","result":"failure","key_version":1,"metadata_json":{{"error_code":"decrypt_failed","source_event_at":"2026-04-08T12:00:00Z"}},"occurred_at":"2026-04-08T12:00:00Z","delivery_status":"{delivery_status}"}}"#
     )
 }
 
@@ -996,11 +996,21 @@ async fn decrypt_endpoint_returns_plaintext_hex_encoding_and_no_store_when_audit
             .ends_with("/rest/v1/rpc/rpc_append_audit_event")
     );
     assert!(audit_request.body.is_some());
+    let audit_body = audit_request
+        .body
+        .as_ref()
+        .and_then(Value::as_object)
+        .expect("audit append request body should be a JSON object");
+    let source_event_at = audit_body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .expect("decrypt audit append request should include metadata_json.source_event_at");
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
 
     let fallback_contents =
         fs::read_to_string(&fallback_path).expect("fallback JSON Lines file should exist");
     assert!(fallback_contents.contains(r#""action":"decrypt""#));
     assert!(fallback_contents.contains(r#""delivery_status":"pending""#));
+    assert!(fallback_contents.contains(r#""source_event_at":"#));
 
     app_task.abort();
     let _ = app_task.await;

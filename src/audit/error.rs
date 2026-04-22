@@ -11,6 +11,8 @@ pub enum AuditEventError {
     WriteSuccessActionNotAllowed { action: AuditAction },
     MetadataMustBeObject,
     ForbiddenMetadataKey { key: String },
+    InvalidSourceEventAt,
+    SourceEventAtUnavailable,
 }
 
 impl fmt::Display for AuditEventError {
@@ -37,6 +39,15 @@ impl fmt::Display for AuditEventError {
             }
             Self::ForbiddenMetadataKey { key } => {
                 write!(formatter, "audit metadata contains forbidden key: {key}")
+            }
+            Self::InvalidSourceEventAt => {
+                write!(
+                    formatter,
+                    "audit metadata source_event_at must be a canonical UTC RFC3339 timestamp string"
+                )
+            }
+            Self::SourceEventAtUnavailable => {
+                write!(formatter, "failed to generate audit source_event_at")
             }
         }
     }

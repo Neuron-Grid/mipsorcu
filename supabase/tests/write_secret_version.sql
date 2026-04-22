@@ -143,6 +143,23 @@ exception
 end;
 $$;
 
+create function test_helpers.column_comment(p_table regclass, p_column text)
+returns text
+language sql
+stable
+as $$
+    select col_description(
+        p_table,
+        (
+            select a.attnum
+            from pg_attribute a
+            where a.attrelid = p_table
+                and a.attname = p_column
+                and not a.attisdropped
+        )
+    );
+$$;
+
 create function test_helpers.try_update_secret_classification(
     p_secret_id uuid,
     p_classification text
@@ -271,6 +288,58 @@ select is(
     ),
     null::text,
     'secret_versions.created_at has no database default'
+);
+
+select ok(
+    coalesce(
+        position(
+            'SBC が AAD 構成時に決定した値を保存する' in test_helpers.column_comment(
+                'public.secret_versions'::regclass,
+                'created_at'
+            )
+        ) > 0,
+        false
+    ),
+    'secret_versions.created_at comment documents SBC-owned AAD timestamp'
+);
+
+select ok(
+    coalesce(
+        position(
+            '初回 secret_versions.created_at と同じ SBC 決定値' in test_helpers.column_comment(
+                'public.secrets'::regclass,
+                'created_at'
+            )
+        ) > 0,
+        false
+    ),
+    'secrets.created_at comment documents aggregate timestamp ownership'
+);
+
+select ok(
+    coalesce(
+        position(
+            'tg_set_updated_at トリガで自動更新する' in test_helpers.column_comment(
+                'public.secrets'::regclass,
+                'updated_at'
+            )
+        ) > 0,
+        false
+    ),
+    'secrets.updated_at comment documents trigger-owned timestamp'
+);
+
+select ok(
+    coalesce(
+        position(
+            'metadata_json.source_event_at を参照する' in test_helpers.column_comment(
+                'public.audit_events'::regclass,
+                'occurred_at'
+            )
+        ) > 0,
+        false
+    ),
+    'audit_events.occurred_at comment documents DB-confirmed time and source_event_at guidance'
 );
 
 select * from finish();

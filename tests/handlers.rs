@@ -5,7 +5,7 @@ use mipsorcu::server::handlers::testing;
 use mipsorcu::server::supabase::{SecretReadJoin, SecretVersionReadRow};
 use mipsorcu::{
     AuditAction, AuditEventId, AuditMetadata, AuditResult, ENCRYPTED_DATA_KEY_LENGTH, OwnerUserId,
-    RequestId, SecretId,
+    RequestId, SecretId, SourceEventAt,
 };
 use serde_json::{Value, json};
 
@@ -92,7 +92,10 @@ fn failure_audit_event_keeps_existing_secret_target_for_other_failures() -> Test
         event.target_secret_id().map(SecretId::as_canonical_string),
         Some(SECRET_ID.to_owned())
     );
-    assert_eq!(event.metadata_json().as_value(), &serde_json::json!({}));
+    let source_event_at = event.metadata_json().as_value()["source_event_at"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("source_event_at must exist"))?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
 
     Ok(())
 }

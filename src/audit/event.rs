@@ -3,10 +3,12 @@ use std::fmt;
 use serde_json::{Map, Value, json};
 use uuid::{Builder, Uuid};
 
-use crate::types::{DeviceId, KeyVersion, OwnerUserId, SecretId};
+use crate::types::{DeviceId, KeyVersion, OwnerUserId, SecretId, SourceEventAt};
 
 use super::error::{AuditAppendError, AuditEventError, LocalAuditStoreError};
 use super::fallback::{DeliveryStatus, current_occurred_at};
+
+const SOURCE_EVENT_AT_KEY: &str = "source_event_at";
 
 pub const FORBIDDEN_AUDIT_METADATA_KEYS: &[&str] = &[
     "plaintext",
@@ -164,12 +166,14 @@ pub struct AuditMetadata(Value);
 
 impl AuditMetadata {
     pub fn new(value: Value) -> Result<Self, AuditEventError> {
-        let object = value
+        let mut object = value
             .as_object()
+            .cloned()
             .ok_or(AuditEventError::MetadataMustBeObject)?;
-        reject_forbidden_metadata_keys_in_object(object)?;
+        reject_forbidden_metadata_keys_in_object(&object)?;
+        canonicalize_source_event_at(&mut object)?;
 
-        Ok(Self(value))
+        Ok(Self(Value::Object(object)))
     }
 
     pub fn empty() -> Self {
@@ -190,8 +194,42 @@ impl AuditMetadata {
         Self::new(Value::Object(object))
     }
 
+    pub fn with_source_event_at(
+        self,
+        source_event_at: SourceEventAt,
+    ) -> Result<Self, AuditEventError> {
+        let mut object = self
+            .0
+            .as_object()
+            .cloned()
+            .ok_or(AuditEventError::MetadataMustBeObject)?;
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(source_event_at.as_str().to_owned()),
+        );
+
+        Self::new(Value::Object(object))
+    }
+
     pub fn as_value(&self) -> &Value {
         &self.0
+    }
+
+    fn source_event_at(&self) -> Result<Option<SourceEventAt>, AuditEventError> {
+        let object = self
+            .0
+            .as_object()
+            .ok_or(AuditEventError::MetadataMustBeObject)?;
+        let Some(value) = object.get(SOURCE_EVENT_AT_KEY) else {
+            return Ok(None);
+        };
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidSourceEventAt)?;
+
+        SourceEventAt::parse(text)
+            .map(Some)
+            .map_err(|_| AuditEventError::InvalidSourceEventAt)
     }
 
     fn key_count(&self) -> usize {
@@ -230,6 +268,13 @@ impl AuditEvent {
             });
         }
 
+        let metadata_json = match parts.metadata_json.source_event_at()? {
+            Some(_) => parts.metadata_json,
+            None => parts.metadata_json.with_source_event_at(
+                SourceEventAt::now_utc().map_err(|_| AuditEventError::SourceEventAtUnavailable)?,
+            )?,
+        };
+
         Ok(Self {
             audit_event_id: parts.audit_event_id,
             request_id: parts.request_id,
@@ -239,7 +284,7 @@ impl AuditEvent {
             target_secret_id: parts.target_secret_id,
             result: parts.result,
             key_version: parts.key_version,
-            metadata_json: parts.metadata_json,
+            metadata_json,
         })
     }
 
@@ -371,4 +416,21 @@ fn is_forbidden_metadata_key(key: &str) -> bool {
     FORBIDDEN_AUDIT_METADATA_KEYS
         .iter()
         .any(|forbidden| normalized == *forbidden)
+}
+
+fn canonicalize_source_event_at(object: &mut Map<String, Value>) -> Result<(), AuditEventError> {
+    let Some(value) = object.get(SOURCE_EVENT_AT_KEY) else {
+        return Ok(());
+    };
+    let text = value
+        .as_str()
+        .ok_or(AuditEventError::InvalidSourceEventAt)?;
+    let canonical =
+        SourceEventAt::parse(text).map_err(|_| AuditEventError::InvalidSourceEventAt)?;
+    object.insert(
+        SOURCE_EVENT_AT_KEY.to_owned(),
+        Value::String(canonical.as_str().to_owned()),
+    );
+
+    Ok(())
 }

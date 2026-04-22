@@ -8,29 +8,60 @@ pub struct CreatedAt(OffsetDateTime);
 
 impl CreatedAt {
     pub fn parse(value: &str) -> Result<Self, AadError> {
-        let normalized_value = rewrite_utc_suffix(value);
-        let parsed = OffsetDateTime::parse(&normalized_value, &Rfc3339).map_err(|_| {
-            AadError::InvalidTimestamp {
-                field: "created_at",
-                value: value.to_owned(),
-            }
-        })?;
-
-        if parsed.offset() != UtcOffset::UTC {
-            return Err(AadError::InvalidTimestamp {
-                field: "created_at",
-                value: value.to_owned(),
-            });
-        }
-
-        Ok(Self(parsed.to_offset(UtcOffset::UTC)))
+        parse_utc_rfc3339(value, "created_at").map(Self)
     }
 
     pub fn as_rfc3339_utc(&self) -> Result<String, AadError> {
-        self.0
-            .format(&Rfc3339)
-            .map_err(|error| AadError::SerializationFailed(error.to_string()))
+        format_utc_rfc3339(self.0)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceEventAt(String);
+
+impl SourceEventAt {
+    pub fn now_utc() -> Result<Self, AadError> {
+        from_utc_datetime(OffsetDateTime::now_utc())
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AadError> {
+        let parsed = parse_utc_rfc3339(value, "source_event_at")?;
+        from_utc_datetime(parsed)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn from_utc_datetime(value: OffsetDateTime) -> Result<SourceEventAt, AadError> {
+    format_utc_rfc3339(value).map(SourceEventAt)
+}
+
+fn parse_utc_rfc3339(value: &str, field: &'static str) -> Result<OffsetDateTime, AadError> {
+    let normalized_value = rewrite_utc_suffix(value);
+    let parsed = OffsetDateTime::parse(&normalized_value, &Rfc3339).map_err(|_| {
+        AadError::InvalidTimestamp {
+            field,
+            value: value.to_owned(),
+        }
+    })?;
+
+    if parsed.offset() != UtcOffset::UTC {
+        return Err(AadError::InvalidTimestamp {
+            field,
+            value: value.to_owned(),
+        });
+    }
+
+    Ok(parsed.to_offset(UtcOffset::UTC))
+}
+
+fn format_utc_rfc3339(value: OffsetDateTime) -> Result<String, AadError> {
+    value
+        .to_offset(UtcOffset::UTC)
+        .format(&Rfc3339)
+        .map_err(|error| AadError::SerializationFailed(error.to_string()))
 }
 
 fn rewrite_utc_suffix(value: &str) -> String {

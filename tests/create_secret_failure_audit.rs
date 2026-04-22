@@ -15,7 +15,7 @@ use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use mipsorcu::{
     AuditRecorder, Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore,
-    MASTER_KEY_LENGTH, MasterKey, RawJwt, RequestId, VerifiedJwtClaims,
+    MASTER_KEY_LENGTH, MasterKey, RawJwt, RequestId, SourceEventAt, VerifiedJwtClaims,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -130,6 +130,15 @@ async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() 
         append_body["p_metadata_json"]["attempted_secret_id"],
         attempted_secret_id
     );
+    let source_event_at = append_body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "append audit RPC request should include metadata_json.source_event_at",
+            )
+        })?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
 
     Ok(())
 }
