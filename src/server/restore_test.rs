@@ -1,4 +1,5 @@
 use crate::audit::{AuditMetadata, AuditResult, RequestId};
+use crate::auth::VerifiedJwtClaims;
 use crate::decrypt_current_secret_version;
 use crate::server::audit_reporter::{self, RestoreTestAudit};
 use crate::server::errors::ApiError;
@@ -118,7 +119,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
         };
 
         let failure_context = RestoreTestFailureContext::from_prepared(&prepared);
-        let input = prepared.into_restore_test_decrypt_input();
+        let input = build_restore_test_decrypt_input_from_prepared(prepared);
         let master_key = state.master_key.clone();
         let decrypt_result =
             tokio::task::spawn_blocking(move || decrypt_current_secret_version(&master_key, input))
@@ -186,7 +187,7 @@ pub fn build_restore_test_decrypt_input(
     row: RestoreTestSampleRow,
 ) -> Result<crate::DecryptCurrentSecretVersionInput, ApiError> {
     let parsed = read_model::parse_restore_test_sample(row)?;
-    Ok(parsed.into_restore_test_decrypt_input())
+    Ok(build_restore_test_decrypt_input_from_prepared(parsed))
 }
 
 pub fn restore_test_metadata(
@@ -242,6 +243,14 @@ fn restore_test_failure_context_from_raw(row: &RestoreTestSampleRow) -> RestoreT
             .and_then(|parsed| SecretVersion::new(parsed).ok())
             .map(SecretVersion::get),
     }
+}
+
+fn build_restore_test_decrypt_input_from_prepared(
+    prepared: PreparedDecryptRow,
+) -> crate::DecryptCurrentSecretVersionInput {
+    let claims = VerifiedJwtClaims::for_restore_test_only(prepared.owner_user_id().clone());
+
+    prepared.into_decrypt_input(claims)
 }
 
 #[doc(hidden)]

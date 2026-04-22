@@ -38,7 +38,10 @@ pub struct VerifiedJwtClaims {
 }
 
 impl VerifiedJwtClaims {
-    pub fn from_verified_subject(owner_user_id: OwnerUserId) -> Self {
+    /// Restore test only.
+    ///
+    /// This bypasses JWT verification and must not be used in normal auth paths.
+    pub(crate) fn for_restore_test_only(owner_user_id: OwnerUserId) -> Self {
         Self {
             subject_user_id: owner_user_id,
             issuer: String::new(),

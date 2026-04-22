@@ -3,21 +3,64 @@ use crate::auth::{RawJwt, VerifiedJwtClaims};
 use crate::server::audit_reporter::{
     FailureAuditContext, failure_audit_metadata_for_attempted_secret,
 };
-use crate::server::dto::{CreateSecretRequest, RotateSecretRequest};
 use crate::server::errors::ApiError;
-use crate::server::handlers::parsing::{
-    ParsedCreateSecretRequest, ParsedRotateSecretRequest, parse_create_secret_request,
-    parse_rotate_secret_request,
-};
-use crate::server::handlers::shared::build_rpc_params;
 use crate::server::read_model::{self, FetchCurrentSecretVersionError};
 use crate::server::state::AppState;
-use crate::server::supabase::WriteSecretVersionOutcome;
+use crate::server::supabase::{WriteSecretVersionOutcome, WriteSecretVersionParams};
+use crate::types::{Classification, CreatedAt, DeviceId, Plaintext};
 use crate::{
     ExistingSecretVersionInput, NewSecretVersionInput, OwnerUserId, PreparedSecretVersion,
     SecretId, SecretVersion, SecretWriteAction, authorize_existing_secret_version_write,
     authorize_new_secret_create, prepare_existing_secret_version, prepare_new_secret_version,
 };
+
+#[derive(Debug)]
+pub(in crate::server) struct CreateSecretCommand {
+    classification: Classification,
+    device_id: DeviceId,
+    plaintext: Plaintext,
+    created_at: CreatedAt,
+}
+
+impl CreateSecretCommand {
+    pub(in crate::server) fn new(
+        classification: Classification,
+        device_id: DeviceId,
+        plaintext: Plaintext,
+        created_at: CreatedAt,
+    ) -> Self {
+        Self {
+            classification,
+            device_id,
+            plaintext,
+            created_at,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(in crate::server) struct RotateSecretCommand {
+    requested_secret_id: SecretId,
+    device_id: DeviceId,
+    plaintext: Plaintext,
+    created_at: CreatedAt,
+}
+
+impl RotateSecretCommand {
+    pub(in crate::server) fn new(
+        requested_secret_id: SecretId,
+        device_id: DeviceId,
+        plaintext: Plaintext,
+        created_at: CreatedAt,
+    ) -> Self {
+        Self {
+            requested_secret_id,
+            device_id,
+            plaintext,
+            created_at,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(in crate::server) struct WriteSecretVersionOutput {
@@ -44,10 +87,9 @@ pub(in crate::server) async fn create_secret(
     state: &AppState,
     request_id: &RequestId,
     claims: &VerifiedJwtClaims,
-    body: CreateSecretRequest,
+    command: CreateSecretCommand,
 ) -> Result<WriteSecretVersionOutput, ApiError> {
     let owner_user_id = claims.subject_user_id().clone();
-    let request = parse_create_secret_request(body)?;
     let failure = FailureAuditContext::new(
         state,
         request_id,
@@ -61,7 +103,7 @@ pub(in crate::server) async fn create_secret(
         ApiError::Forbidden("forbidden".to_owned())
     })?;
 
-    let prepared = prepare_new_secret_version_for_request(state, owner_user_id.clone(), request)
+    let prepared = prepare_new_secret_version_for_request(state, owner_user_id.clone(), command)
         .await
         .inspect_err(|error| {
             failure.log_and_record(error, "prepare_secret_version");
@@ -83,13 +125,12 @@ pub(in crate::server) async fn create_secret(
 pub(in crate::server) async fn rotate_secret(
     state: &AppState,
     request_id: &RequestId,
-    requested_secret_id: SecretId,
     raw_jwt: &RawJwt,
     claims: &VerifiedJwtClaims,
-    body: RotateSecretRequest,
+    command: RotateSecretCommand,
 ) -> Result<WriteSecretVersionOutput, ApiError> {
     let actor_user_id = claims.subject_user_id().clone();
-    let request = parse_rotate_secret_request(body)?;
+    let requested_secret_id = command.requested_secret_id.clone();
     let failure = FailureAuditContext::new(
         state,
         request_id,
@@ -98,27 +139,26 @@ pub(in crate::server) async fn rotate_secret(
         AuditAction::EncryptRotate,
     );
 
-    let current =
-        read_model::fetch_single_current_secret_version(state, &requested_secret_id, raw_jwt)
-            .await
-            .map_err(|error| match error {
-                FetchCurrentSecretVersionError::Upstream(rpc_error) => {
-                    failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
-                    failure.record();
-                    ApiError::from(rpc_error)
-                }
-                FetchCurrentSecretVersionError::Api(api_error) => {
-                    failure.log_and_record(&api_error, "fetch_current_secret_version");
-                    api_error
-                }
-            })?;
+    let current = read_model::fetch_current_secret_version(state, &requested_secret_id, raw_jwt)
+        .await
+        .map_err(|error| match error {
+            FetchCurrentSecretVersionError::Upstream(rpc_error) => {
+                failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
+                failure.record();
+                ApiError::from(rpc_error)
+            }
+            FetchCurrentSecretVersionError::Api(api_error) => {
+                failure.log_and_record(&api_error, "fetch_current_secret_version");
+                api_error
+            }
+        })?;
 
     authorize_existing_secret_version_write(claims, current.owner_user_id()).map_err(|error| {
         failure.log_and_record(&error, "authorize_existing_secret_version_write");
         ApiError::Forbidden("forbidden".to_owned())
     })?;
 
-    let prepared = prepare_existing_secret_version_for_request(state, current, request)
+    let prepared = prepare_existing_secret_version_for_request(state, current, command)
         .await
         .inspect_err(|error| {
             failure.log_and_record(error, "prepare_existing_secret_version");
@@ -164,7 +204,7 @@ async fn submit_prepared_secret_version(
 async fn prepare_new_secret_version_for_request(
     state: &AppState,
     owner_user_id: OwnerUserId,
-    request: ParsedCreateSecretRequest,
+    command: CreateSecretCommand,
 ) -> Result<PreparedSecretVersion, ApiError> {
     let master_key = state.master_key.clone();
     let key_version = state.key_version;
@@ -174,11 +214,11 @@ async fn prepare_new_secret_version_for_request(
             &master_key,
             NewSecretVersionInput::new(
                 owner_user_id,
-                request.classification,
-                request.device_id,
-                request.created_at,
+                command.classification,
+                command.device_id,
+                command.created_at,
                 key_version,
-                request.plaintext,
+                command.plaintext,
             ),
         )
     })
@@ -190,7 +230,7 @@ async fn prepare_new_secret_version_for_request(
 async fn prepare_existing_secret_version_for_request(
     state: &AppState,
     current: read_model::PreparedDecryptRow,
-    request: ParsedRotateSecretRequest,
+    command: RotateSecretCommand,
 ) -> Result<PreparedSecretVersion, ApiError> {
     let master_key = state.master_key.clone();
     let current_state = current.into_current_secret_version_state();
@@ -200,9 +240,9 @@ async fn prepare_existing_secret_version_for_request(
             &master_key,
             ExistingSecretVersionInput::new(
                 current_state,
-                request.device_id,
-                request.created_at,
-                request.plaintext,
+                command.device_id,
+                command.created_at,
+                command.plaintext,
             ),
         )
     })
@@ -223,4 +263,35 @@ fn log_write_success(
         action = action.as_str(),
         result = "success",
     );
+}
+
+fn build_rpc_params(
+    request_id: &RequestId,
+    prepared: &PreparedSecretVersion,
+) -> Result<WriteSecretVersionParams, ApiError> {
+    let created_at = prepared
+        .created_at()
+        .as_rfc3339_utc()
+        .map_err(|error| ApiError::InternalError(error.to_string()))?;
+
+    Ok(WriteSecretVersionParams {
+        p_request_id: request_id.as_canonical_string(),
+        p_action: prepared.write_action().as_str().to_owned(),
+        p_secret_id: prepared.secret_id().as_canonical_string(),
+        p_owner_user_id: prepared.owner_user_id().as_canonical_string(),
+        p_classification: prepared.classification().as_str().to_owned(),
+        p_created_by_device_id: prepared.created_by_device_id().as_str().to_owned(),
+        p_created_at: created_at,
+        p_version: prepared.version().get(),
+        p_ciphertext: encode_bytea(prepared.ciphertext().as_bytes()),
+        p_encrypted_data_key: encode_bytea(prepared.encrypted_data_key().as_bytes()),
+        p_key_version: prepared.key_version().get(),
+        p_algorithm: prepared.algorithm().to_owned(),
+        p_nonce_or_iv: encode_bytea(prepared.nonce_or_iv().as_bytes()),
+        p_aad_context: prepared.aad_context().clone(),
+    })
+}
+
+fn encode_bytea(bytes: &[u8]) -> String {
+    format!("\\x{}", hex::encode(bytes))
 }

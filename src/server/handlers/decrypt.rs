@@ -2,17 +2,13 @@ use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 
-use crate::audit::AuditAction;
-use crate::decrypt_current_secret_version as decrypt_current_secret_version_with_master_key;
 use crate::server::dto::DecryptSecretResponse;
-use crate::server::errors::{ApiError, ServerResult};
+use crate::server::errors::ServerResult;
 use crate::server::middleware::{AuthenticatedUser, RequestContext};
 use crate::server::state::AppState;
-use crate::types::Plaintext;
+use crate::server::use_cases;
 
-use super::audit::{FailureAuditContext, record_success_audit};
 use super::parsing::parse_secret_id;
-use super::read_row::{FetchCurrentSecretVersionError, fetch_single_current_secret_version};
 
 pub async fn decrypt_secret(
     State(state): State<AppState>,
@@ -22,85 +18,27 @@ pub async fn decrypt_secret(
 ) -> ServerResult<(HeaderMap, Json<DecryptSecretResponse>)> {
     let request_id = request_context.into_request_id();
 
-    async {
-        let requested_secret_id = parse_secret_id(&secret_id)?;
-        let actor_user_id = auth.claims.subject_user_id().clone();
-        let failure = FailureAuditContext::new(
-            &state,
-            &request_id,
-            Some(&actor_user_id),
-            Some(&requested_secret_id),
-            AuditAction::Decrypt,
-        );
-
-        let row = fetch_single_current_secret_version(&state, &requested_secret_id, &auth.raw_jwt)
-            .await
-            .map_err(|error| match error {
-                FetchCurrentSecretVersionError::Upstream(rpc_error) => {
-                    failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
-                    failure.record();
-                    ApiError::from(rpc_error)
-                }
-                FetchCurrentSecretVersionError::Api(api_error) => {
-                    failure.log_and_record(&api_error, "fetch_current_secret_version");
-                    api_error
-                }
-            })?;
-
-        let key_version = row.key_version();
-        let response_secret_id = row.secret_id().clone();
-        let version = row.version();
-        let input = row.into_decrypt_input(auth.claims);
-
-        let plaintext = decrypt_prepared_input(&state, input)
-            .await
-            .inspect_err(|error| {
-                failure.log_and_record(&error, "decrypt_current_secret_version");
-            })?;
-
-        record_success_audit(
-            &state,
-            &request_id,
-            &actor_user_id,
-            &response_secret_id,
-            key_version,
-        )
-        .await;
-
-        tracing::info!(
-            request_id = %request_id.as_canonical_string(),
-            secret_id = %response_secret_id.as_canonical_string(),
-            version = version.get(),
-            action = AuditAction::Decrypt.as_str(),
-            result = "success",
-        );
-
-        let mut headers = HeaderMap::new();
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-
-        Ok((
-            headers,
-            Json(DecryptSecretResponse::new(
-                response_secret_id.as_canonical_string(),
-                version.get(),
-                plaintext.as_bytes(),
-            )),
-        ))
-    }
+    let requested_secret_id =
+        parse_secret_id(&secret_id).map_err(|error| error.with_request_id(&request_id))?;
+    let output = use_cases::decrypt_secret::decrypt_secret(
+        &state,
+        &request_id,
+        requested_secret_id,
+        &auth.raw_jwt,
+        auth.claims,
+    )
     .await
-    .map_err(|error: ApiError| error.with_request_id(&request_id))
-}
+    .map_err(|error| error.with_request_id(&request_id))?;
 
-async fn decrypt_prepared_input(
-    state: &AppState,
-    input: crate::DecryptCurrentSecretVersionInput,
-) -> Result<Plaintext, ApiError> {
-    let master_key = state.master_key.clone();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
 
-    tokio::task::spawn_blocking(move || {
-        decrypt_current_secret_version_with_master_key(&master_key, input)
-    })
-    .await
-    .map_err(|error| ApiError::InternalError(error.to_string()))?
-    .map_err(ApiError::from)
+    Ok((
+        headers,
+        Json(DecryptSecretResponse::new(
+            output.secret_id().as_canonical_string(),
+            output.version().get(),
+            output.plaintext().as_bytes(),
+        )),
+    ))
 }

@@ -119,14 +119,9 @@ impl PreparedDecryptRow {
             aad_context: self.aad_context,
         })
     }
-
-    pub fn into_restore_test_decrypt_input(self) -> DecryptCurrentSecretVersionInput {
-        let claims = VerifiedJwtClaims::from_verified_subject(self.owner_user_id.clone());
-        self.into_decrypt_input(claims)
-    }
 }
 
-pub async fn fetch_single_current_secret_version(
+pub async fn fetch_current_secret_version(
     state: &AppState,
     secret_id: &SecretId,
     raw_jwt: &RawJwt,
@@ -142,7 +137,7 @@ pub async fn fetch_single_current_secret_version(
         .map_err(FetchCurrentSecretVersionError::Api)
 }
 
-pub fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {
+fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {
     validate_decrypt_row_invariants(&row)?;
     build_prepared_decrypt_row(
         PreparedDecryptRowParts {
@@ -235,7 +230,7 @@ pub fn parse_restore_test_sample(
     )
 }
 
-pub fn select_single_current_secret_version_row(
+fn select_single_current_secret_version_row(
     rows: Vec<SecretVersionReadRow>,
 ) -> Result<SecretVersionReadRow, ApiError> {
     let current_rows = rows
@@ -255,7 +250,7 @@ pub fn select_single_current_secret_version_row(
     }
 }
 
-pub fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {
+fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {
     let hex_value = value.strip_prefix("\\x").ok_or(ApiError::DecryptFailed)?;
     hex::decode(hex_value).map_err(|_| ApiError::DecryptFailed)
 }
@@ -339,4 +334,26 @@ fn parse_key_version(value: i32, invalid_message: &'static str) -> Result<KeyVer
         .ok()
         .and_then(|parsed| KeyVersion::new(parsed).ok())
         .ok_or_else(|| ApiError::DbIntegrityViolation(invalid_message.to_owned()))
+}
+
+#[doc(hidden)]
+pub(crate) mod testing {
+    use crate::server::errors::ApiError;
+    use crate::server::supabase::SecretVersionReadRow;
+
+    use super::PreparedDecryptRow;
+
+    pub fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {
+        super::parse_decrypt_row(row)
+    }
+
+    pub fn select_single_current_secret_version_row(
+        rows: Vec<SecretVersionReadRow>,
+    ) -> Result<SecretVersionReadRow, ApiError> {
+        super::select_single_current_secret_version_row(rows)
+    }
+
+    pub fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {
+        super::decode_bytea(value)
+    }
 }

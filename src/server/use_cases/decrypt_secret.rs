@@ -45,7 +45,7 @@ pub(in crate::server) async fn decrypt_secret(
         AuditAction::Decrypt,
     );
 
-    let row = read_model::fetch_single_current_secret_version(state, &requested_secret_id, raw_jwt)
+    let row = read_model::fetch_current_secret_version(state, &requested_secret_id, raw_jwt)
         .await
         .map_err(|error| match error {
             FetchCurrentSecretVersionError::Upstream(rpc_error) => {

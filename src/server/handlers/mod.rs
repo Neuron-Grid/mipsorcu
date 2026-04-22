@@ -1,11 +1,8 @@
-mod audit;
 mod create;
 mod decrypt;
 mod health;
 mod parsing;
-mod read_row;
 mod rotate;
-mod shared;
 
 pub use create::create_secret;
 pub use decrypt::decrypt_secret;
@@ -14,13 +11,12 @@ pub use rotate::rotate_secret;
 
 #[doc(hidden)]
 pub mod testing {
-    pub use crate::server::read_model::PreparedDecryptRow;
-
     use crate::audit::{
         AuditAction, AuditEvent, AuditEventError, AuditEventId, AuditMetadata, RequestId,
     };
     use crate::server::dto::{CreateSecretRequest, RotateSecretRequest};
     use crate::server::errors::ApiError;
+    pub use crate::server::read_model::PreparedDecryptRow;
     use crate::server::supabase::SecretVersionReadRow;
     use crate::{OwnerUserId, SecretId};
 
@@ -32,7 +28,7 @@ pub mod testing {
         action: AuditAction,
         metadata_json: AuditMetadata,
     ) -> Result<AuditEvent, AuditEventError> {
-        super::audit::build_failure_audit_event(
+        crate::server::audit_reporter::build_failure_audit_event(
             audit_event_id,
             request_id,
             actor_user_id,
@@ -43,13 +39,13 @@ pub mod testing {
     }
 
     pub fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {
-        super::read_row::parse_decrypt_row(row)
+        crate::server::read_model::testing::parse_decrypt_row(row)
     }
 
     pub fn select_single_current_secret_version_row(
         rows: Vec<SecretVersionReadRow>,
     ) -> Result<SecretVersionReadRow, ApiError> {
-        super::read_row::select_single_current_secret_version_row(rows)
+        crate::server::read_model::testing::select_single_current_secret_version_row(rows)
     }
 
     pub fn validate_create_secret_request(body: CreateSecretRequest) -> Result<(), ApiError> {
@@ -61,6 +57,6 @@ pub mod testing {
     }
 
     pub fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {
-        super::read_row::decode_bytea(value)
+        crate::server::read_model::testing::decode_bytea(value)
     }
 }
