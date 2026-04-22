@@ -14,7 +14,7 @@ pub use rotate::rotate_secret;
 
 #[doc(hidden)]
 pub mod testing {
-    pub use super::read_row::PreparedDecryptRow;
+    pub use crate::server::read_model::PreparedDecryptRow;
 
     use crate::audit::{
         AuditAction, AuditEvent, AuditEventError, AuditEventId, AuditMetadata, RequestId,

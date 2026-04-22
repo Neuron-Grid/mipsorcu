@@ -1,8 +1,13 @@
+mod audit_reporter;
+mod background;
 pub mod config;
 pub mod dto;
 pub mod errors;
 pub mod handlers;
 pub mod middleware;
+mod read_model;
+mod restore_test;
+mod router;
 pub mod runtime;
 pub mod state;
 pub mod supabase;
