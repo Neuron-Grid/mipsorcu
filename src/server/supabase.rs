@@ -10,6 +10,11 @@ use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender};
 use crate::auth::RawJwt;
 use crate::{SecretId, SecretVersion};
 
+const CURRENT_SECRET_VERSION_READ_COLUMNS: &str = "\
+id,secret_id,version,ciphertext,encrypted_data_key,key_version,\
+algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,\
+created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+
 pub enum SupabaseRpcError {
     Network(reqwest::Error),
     NonSuccessStatus { status: u16, body: String },
@@ -121,10 +126,9 @@ impl SupabaseClient {
         secret_id: &SecretId,
         raw_jwt: &RawJwt,
     ) -> Result<Vec<SecretVersionReadRow>, SupabaseRpcError> {
-        let select = "id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)";
         let secret_id = secret_id.as_canonical_string();
         let url = format!(
-            "{}/rest/v1/secret_versions?select={select}&secret_id=eq.{secret_id}",
+            "{}/rest/v1/secret_versions?select={CURRENT_SECRET_VERSION_READ_COLUMNS}&secret_id=eq.{secret_id}",
             self.base_url
         );
         let response = self

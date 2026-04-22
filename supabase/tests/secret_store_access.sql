@@ -333,6 +333,14 @@ from public.rpc_write_secret_version(
     )
 );
 
+create temp table restore_test_sample_result as
+select *
+from public.rpc_sample_restore_test(2);
+
+create temp table restore_test_sample_result_limited as
+select *
+from public.rpc_sample_restore_test(1);
+
 select ok(
     not has_table_privilege('anon', 'public.secrets', 'select'),
     'anon cannot select secrets'
@@ -438,15 +446,21 @@ select is(
     'secret store tables enable and force row level security'
 );
 
-select is(
+select ok(
     (
-        select count(*)::integer
-        from pg_policies p
-        where p.schemaname = 'public'
-            and p.tablename = 'audit_events'
+        select exists (
+            select 1
+            from pg_policies p
+            where p.schemaname = 'public'
+                and p.tablename = 'audit_events'
+                and p.policyname = 'audit_events_deny_all'
+                and p.permissive = 'RESTRICTIVE'
+                and p.cmd = 'ALL'
+                and position('false' in coalesce(p.qual, '')) > 0
+                and position('false' in coalesce(p.with_check, '')) > 0
+        )
     ),
-    0,
-    'audit_events has no client RLS policies'
+    'audit_events has deny-all restrictive RLS policy'
 );
 
 select is(
@@ -517,6 +531,101 @@ select ok(
         'execute'
     ),
     'service_role can execute write RPC'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from restore_test_sample_result
+    ),
+    2,
+    'restore test sample RPC returns all current versions up to the requested limit'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from restore_test_sample_result_limited
+    ),
+    1,
+    'restore test sample RPC respects the requested limit'
+);
+
+select is(
+    (
+        select count(distinct secret_id)::integer
+        from restore_test_sample_result
+    ),
+    2,
+    'restore test sample RPC returns at most one current version per secret'
+);
+
+select ok(
+    (
+        select bool_and(
+            id is not null
+            and secret_id is not null
+            and version is not null
+            and ciphertext is not null
+            and encrypted_data_key is not null
+            and key_version is not null
+            and nonce_or_iv is not null
+            and aad_context is not null
+            and classification is not null
+            and created_at is not null
+        )
+        from restore_test_sample_result
+    ),
+    'restore test sample RPC returns the fields required by RestoreTestSampleRow'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from restore_test_sample_result
+        where secret_id = '550e8400-e29b-41d4-a716-446655440000'
+            and version <> 5
+    ),
+    0,
+    'restore test sample RPC excludes non-current versions for retained secrets'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from restore_test_sample_result
+        where secret_id = '650e8400-e29b-41d4-a716-446655440000'
+            and version <> 1
+    ),
+    0,
+    'restore test sample RPC returns the current version for single-version secrets'
+);
+
+select ok(
+    not has_function_privilege(
+        'anon',
+        'public.rpc_sample_restore_test(integer)',
+        'execute'
+    ),
+    'anon cannot execute restore test sample RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'authenticated',
+        'public.rpc_sample_restore_test(integer)',
+        'execute'
+    ),
+    'authenticated cannot execute restore test sample RPC'
+);
+
+select ok(
+    has_function_privilege(
+        'service_role',
+        'public.rpc_sample_restore_test(integer)',
+        'execute'
+    ),
+    'service_role can execute restore test sample RPC'
 );
 
 select ok(

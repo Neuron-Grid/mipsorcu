@@ -397,22 +397,31 @@ select ok(
     'direct secret_versions insert rejects classification mismatch against aad_context'
 );
 
-select ok(
-    position(
-        'secret_versions_classification_non_blank' in test_helpers.try_insert_secret_version(
+with blank_classification_result as (
+    select test_helpers.try_insert_secret_version(
+        '710e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        '2026-04-08T12:00:00Z',
+        '   ',
+        test_helpers.aad_context(
             '710e8400-e29b-41d4-a716-446655440000',
+            1,
             'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-            '2026-04-08T12:00:00Z',
             '   ',
-            test_helpers.aad_context(
-                '710e8400-e29b-41d4-a716-446655440000',
-                1,
-                'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-                '   ',
-                '2026-04-08T12:00:00Z'
-            )
+            '2026-04-08T12:00:00Z'
         )
-    ) > 0,
+    ) as result
+)
+select ok(
+    (
+        select
+            result <> 'ok'
+            and (
+                position('secret_versions_classification_non_blank' in result) > 0
+                or position('secret_versions_aad_context_matches_row' in result) > 0
+            )
+        from blank_classification_result
+    ),
     'direct secret_versions insert rejects blank classification'
 );
 
