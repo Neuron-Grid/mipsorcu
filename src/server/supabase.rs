@@ -14,6 +14,7 @@ const CURRENT_SECRET_VERSION_READ_COLUMNS: &str = "\
 id,secret_id,version,ciphertext,encrypted_data_key,key_version,\
 algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,\
 created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+const AUDIT_EVENT_ID_CONFLICT_MARKER: &str = "audit_event_id_conflict";
 
 pub enum SupabaseRpcError {
     Network(reqwest::Error),
@@ -387,6 +388,12 @@ pub struct SupabaseAuditAppender {
 }
 
 impl SupabaseAuditAppender {
+    /// Builds the Supabase-backed audit appender.
+    ///
+    /// This implementation currently bridges to async HTTP with
+    /// `tokio::runtime::Handle::block_on`, so callers must obey the
+    /// `AuditEventAppender` call contract and invoke it only from
+    /// `tokio::task::spawn_blocking` or a dedicated non-Tokio thread.
     pub fn new(client: Arc<SupabaseClient>, runtime_handle: tokio::runtime::Handle) -> Self {
         Self {
             client,
@@ -399,8 +406,36 @@ impl AuditEventAppender for SupabaseAuditAppender {
     fn append_audit_event(&self, event: &AuditEvent) -> Result<(), AuditAppendError> {
         self.runtime_handle
             .block_on(self.client.call_append_audit_event(event))
-            .map_err(|_| AuditAppendError::ExternalDependencyFailed {
-                code: "supabase_rpc_failed",
-            })
+            .map_err(classify_append_audit_error)
     }
+}
+
+fn classify_append_audit_error(error: SupabaseRpcError) -> AuditAppendError {
+    match error {
+        SupabaseRpcError::NonSuccessStatus { status, body }
+            if status == StatusCode::CONFLICT.as_u16()
+                && response_contains_audit_event_id_conflict(&body) =>
+        {
+            AuditAppendError::IdempotencyConflict
+        }
+        SupabaseRpcError::Network(_)
+        | SupabaseRpcError::NonSuccessStatus { .. }
+        | SupabaseRpcError::InvalidResponse(_)
+        | SupabaseRpcError::EmptyResult => AuditAppendError::ExternalDependencyFailed {
+            code: "supabase_rpc_failed",
+        },
+    }
+}
+
+fn response_contains_audit_event_id_conflict(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+
+    ["message", "details", "hint"].into_iter().any(|field| {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains(AUDIT_EVENT_ID_CONFLICT_MARKER))
+    })
 }

@@ -200,6 +200,18 @@ pub async fn record_success_audit(
                 "decrypt success audit recording failed"
             );
         }
+        Ok(Err(error @ AuditRecordError::IdempotencyConflict)) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                secret_id = %target_secret_id.as_canonical_string(),
+                error = %error,
+                action = AuditAction::Decrypt.as_str(),
+                result = "success",
+                error_code = "audit_idempotency_conflict",
+                audit_record_outcome = "idempotency_conflict",
+                "decrypt success audit recording failed"
+            );
+        }
         Ok(Err(
             error @ (AuditRecordError::ResendReadFailed(_)
             | AuditRecordError::ResendMarkSentFailed(_)),
@@ -319,7 +331,7 @@ pub async fn record_restore_test_audit(
                 "restore test audit recorded to local fallback"
             );
         }
-        Ok(Err(error)) => {
+        Ok(Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. })) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 error = %error,
@@ -327,6 +339,31 @@ pub async fn record_restore_test_audit(
                 result = "failure",
                 error_code = error_code.unwrap_or("audit_record_failed"),
                 audit_record_outcome = "both_failed",
+                "restore test audit recording failed"
+            );
+        }
+        Ok(Err(error @ AuditRecordError::IdempotencyConflict)) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = "audit_idempotency_conflict",
+                audit_record_outcome = "idempotency_conflict",
+                "restore test audit recording failed"
+            );
+        }
+        Ok(Err(
+            error @ (AuditRecordError::ResendReadFailed(_)
+            | AuditRecordError::ResendMarkSentFailed(_)),
+        )) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = error_code.unwrap_or("audit_record_failed"),
+                audit_record_outcome = "unexpected_resend_error",
                 "restore test audit recording failed"
             );
         }
@@ -446,12 +483,30 @@ fn record_failure_audit_nonblocking_with_metadata(
                 "failure audit recorded to local fallback"
             );
         }
-        Err(error) => {
+        Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
             readiness_state.mark_failure_audit_both_failed();
             tracing::error!(
                 error = %error,
                 audit_record_outcome = "both_failed",
                 "audit recording failed (including fallback)"
+            );
+        }
+        Err(error @ AuditRecordError::IdempotencyConflict) => {
+            tracing::error!(
+                error = %error,
+                error_code = "audit_idempotency_conflict",
+                audit_record_outcome = "idempotency_conflict",
+                "audit recording failed"
+            );
+        }
+        Err(
+            error @ (AuditRecordError::ResendReadFailed(_)
+            | AuditRecordError::ResendMarkSentFailed(_)),
+        ) => {
+            tracing::error!(
+                error = %error,
+                audit_record_outcome = "unexpected_resend_error",
+                "audit recording failed"
             );
         }
     });

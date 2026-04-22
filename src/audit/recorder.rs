@@ -1,4 +1,4 @@
-use super::error::AuditRecordError;
+use super::error::{AuditAppendError, AuditRecordError};
 use super::event::{AuditEvent, AuditEventAppender};
 use super::fallback::LocalAuditFallbackStore;
 
@@ -27,14 +27,17 @@ where
     pub fn record(&self, event: &AuditEvent) -> Result<AuditRecordOutcome, AuditRecordError> {
         match self.appender.append_audit_event(event) {
             Ok(()) => Ok(AuditRecordOutcome::PrimarySucceeded),
-            Err(append_error) => self
+            Err(AuditAppendError::ExternalDependencyFailed { code }) => self
                 .fallback_store
                 .append_pending(event)
                 .map(|()| AuditRecordOutcome::FallbackSucceeded)
                 .map_err(|store_error| AuditRecordError::PrimaryAndFallbackFailed {
-                    append_error,
+                    append_error: AuditAppendError::ExternalDependencyFailed { code },
                     store_error,
                 }),
+            Err(AuditAppendError::IdempotencyConflict) => {
+                Err(AuditRecordError::IdempotencyConflict)
+            }
         }
     }
 
@@ -55,8 +58,11 @@ where
                         .map_err(AuditRecordError::ResendMarkSentFailed)?;
                     sent += 1;
                 }
-                Err(_) => {
+                Err(AuditAppendError::ExternalDependencyFailed { .. }) => {
                     failed += 1;
+                }
+                Err(AuditAppendError::IdempotencyConflict) => {
+                    return Err(AuditRecordError::IdempotencyConflict);
                 }
             }
         }

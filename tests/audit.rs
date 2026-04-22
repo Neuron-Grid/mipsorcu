@@ -413,6 +413,24 @@ fn recorder_does_not_write_fallback_when_appender_succeeds() -> TestResult<()> {
 }
 
 #[test]
+fn recorder_returns_idempotency_conflict_without_writing_fallback() -> TestResult<()> {
+    let path = temp_jsonl_path("idempotency-conflict-no-fallback");
+    let recorder = AuditRecorder::new(
+        FakeAppender::outcomes(vec![Err(AuditAppendError::IdempotencyConflict)]),
+        LocalAuditFallbackStore::new(path.clone()),
+    );
+
+    let error = recorder
+        .record(&sample_event()?)
+        .expect_err("idempotency conflict should not write fallback");
+
+    assert!(matches!(error, AuditRecordError::IdempotencyConflict));
+    assert!(!path.exists());
+
+    Ok(())
+}
+
+#[test]
 fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
     let path = temp_jsonl_path("pending-on-failure");
     let recorder = AuditRecorder::new(
@@ -449,6 +467,41 @@ fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
         Value::String(expected_source_event_at.clone())
     );
     assert!(SourceEventAt::parse(&expected_source_event_at).is_ok());
+
+    Ok(())
+}
+
+#[test]
+fn resend_pending_returns_idempotency_conflict_without_sent_marker() -> TestResult<()> {
+    let path = temp_jsonl_path("resend-idempotency-conflict");
+    let store = LocalAuditFallbackStore::new(path.clone());
+    let event = sample_event()?;
+    let expected_source_event_at = event
+        .metadata_json()
+        .as_value()
+        .get("source_event_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| std::io::Error::other("source_event_at must exist"))?
+        .to_owned();
+    store.append_pending(&event)?;
+    let recorder = AuditRecorder::new(
+        FakeAppender::outcomes(vec![Err(AuditAppendError::IdempotencyConflict)]),
+        store.clone(),
+    );
+
+    let error = recorder
+        .resend_pending()
+        .expect_err("idempotency conflict should stop resend");
+
+    assert!(matches!(error, AuditRecordError::IdempotencyConflict));
+    let lines = read_json_lines(&path)?;
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["delivery_status"], "pending");
+    assert_eq!(
+        lines[0]["metadata_json"]["source_event_at"],
+        Value::String(expected_source_event_at)
+    );
+    assert_eq!(store.pending_events()?.len(), 1);
 
     Ok(())
 }

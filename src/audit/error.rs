@@ -201,6 +201,7 @@ pub enum AuditRecordError {
         append_error: AuditAppendError,
         store_error: LocalAuditStoreError,
     },
+    IdempotencyConflict,
     ResendReadFailed(LocalAuditStoreError),
     ResendMarkSentFailed(LocalAuditStoreError),
 }
@@ -215,6 +216,12 @@ impl fmt::Display for AuditRecordError {
                 write!(
                     formatter,
                     "audit append failed ({append_error}) and fallback write failed: {store_error}"
+                )
+            }
+            Self::IdempotencyConflict => {
+                write!(
+                    formatter,
+                    "audit append failed permanently: audit append idempotency conflict"
                 )
             }
             Self::ResendReadFailed(error) => {

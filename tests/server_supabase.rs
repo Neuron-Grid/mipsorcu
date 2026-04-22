@@ -1,11 +1,16 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
-use mipsorcu::server::supabase::{SupabaseClient, SupabaseRpcError};
-use mipsorcu::{RawJwt, SecretId};
+use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient, SupabaseRpcError};
+use mipsorcu::{
+    AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventId, AuditEventParts,
+    AuditMetadata, AuditResult, DeviceId, KeyVersion, OwnerUserId, RawJwt, RequestId, SecretId,
+};
+use serde_json::json;
 
 #[derive(Debug)]
 struct CapturedRequest {
@@ -19,6 +24,13 @@ type ProbeServer = (
     mpsc::Receiver<CapturedRequest>,
     thread::JoinHandle<std::io::Result<()>>,
 );
+
+const AUDIT_EVENT_ID: &str = "11111111-1111-4111-8111-111111111111";
+const REQUEST_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+const TARGET_SECRET_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+const DEVICE_ID: &str = "sbc-device-1";
+const SOURCE_EVENT_AT: &str = "2026-04-08T12:00:00Z";
 
 #[test]
 fn supabase_error_display_does_not_expose_response_body() {
@@ -47,6 +59,83 @@ fn supabase_error_debug_does_not_expose_response_body() {
     assert!(rendered.contains("403"));
     assert!(rendered.contains("body_len"));
     assert!(!rendered.contains("secret internal upstream details"));
+}
+
+#[test]
+fn audit_appender_maps_conflict_response_to_idempotency_conflict() {
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(409, r#"{"details":"audit_event_id_conflict"}"#)
+            .expect("capture server should start");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+    let appender = SupabaseAuditAppender::new(Arc::new(client), runtime.handle().clone());
+
+    let result = appender.append_audit_event(&sample_audit_event());
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert!(matches!(result, Err(AuditAppendError::IdempotencyConflict)));
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_append_audit_event");
+    assert_eq!(
+        request.headers.get("authorization"),
+        Some(&"Bearer service-role-secret".to_owned())
+    );
+    assert_eq!(
+        request.headers.get("apikey"),
+        Some(&"service-role-secret".to_owned())
+    );
+}
+
+#[test]
+fn audit_appender_keeps_non_conflict_responses_as_external_dependency_failure() {
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(409, r#"{"message":"different_conflict"}"#)
+            .expect("capture server should start");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+    let appender = SupabaseAuditAppender::new(Arc::new(client), runtime.handle().clone());
+
+    let result = appender.append_audit_event(&sample_audit_event());
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert!(matches!(
+        result,
+        Err(AuditAppendError::ExternalDependencyFailed {
+            code: "supabase_rpc_failed"
+        })
+    ));
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_append_audit_event");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -221,6 +310,29 @@ fn spawn_capture_server(
     });
 
     Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn sample_audit_event() -> AuditEvent {
+    AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID).expect("audit event id must be valid"),
+        request_id: RequestId::parse(REQUEST_ID).expect("request id must be valid"),
+        actor_user_id: Some(
+            OwnerUserId::parse(OWNER_USER_ID).expect("owner user id must be valid"),
+        ),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID).expect("device id must be valid")),
+        action: AuditAction::Decrypt,
+        target_secret_id: Some(
+            SecretId::parse(TARGET_SECRET_ID).expect("target secret id must be valid"),
+        ),
+        result: AuditResult::Failure,
+        key_version: Some(KeyVersion::new(1).expect("key version must be valid")),
+        metadata_json: AuditMetadata::new(json!({
+            "error_code": "decrypt_failed",
+            "source_event_at": SOURCE_EVENT_AT
+        }))
+        .expect("metadata must be valid"),
+    })
+    .expect("audit event must be valid")
 }
 
 fn spawn_probe_server(statuses: Vec<u16>) -> Result<ProbeServer, Box<dyn std::error::Error>> {

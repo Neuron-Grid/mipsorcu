@@ -323,6 +323,7 @@ fn record_audit_resend_result(result: Result<ResendAuditSummary, AuditRecordErro
 fn resend_audit_error_kind(error: &AuditRecordError) -> &'static str {
     match error {
         AuditRecordError::PrimaryAndFallbackFailed { .. } => "primary_and_fallback_failed",
+        AuditRecordError::IdempotencyConflict => "idempotency_conflict",
         AuditRecordError::ResendReadFailed(_) => "resend_read_failed",
         AuditRecordError::ResendMarkSentFailed(_) => "resend_mark_sent_failed",
     }
@@ -431,5 +432,19 @@ fn local_audit_store_error_kind(error: &LocalAuditStoreError) -> &'static str {
         LocalAuditStoreError::LockPoisoned => "lock_poisoned",
         LocalAuditStoreError::InvalidLine { .. } => "invalid_line",
         LocalAuditStoreError::Event(_) => "event",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resend_audit_error_kind;
+    use crate::audit::AuditRecordError;
+
+    #[test]
+    fn resend_audit_error_kind_reports_idempotency_conflict() {
+        assert_eq!(
+            resend_audit_error_kind(&AuditRecordError::IdempotencyConflict),
+            "idempotency_conflict"
+        );
     }
 }
