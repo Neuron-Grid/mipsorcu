@@ -180,6 +180,17 @@ impl AuditMetadata {
         Self(json!({}))
     }
 
+    pub fn with_current_source_event_at(self) -> Result<Self, AuditEventError> {
+        if self.source_event_at()?.is_some() {
+            return Ok(self);
+        }
+
+        let source_event_at =
+            SourceEventAt::now_utc().map_err(|_| AuditEventError::SourceEventAtUnavailable)?;
+
+        self.with_source_event_at(source_event_at)
+    }
+
     pub fn with_attempted_secret_id(self, secret_id: &SecretId) -> Result<Self, AuditEventError> {
         let mut object = self
             .0
@@ -232,6 +243,11 @@ impl AuditMetadata {
             .map_err(|_| AuditEventError::InvalidSourceEventAt)
     }
 
+    fn require_source_event_at(&self) -> Result<SourceEventAt, AuditEventError> {
+        self.source_event_at()?
+            .ok_or(AuditEventError::MissingSourceEventAt)
+    }
+
     fn key_count(&self) -> usize {
         self.0.as_object().map_or(0, Map::len)
     }
@@ -268,12 +284,8 @@ impl AuditEvent {
             });
         }
 
-        let metadata_json = match parts.metadata_json.source_event_at()? {
-            Some(_) => parts.metadata_json,
-            None => parts.metadata_json.with_source_event_at(
-                SourceEventAt::now_utc().map_err(|_| AuditEventError::SourceEventAtUnavailable)?,
-            )?,
-        };
+        parts.metadata_json.require_source_event_at()?;
+        let metadata_json = parts.metadata_json;
 
         Ok(Self {
             audit_event_id: parts.audit_event_id,

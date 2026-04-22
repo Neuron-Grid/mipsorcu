@@ -20,6 +20,7 @@ const REQUEST_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const TARGET_SECRET_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 const DEVICE_ID: &str = "sbc-device-1";
+const SOURCE_EVENT_AT: &str = "2026-04-08T12:00:00Z";
 
 type TestResult<T> = Result<T, Box<dyn Error>>;
 
@@ -98,6 +99,7 @@ fn metadata() -> Result<AuditMetadata, AuditEventError> {
     AuditMetadata::new(json!({
         "error_code": "decrypt_failed",
         "elapsed_ms": 12,
+        "source_event_at": SOURCE_EVENT_AT,
         "nested": {
             "retryable": true
         }
@@ -203,7 +205,9 @@ fn audit_event_rejects_write_success_actions_outside_write_rpc() -> TestResult<(
             target_secret_id: Some(SecretId::parse(TARGET_SECRET_ID)?),
             result: AuditResult::Success,
             key_version: Some(KeyVersion::new(1)?),
-            metadata_json: AuditMetadata::empty(),
+            metadata_json: AuditMetadata::new(json!({
+                "source_event_at": SOURCE_EVENT_AT
+            }))?,
         });
 
         assert!(matches!(
@@ -211,6 +215,25 @@ fn audit_event_rejects_write_success_actions_outside_write_rpc() -> TestResult<(
             Err(AuditEventError::WriteSuccessActionNotAllowed { .. })
         ));
     }
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_rejects_missing_source_event_at() -> TestResult<()> {
+    let result = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+        action: AuditAction::Decrypt,
+        target_secret_id: Some(SecretId::parse(TARGET_SECRET_ID)?),
+        result: AuditResult::Failure,
+        key_version: Some(KeyVersion::new(1)?),
+        metadata_json: AuditMetadata::empty(),
+    });
+
+    assert!(matches!(result, Err(AuditEventError::MissingSourceEventAt)));
 
     Ok(())
 }
@@ -298,19 +321,25 @@ fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
 }
 
 #[test]
-fn metadata_canonicalizes_source_event_at_and_rejects_invalid_forms() -> TestResult<()> {
+fn metadata_rejects_non_canonical_source_event_at_forms() -> TestResult<()> {
     let metadata = AuditMetadata::new(json!({
         "error_code": "write_rpc_failed",
-        "source_event_at": "2026-04-08T12:00:00+00:00"
+        "source_event_at": SOURCE_EVENT_AT
     }))?;
 
     assert_eq!(
         metadata.as_value()["source_event_at"],
-        Value::String("2026-04-08T12:00:00Z".to_owned())
+        Value::String(SOURCE_EVENT_AT.to_owned())
     );
     assert!(matches!(
         AuditMetadata::new(json!({
-            "source_event_at": "2026-04-08T21:00:00+09:00"
+            "source_event_at": "2026-04-08T12:00:00+00:00"
+        })),
+        Err(AuditEventError::InvalidSourceEventAt)
+    ));
+    assert!(matches!(
+        AuditMetadata::new(json!({
+            "source_event_at": "2026-04-08T12:00:00 UTC"
         })),
         Err(AuditEventError::InvalidSourceEventAt)
     ));
@@ -341,7 +370,9 @@ fn fallback_json_keeps_null_target_and_attempted_secret_metadata() -> TestResult
         target_secret_id: None,
         result: AuditResult::Failure,
         key_version: None,
-        metadata_json: AuditMetadata::empty().with_attempted_secret_id(&secret_id)?,
+        metadata_json: AuditMetadata::empty()
+            .with_attempted_secret_id(&secret_id)?
+            .with_source_event_at(SourceEventAt::parse(SOURCE_EVENT_AT)?)?,
     })?;
 
     let outcome = recorder.record(&event)?;
@@ -541,6 +572,30 @@ fn resend_marks_only_successful_events_as_sent() -> TestResult<()> {
 }
 
 #[test]
+fn pending_events_reject_missing_source_event_at_without_regenerating_it() -> TestResult<()> {
+    let path = temp_jsonl_path("missing-source-event-at");
+    let store = LocalAuditFallbackStore::new(path.clone());
+    fs::write(
+        &path,
+        format!(
+            r#"{{"audit_event_id":"{AUDIT_EVENT_ID}","request_id":"{REQUEST_ID}","actor_user_id":"{OWNER_USER_ID}","actor_device_id":"{DEVICE_ID}","action":"decrypt","target_secret_id":"{TARGET_SECRET_ID}","result":"failure","key_version":1,"metadata_json":{{"error_code":"decrypt_failed"}},"occurred_at":"{SOURCE_EVENT_AT}","delivery_status":"pending"}}"#
+        ),
+    )?;
+
+    let error = store
+        .pending_events()
+        .expect_err("missing source_event_at should fail closed");
+
+    assert!(matches!(
+        error,
+        mipsorcu::LocalAuditStoreError::InvalidLine { reason, .. }
+            if reason == "metadata_json.source_event_at is missing"
+    ));
+
+    Ok(())
+}
+
+#[test]
 fn rollover_skips_when_pending_event_remains() -> TestResult<()> {
     let path = temp_jsonl_path("rollover-pending");
     let archive_dir = temp_jsonl_path("rollover-pending-archive");
@@ -668,6 +723,7 @@ fn rollover_skips_after_partial_resend_leaves_pending_event() -> TestResult<()> 
 fn debug_and_error_messages_do_not_expose_secret_metadata_values() -> TestResult<()> {
     let metadata = AuditMetadata::new(json!({
         "error_code": "safe",
+        "source_event_at": SOURCE_EVENT_AT,
         "nested": {
             "token_hint": "never-log-this-value"
         }

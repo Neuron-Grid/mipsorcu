@@ -38,8 +38,12 @@ pub async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<He
         status,
         Json(HealthResponse {
             status: if is_up { "up" } else { "down" },
-            supabase_reachable,
-            master_key_loaded,
+            supabase: if supabase_reachable { "ok" } else { "ng" },
+            master_key: if master_key_loaded {
+                "loaded"
+            } else {
+                "not_loaded"
+            },
             disk_free_mb,
         }),
     )

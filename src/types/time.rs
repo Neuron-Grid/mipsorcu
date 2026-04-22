@@ -21,21 +21,36 @@ pub struct SourceEventAt(String);
 
 impl SourceEventAt {
     pub fn now_utc() -> Result<Self, AadError> {
-        from_utc_datetime(OffsetDateTime::now_utc())
+        format_utc_rfc3339(OffsetDateTime::now_utc()).map(Self)
     }
 
     pub fn parse(value: &str) -> Result<Self, AadError> {
-        let parsed = parse_utc_rfc3339(value, "source_event_at")?;
-        from_utc_datetime(parsed)
+        if !value.ends_with('Z') {
+            return Err(AadError::InvalidTimestamp {
+                field: "source_event_at",
+                value: value.to_owned(),
+            });
+        }
+
+        let parsed =
+            OffsetDateTime::parse(value, &Rfc3339).map_err(|_| AadError::InvalidTimestamp {
+                field: "source_event_at",
+                value: value.to_owned(),
+            })?;
+
+        if parsed.offset() != UtcOffset::UTC {
+            return Err(AadError::InvalidTimestamp {
+                field: "source_event_at",
+                value: value.to_owned(),
+            });
+        }
+
+        Ok(Self(value.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-fn from_utc_datetime(value: OffsetDateTime) -> Result<SourceEventAt, AadError> {
-    format_utc_rfc3339(value).map(SourceEventAt)
 }
 
 fn parse_utc_rfc3339(value: &str, field: &'static str) -> Result<OffsetDateTime, AadError> {

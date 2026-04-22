@@ -16,7 +16,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::types::{DeviceId, KeyVersion, OwnerUserId, SecretId};
 
-use super::error::LocalAuditStoreError;
+use super::error::{AuditEventError, LocalAuditStoreError};
 use super::event::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
 };
@@ -484,6 +484,17 @@ impl LocalAuditFallbackRecord {
                 reason: "key_version is invalid",
             })?;
 
+        let metadata_json = match AuditMetadata::new(self.metadata_json.clone()) {
+            Ok(metadata_json) => metadata_json,
+            Err(AuditEventError::InvalidSourceEventAt) => {
+                return Err(LocalAuditStoreError::InvalidLine {
+                    line_number,
+                    reason: "metadata_json.source_event_at is invalid",
+                });
+            }
+            Err(error) => return Err(LocalAuditStoreError::from(error)),
+        };
+
         AuditEvent::new(AuditEventParts {
             audit_event_id: AuditEventId::parse(&self.audit_event_id)?,
             request_id: RequestId::parse(&self.request_id)?,
@@ -493,9 +504,19 @@ impl LocalAuditFallbackRecord {
             target_secret_id,
             result: AuditResult::parse(&self.result)?,
             key_version,
-            metadata_json: AuditMetadata::new(self.metadata_json.clone())?,
+            metadata_json,
         })
-        .map_err(LocalAuditStoreError::from)
+        .map_err(|error| match error {
+            AuditEventError::MissingSourceEventAt => LocalAuditStoreError::InvalidLine {
+                line_number,
+                reason: "metadata_json.source_event_at is missing",
+            },
+            AuditEventError::InvalidSourceEventAt => LocalAuditStoreError::InvalidLine {
+                line_number,
+                reason: "metadata_json.source_event_at is invalid",
+            },
+            error => LocalAuditStoreError::from(error),
+        })
     }
 }
 

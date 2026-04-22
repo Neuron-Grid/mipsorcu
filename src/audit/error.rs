@@ -12,6 +12,7 @@ pub enum AuditEventError {
     MetadataMustBeObject,
     ForbiddenMetadataKey { key: String },
     InvalidSourceEventAt,
+    MissingSourceEventAt,
     SourceEventAtUnavailable,
 }
 
@@ -45,6 +46,9 @@ impl fmt::Display for AuditEventError {
                     formatter,
                     "audit metadata source_event_at must be a canonical UTC RFC3339 timestamp string"
                 )
+            }
+            Self::MissingSourceEventAt => {
+                write!(formatter, "audit metadata source_event_at is required")
             }
             Self::SourceEventAtUnavailable => {
                 write!(formatter, "failed to generate audit source_event_at")

@@ -51,8 +51,8 @@ impl DecryptSecretResponse {
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
-    pub supabase_reachable: bool,
-    pub master_key_loaded: bool,
+    pub supabase: &'static str,
+    pub master_key: &'static str,
     pub disk_free_mb: Option<u64>,
 }
 

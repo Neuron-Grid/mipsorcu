@@ -241,6 +241,13 @@ pub async fn record_restore_test_audit(
     request_id: &RequestId,
     audit: RestoreTestAudit,
 ) {
+    let RestoreTestAudit {
+        result,
+        target_secret_id,
+        key_version,
+        metadata,
+        error_code,
+    } = audit;
     let audit_event_id = match AuditEventId::generate() {
         Ok(audit_event_id) => audit_event_id,
         Err(error) => {
@@ -255,16 +262,30 @@ pub async fn record_restore_test_audit(
             return;
         }
     };
+    let metadata_json = match metadata.with_current_source_event_at() {
+        Ok(metadata_json) => metadata_json,
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "restore_test",
+                result = "failure",
+                error_code = "audit_metadata_build_failed",
+                "restore test audit metadata setup failed"
+            );
+            return;
+        }
+    };
     let event = match AuditEvent::new(AuditEventParts {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: None,
         actor_device_id: None,
         action: AuditAction::RestoreTest,
-        target_secret_id: audit.target_secret_id,
-        result: audit.result,
-        key_version: audit.key_version,
-        metadata_json: audit.metadata,
+        target_secret_id,
+        result,
+        key_version,
+        metadata_json,
     }) {
         Ok(event) => event,
         Err(error) => {
@@ -304,7 +325,7 @@ pub async fn record_restore_test_audit(
                 error = %error,
                 action = "restore_test",
                 result = "failure",
-                error_code = audit.error_code.unwrap_or("audit_record_failed"),
+                error_code = error_code.unwrap_or("audit_record_failed"),
                 audit_record_outcome = "both_failed",
                 "restore test audit recording failed"
             );
@@ -315,7 +336,7 @@ pub async fn record_restore_test_audit(
                 error = %error,
                 action = "restore_test",
                 result = "failure",
-                error_code = audit.error_code.unwrap_or("audit_record_failed"),
+                error_code = error_code.unwrap_or("audit_record_failed"),
                 audit_record_outcome = "spawn_failed",
                 "restore test audit task failed"
             );
@@ -331,6 +352,8 @@ pub fn build_failure_audit_event(
     action: AuditAction,
     metadata_json: AuditMetadata,
 ) -> Result<AuditEvent, AuditEventError> {
+    let metadata_json = metadata_json.with_current_source_event_at()?;
+
     AuditEvent::new(AuditEventParts {
         audit_event_id,
         request_id: request_id.clone(),
@@ -362,6 +385,8 @@ fn build_success_decrypt_audit_event(
     target_secret_id: &SecretId,
     key_version: KeyVersion,
 ) -> Result<AuditEvent, AuditEventError> {
+    let metadata_json = AuditMetadata::empty().with_current_source_event_at()?;
+
     AuditEvent::new(AuditEventParts {
         audit_event_id: AuditEventId::generate()?,
         request_id: request_id.clone(),
@@ -371,7 +396,7 @@ fn build_success_decrypt_audit_event(
         target_secret_id: Some(target_secret_id.clone()),
         result: AuditResult::Success,
         key_version: Some(key_version),
-        metadata_json: AuditMetadata::empty(),
+        metadata_json,
     })
 }
 

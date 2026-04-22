@@ -637,13 +637,15 @@ async fn health_endpoint_returns_minimal_liveness_and_does_not_call_supabase() {
 
     assert_eq!(status, reqwest::StatusCode::OK);
     assert_eq!(body["status"], "up");
-    assert_eq!(body["supabase_reachable"], true);
-    assert_eq!(body["master_key_loaded"], true);
+    assert_eq!(body["supabase"], "ok");
+    assert_eq!(body["master_key"], "loaded");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
     assert_eq!(body.as_object().map(|object| object.len()), Some(4));
     assert!(body.get("fallback_writable").is_none());
     assert!(body.get("audit_fallback_pending").is_none());
     assert!(body.get("supabase_last_checked_at").is_none());
+    assert!(body.get("supabase_reachable").is_none());
+    assert!(body.get("master_key_loaded").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -672,8 +674,8 @@ async fn health_endpoint_returns_service_unavailable_when_supabase_state_is_unhe
 
     assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["status"], "down");
-    assert_eq!(body["supabase_reachable"], false);
-    assert_eq!(body["master_key_loaded"], true);
+    assert_eq!(body["supabase"], "ng");
+    assert_eq!(body["master_key"], "loaded");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
     assert_eq!(body.as_object().map(|object| object.len()), Some(4));
 }
