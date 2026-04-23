@@ -702,11 +702,19 @@ async fn ready_endpoint_returns_cached_supabase_state_when_fresh() {
 
     assert_eq!(status, reqwest::StatusCode::OK);
     assert_eq!(body["status"], "ready");
-    assert_eq!(body["supabase_reachable"], true);
-    assert_eq!(body["master_key_loaded"], true);
-    assert_eq!(body["fallback_writable"], true);
-    assert_eq!(body["audit_failure_append_both_failed_recent"], false);
-    assert!(body["supabase_last_checked_at"].is_string());
+    assert_eq!(body["supabase"], "ok");
+    assert_eq!(body["master_key"], "loaded");
+    assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert!(body.get("supabase_reachable").is_none());
+    assert!(body.get("supabase_last_checked_at").is_none());
+    assert!(body.get("master_key_loaded").is_none());
+    assert!(body.get("fallback_writable").is_none());
+    assert!(body.get("audit_fallback_pending").is_none());
+    assert!(
+        body.get("audit_failure_append_both_failed_recent")
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -732,12 +740,16 @@ async fn ready_endpoint_returns_service_unavailable_when_supabase_probe_is_stale
 
     assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["status"], "not_ready");
-    assert_eq!(body["supabase_reachable"], true);
-    assert!(body["supabase_last_checked_at"].is_string());
+    assert_eq!(body["supabase"], "ng");
+    assert_eq!(body["master_key"], "loaded");
+    assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert!(body.get("supabase_reachable").is_none());
+    assert!(body.get("supabase_last_checked_at").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn ready_endpoint_reports_failure_audit_both_failed_recent_with_ttl() {
+async fn ready_endpoint_does_not_expose_failure_audit_state() {
     let state = test_app_state("http://127.0.0.1:1", temp_path("ready-both-failed"))
         .expect("test app state should be created");
     state
@@ -750,52 +762,30 @@ async fn ready_endpoint_reports_failure_audit_both_failed_recent_with_ttl() {
     state
         .readiness_state
         .mark_failure_audit_both_failed_at(OffsetDateTime::now_utc());
-    let recent_response = reqwest::get(format!("{app_url}/ready"))
+    let response = reqwest::get(format!("{app_url}/ready"))
         .await
         .expect("ready request should succeed");
-    let recent_status = recent_response.status();
-    let recent_body: Value = recent_response
+    let status = response.status();
+    let body: Value = response
         .json()
         .await
-        .expect("recent ready response should be JSON");
-
-    state.readiness_state.mark_failure_audit_both_failed_at(
-        OffsetDateTime::now_utc() - time::Duration::seconds(301),
-    );
-    let expired_response = reqwest::get(format!("{app_url}/ready"))
-        .await
-        .expect("ready request should succeed");
-    let expired_status = expired_response.status();
-    let expired_body: Value = expired_response
-        .json()
-        .await
-        .expect("expired ready response should be JSON");
+        .expect("ready response should be JSON");
 
     app_task.abort();
 
-    assert_eq!(recent_status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(recent_body["audit_failure_append_both_failed_recent"], true);
-    assert_eq!(recent_body["status"], "not_ready");
-
-    assert_eq!(expired_status, reqwest::StatusCode::OK);
-    assert_eq!(
-        expired_body["audit_failure_append_both_failed_recent"],
-        false
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["status"], "ready");
+    assert!(
+        body.get("audit_failure_append_both_failed_recent")
+            .is_none()
     );
-    assert_eq!(expired_body["status"], "ready");
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn ready_endpoint_reflects_pending_fallback_count_and_disk_metrics() {
-    let fallback_path = temp_path("ready-diagnostics.jsonl");
-    write_file(
-        &fallback_path,
-        format!(
-            "{}\n",
-            valid_audit_fallback_line("33333333-3333-4333-8333-333333333333", "pending")
-        )
-        .as_bytes(),
-    );
+async fn ready_endpoint_does_not_create_fallback_file_for_probe() {
+    let fallback_path = temp_path("ready-no-fallback-probe.jsonl");
+    assert!(!fallback_path.exists());
     let state = test_app_state("http://127.0.0.1:1", fallback_path.clone())
         .expect("test app state should be created");
     state
@@ -815,9 +805,12 @@ async fn ready_endpoint_reflects_pending_fallback_count_and_disk_metrics() {
     app_task.abort();
 
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(body["audit_fallback_pending"], 1);
-    assert_eq!(body["fallback_writable"], true);
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["supabase"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
+    assert!(body.get("audit_fallback_pending").is_none());
+    assert!(body.get("fallback_writable").is_none());
+    assert!(!fallback_path.exists());
 }
 
 #[test]

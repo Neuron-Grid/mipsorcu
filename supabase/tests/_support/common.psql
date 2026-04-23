@@ -184,6 +184,55 @@ exception
 end;
 $$;
 
+create function test_helpers.try_update_audit_event(
+    p_audit_event_id uuid
+)
+returns text
+language plpgsql
+as $$
+begin
+    update public.audit_events
+    set metadata_json = metadata_json || '{"tamper_attempted": true}'::jsonb
+    where id = p_audit_event_id;
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_delete_audit_event(
+    p_audit_event_id uuid
+)
+returns text
+language plpgsql
+as $$
+begin
+    delete from public.audit_events
+    where id = p_audit_event_id;
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_truncate_audit_events()
+returns text
+language plpgsql
+as $$
+begin
+    truncate table public.audit_events;
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
 create function test_helpers.column_comment(p_table regclass, p_column text)
 returns text
 language sql

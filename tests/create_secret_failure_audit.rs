@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -143,7 +144,92 @@ async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn create_secret_write_rpc_failure_writes_local_fallback_before_return() -> TestResult<()> {
+    let (supabase_url, receiver, server_thread) = spawn_supabase_rpc_server_with_append_response(
+        500,
+        "Internal Server Error",
+        r#"{"error":"audit append failed"}"#,
+    )?;
+    let fallback_path = temp_jsonl_path("create-secret-failure-audit-fallback");
+    let state = test_app_state_with_fallback(&supabase_url, fallback_path.clone())?;
+    let auth = test_authenticated_user()?;
+
+    let result = create_secret(
+        State(state),
+        RequestContext::new(RequestId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?),
+        auth,
+        RequestJson(CreateSecretRequest {
+            classification: "confidential".to_owned(),
+            device_id: "sbc-device-1".to_owned(),
+            plaintext_hex: "64756d6d7920736563726574".to_owned(),
+        }),
+    )
+    .await;
+
+    assert!(result.is_err());
+
+    let write_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let append_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let join_result = server_thread
+        .join()
+        .map_err(|_| std::io::Error::other("test Supabase RPC server thread panicked"))?;
+    join_result?;
+
+    assert!(
+        write_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_write_secret_version")
+    );
+    assert!(
+        append_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_append_audit_event")
+    );
+
+    let attempted_secret_id = write_request.body["p_secret_id"].as_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "write RPC request should include p_secret_id",
+        )
+    })?;
+    let fallback_contents = fs::read_to_string(&fallback_path)?;
+    let fallback_records = fallback_contents
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(fallback_records.len(), 1);
+    let fallback_record = &fallback_records[0];
+    assert_eq!(fallback_record["action"], "encrypt_create");
+    assert_eq!(fallback_record["result"], "failure");
+    assert!(fallback_record["target_secret_id"].is_null());
+    assert_eq!(
+        fallback_record["metadata_json"]["attempted_secret_id"],
+        attempted_secret_id
+    );
+    let source_event_at = fallback_record["metadata_json"]["source_event_at"]
+        .as_str()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "fallback audit record should include metadata_json.source_event_at",
+            )
+        })?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
+    assert_eq!(fallback_record["delivery_status"], "pending");
+
+    Ok(())
+}
+
 fn test_app_state(supabase_url: &str) -> TestResult<AppState> {
+    test_app_state_with_fallback(supabase_url, temp_jsonl_path("create-secret-failure-audit"))
+}
+
+fn test_app_state_with_fallback(
+    supabase_url: &str,
+    fallback_path: PathBuf,
+) -> TestResult<AppState> {
     let http_client = reqwest::Client::new();
     let supabase_client = Arc::new(SupabaseClient::new(
         http_client,
@@ -152,8 +238,7 @@ fn test_app_state(supabase_url: &str) -> TestResult<AppState> {
         "publishable-key",
     ));
     let audit_appender = SupabaseAuditAppender::new(supabase_client.clone());
-    let audit_fallback_store =
-        LocalAuditFallbackStore::new(temp_jsonl_path("create-secret-failure-audit"));
+    let audit_fallback_store = LocalAuditFallbackStore::new(fallback_path);
     let audit_recorder = Arc::new(AuditRecorder::new(
         audit_appender,
         audit_fallback_store.clone(),
@@ -237,6 +322,18 @@ fn spawn_supabase_rpc_server() -> TestResult<(
     mpsc::Receiver<CapturedRequest>,
     thread::JoinHandle<std::io::Result<()>>,
 )> {
+    spawn_supabase_rpc_server_with_append_response(200, "OK", r#"{"status":"ok"}"#)
+}
+
+fn spawn_supabase_rpc_server_with_append_response(
+    append_status: u16,
+    append_reason: &'static str,
+    append_body: &'static str,
+) -> TestResult<(
+    String,
+    mpsc::Receiver<CapturedRequest>,
+    thread::JoinHandle<std::io::Result<()>>,
+)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
@@ -262,7 +359,7 @@ fn spawn_supabase_rpc_server() -> TestResult<(
                     r#"{"error":"write failed"}"#,
                 )?;
             } else {
-                write_http_response(&mut stream, 200, "OK", r#"{"status":"ok"}"#)?;
+                write_http_response(&mut stream, append_status, append_reason, append_body)?;
             }
         }
 

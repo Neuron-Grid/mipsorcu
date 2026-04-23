@@ -59,31 +59,33 @@ impl<'a> FailureAuditContext<'a> {
         }
     }
 
-    pub fn record(&self) {
-        record_failure_audit_nonblocking_with_metadata(
+    pub async fn record(&self) {
+        record_failure_audit_with_metadata(
             self.state,
             self.request_id,
             self.actor_user_id,
             self.target_secret_id,
             self.action,
             AuditMetadata::empty(),
-        );
+        )
+        .await;
     }
 
-    pub fn record_with_metadata(&self, metadata_json: AuditMetadata) {
-        record_failure_audit_nonblocking_with_metadata(
+    pub async fn record_with_metadata(&self, metadata_json: AuditMetadata) {
+        record_failure_audit_with_metadata(
             self.state,
             self.request_id,
             self.actor_user_id,
             self.target_secret_id,
             self.action,
             metadata_json,
-        );
+        )
+        .await;
     }
 
-    pub fn log_and_record(&self, error: &impl Display, stage: &'static str) {
+    pub async fn log_and_record(&self, error: &impl Display, stage: &'static str) {
         self.log(error, stage);
-        self.record();
+        self.record().await;
     }
 
     pub fn log_upstream_failure(&self, error: &SupabaseRpcError, stage: &'static str) {
@@ -415,7 +417,7 @@ fn build_success_decrypt_audit_event(
     })
 }
 
-fn record_failure_audit_nonblocking_with_metadata(
+async fn record_failure_audit_with_metadata(
     state: &AppState,
     request_id: &RequestId,
     actor_user_id: Option<&OwnerUserId>,
@@ -426,7 +428,15 @@ fn record_failure_audit_nonblocking_with_metadata(
     let audit_event_id = match AuditEventId::generate() {
         Ok(id) => id,
         Err(error) => {
-            tracing::error!(error = %error, "failed to generate audit event id");
+            state.readiness_state.mark_failure_audit_both_failed();
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = action.as_str(),
+                result = "failure",
+                error_code = "audit_event_id_generation_failed",
+                "failed to generate failure audit event id"
+            );
             return;
         }
     };
@@ -441,53 +451,74 @@ fn record_failure_audit_nonblocking_with_metadata(
     ) {
         Ok(event) => event,
         Err(error) => {
-            tracing::error!(error = %error, "failed to construct audit event");
+            state.readiness_state.mark_failure_audit_both_failed();
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = action.as_str(),
+                result = "failure",
+                error_code = "audit_event_build_failed",
+                "failed to construct failure audit event"
+            );
             return;
         }
     };
 
     let recorder = state.audit_recorder.clone();
     let readiness_state = state.readiness_state.clone();
-    let _audit_task = tokio::spawn(async move {
-        match recorder.record(&event).await {
-            Ok(AuditRecordOutcome::PrimarySucceeded) => {
-                tracing::debug!(
-                    audit_record_outcome = "primary_succeeded",
-                    "failure audit recorded"
-                );
-            }
-            Ok(AuditRecordOutcome::FallbackSucceeded) => {
-                tracing::warn!(
-                    audit_record_outcome = "fallback_succeeded",
-                    "failure audit recorded to local fallback"
-                );
-            }
-            Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
-                readiness_state.mark_failure_audit_both_failed();
-                tracing::error!(
-                    error = %error,
-                    audit_record_outcome = "both_failed",
-                    "audit recording failed (including fallback)"
-                );
-            }
-            Err(error @ AuditRecordError::IdempotencyConflict) => {
-                tracing::error!(
-                    error = %error,
-                    error_code = "audit_idempotency_conflict",
-                    audit_record_outcome = "idempotency_conflict",
-                    "audit recording failed"
-                );
-            }
-            Err(
-                error @ (AuditRecordError::ResendReadFailed(_)
-                | AuditRecordError::ResendMarkSentFailed(_)),
-            ) => {
-                tracing::error!(
-                    error = %error,
-                    audit_record_outcome = "unexpected_resend_error",
-                    "audit recording failed"
-                );
-            }
+    match recorder.record(&event).await {
+        Ok(AuditRecordOutcome::PrimarySucceeded) => {
+            tracing::debug!(
+                request_id = %request_id.as_canonical_string(),
+                action = action.as_str(),
+                result = "failure",
+                audit_record_outcome = "primary_succeeded",
+                "failure audit recorded"
+            );
         }
-    });
+        Ok(AuditRecordOutcome::FallbackSucceeded) => {
+            tracing::warn!(
+                request_id = %request_id.as_canonical_string(),
+                action = action.as_str(),
+                result = "failure",
+                audit_record_outcome = "fallback_succeeded",
+                "failure audit recorded to local fallback"
+            );
+        }
+        Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
+            readiness_state.mark_failure_audit_both_failed();
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = action.as_str(),
+                result = "failure",
+                audit_record_outcome = "both_failed",
+                "audit recording failed (including fallback)"
+            );
+        }
+        Err(error @ AuditRecordError::IdempotencyConflict) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = action.as_str(),
+                result = "failure",
+                error_code = "audit_idempotency_conflict",
+                audit_record_outcome = "idempotency_conflict",
+                "audit recording failed"
+            );
+        }
+        Err(
+            error @ (AuditRecordError::ResendReadFailed(_)
+            | AuditRecordError::ResendMarkSentFailed(_)),
+        ) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = action.as_str(),
+                result = "failure",
+                audit_record_outcome = "unexpected_resend_error",
+                "audit recording failed"
+            );
+        }
+    }
 }

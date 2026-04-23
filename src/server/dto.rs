@@ -57,18 +57,6 @@ pub struct HealthResponse {
 }
 
 #[derive(Serialize)]
-pub struct ReadyResponse {
-    pub status: &'static str,
-    pub supabase_reachable: bool,
-    pub supabase_last_checked_at: Option<String>,
-    pub master_key_loaded: bool,
-    pub fallback_writable: bool,
-    pub disk_free_mb: Option<u64>,
-    pub audit_fallback_pending: u64,
-    pub audit_failure_append_both_failed_recent: bool,
-}
-
-#[derive(Serialize)]
 pub struct ApiErrorResponse {
     pub code: String,
     pub request_id: String,

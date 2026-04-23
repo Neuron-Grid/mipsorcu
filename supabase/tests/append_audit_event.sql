@@ -72,6 +72,28 @@ select is(
 );
 
 select is(
+    test_helpers.try_update_audit_event(
+        '10000000-0000-4000-8000-000000000015'
+    ),
+    'audit_events_immutable',
+    'direct audit_events update is rejected by immutability trigger'
+);
+
+select is(
+    test_helpers.try_delete_audit_event(
+        '10000000-0000-4000-8000-000000000015'
+    ),
+    'audit_events_immutable',
+    'direct audit_events delete is rejected by immutability trigger'
+);
+
+select is(
+    test_helpers.try_truncate_audit_events(),
+    'audit_events_immutable',
+    'direct audit_events truncate is rejected by immutability trigger'
+);
+
+select is(
     test_helpers.try_append_audit_event(
         '10000000-0000-4000-8000-000000000026',
         '00000000-0000-4000-8000-000000000015',

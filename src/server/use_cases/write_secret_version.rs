@@ -98,16 +98,23 @@ pub(in crate::server) async fn create_secret(
         AuditAction::EncryptCreate,
     );
 
-    authorize_new_secret_create(claims).map_err(|error| {
-        failure.log_and_record(&error, "authorize_new_secret_create");
-        ApiError::Forbidden("forbidden".to_owned())
-    })?;
+    if let Err(error) = authorize_new_secret_create(claims) {
+        failure
+            .log_and_record(&error, "authorize_new_secret_create")
+            .await;
+        return Err(ApiError::Forbidden("forbidden".to_owned()));
+    }
 
-    let prepared = prepare_new_secret_version_for_request(state, owner_user_id.clone(), command)
-        .await
-        .inspect_err(|error| {
-            failure.log_and_record(error, "prepare_secret_version");
-        })?;
+    let prepared =
+        match prepare_new_secret_version_for_request(state, owner_user_id.clone(), command).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                failure
+                    .log_and_record(&error, "prepare_secret_version")
+                    .await;
+                return Err(error);
+            }
+        };
     let attempted_secret_metadata = Some(failure_audit_metadata_for_attempted_secret(
         prepared.secret_id(),
     ));
@@ -139,30 +146,44 @@ pub(in crate::server) async fn rotate_secret(
         AuditAction::EncryptRotate,
     );
 
-    let current = read_model::fetch_current_secret_version(state, &requested_secret_id, raw_jwt)
-        .await
-        .map_err(|error| match error {
-            FetchCurrentSecretVersionError::Upstream(rpc_error) => {
-                failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
-                failure.record();
-                ApiError::from(rpc_error)
-            }
-            FetchCurrentSecretVersionError::Api(api_error) => {
-                failure.log_and_record(&api_error, "fetch_current_secret_version");
-                api_error
-            }
-        })?;
+    let current = match read_model::fetch_current_secret_version(
+        state,
+        &requested_secret_id,
+        raw_jwt,
+    )
+    .await
+    {
+        Ok(current) => current,
+        Err(FetchCurrentSecretVersionError::Upstream(rpc_error)) => {
+            failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
+            failure.record().await;
+            return Err(ApiError::from(rpc_error));
+        }
+        Err(FetchCurrentSecretVersionError::Api(api_error)) => {
+            failure
+                .log_and_record(&api_error, "fetch_current_secret_version")
+                .await;
+            return Err(api_error);
+        }
+    };
 
-    authorize_existing_secret_version_write(claims, current.owner_user_id()).map_err(|error| {
-        failure.log_and_record(&error, "authorize_existing_secret_version_write");
-        ApiError::Forbidden("forbidden".to_owned())
-    })?;
+    if let Err(error) = authorize_existing_secret_version_write(claims, current.owner_user_id()) {
+        failure
+            .log_and_record(&error, "authorize_existing_secret_version_write")
+            .await;
+        return Err(ApiError::Forbidden("forbidden".to_owned()));
+    }
 
-    let prepared = prepare_existing_secret_version_for_request(state, current, command)
-        .await
-        .inspect_err(|error| {
-            failure.log_and_record(error, "prepare_existing_secret_version");
-        })?;
+    let prepared = match prepare_existing_secret_version_for_request(state, current, command).await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            failure
+                .log_and_record(&error, "prepare_existing_secret_version")
+                .await;
+            return Err(error);
+        }
+    };
 
     submit_prepared_secret_version(state, request_id, &failure, prepared, None).await
 }
@@ -175,7 +196,15 @@ async fn submit_prepared_secret_version(
     upstream_failure_metadata: Option<AuditMetadata>,
 ) -> Result<WriteSecretVersionOutput, ApiError> {
     let action = prepared.write_action();
-    let rpc_params = build_rpc_params(request_id, &prepared)?;
+    let rpc_params = match build_rpc_params(request_id, &prepared) {
+        Ok(rpc_params) => rpc_params,
+        Err(error) => {
+            failure
+                .log_and_record(&error, "build_write_secret_version_params")
+                .await;
+            return Err(error);
+        }
+    };
     let rpc_result = state
         .supabase_client
         .call_write_secret_version(&rpc_params)
@@ -193,8 +222,8 @@ async fn submit_prepared_secret_version(
         Err(rpc_error) => {
             failure.log_upstream_failure(&rpc_error, "call_write_secret_version");
             match upstream_failure_metadata {
-                Some(metadata) => failure.record_with_metadata(metadata),
-                None => failure.record(),
+                Some(metadata) => failure.record_with_metadata(metadata).await,
+                None => failure.record().await,
             }
             Err(ApiError::from(rpc_error))
         }

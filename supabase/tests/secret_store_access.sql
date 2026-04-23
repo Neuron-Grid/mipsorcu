@@ -183,7 +183,8 @@ select is(
                 ('public.audit_events', 'select'),
                 ('public.audit_events', 'insert'),
                 ('public.audit_events', 'update'),
-                ('public.audit_events', 'delete')
+                ('public.audit_events', 'delete'),
+                ('public.audit_events', 'truncate')
             ) as table_privileges(table_name, privilege_name)
             where has_table_privilege(
                 'anon',
@@ -242,7 +243,8 @@ select is(
                 ('select'),
                 ('insert'),
                 ('update'),
-                ('delete')
+                ('delete'),
+                ('truncate')
             ) as table_privileges(privilege_name)
             where has_table_privilege(
                 'authenticated',
@@ -282,6 +284,28 @@ select ok(
         )
     ),
     'audit_events has deny-all restrictive RLS policy'
+);
+
+select is(
+    (
+        select exists (
+            select 1
+            from (values
+                ('select'),
+                ('insert'),
+                ('update'),
+                ('delete'),
+                ('truncate')
+            ) as table_privileges(privilege_name)
+            where has_table_privilege(
+                'service_role',
+                'public.audit_events',
+                table_privileges.privilege_name
+            )
+        )
+    ),
+    false,
+    'service_role has no direct table privileges on audit_events'
 );
 
 select is(

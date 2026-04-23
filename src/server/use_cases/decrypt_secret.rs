@@ -45,30 +45,37 @@ pub(in crate::server) async fn decrypt_secret(
         AuditAction::Decrypt,
     );
 
-    let row = read_model::fetch_current_secret_version(state, &requested_secret_id, raw_jwt)
+    let row = match read_model::fetch_current_secret_version(state, &requested_secret_id, raw_jwt)
         .await
-        .map_err(|error| match error {
-            FetchCurrentSecretVersionError::Upstream(rpc_error) => {
-                failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
-                failure.record();
-                ApiError::from(rpc_error)
-            }
-            FetchCurrentSecretVersionError::Api(api_error) => {
-                failure.log_and_record(&api_error, "fetch_current_secret_version");
-                api_error
-            }
-        })?;
+    {
+        Ok(row) => row,
+        Err(FetchCurrentSecretVersionError::Upstream(rpc_error)) => {
+            failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
+            failure.record().await;
+            return Err(ApiError::from(rpc_error));
+        }
+        Err(FetchCurrentSecretVersionError::Api(api_error)) => {
+            failure
+                .log_and_record(&api_error, "fetch_current_secret_version")
+                .await;
+            return Err(api_error);
+        }
+    };
 
     let key_version = row.key_version();
     let response_secret_id = row.secret_id().clone();
     let version = row.version();
     let input = row.into_decrypt_input(claims);
 
-    let plaintext = decrypt_prepared_input(state, input)
-        .await
-        .inspect_err(|error| {
-            failure.log_and_record(error, "decrypt_current_secret_version");
-        })?;
+    let plaintext = match decrypt_prepared_input(state, input).await {
+        Ok(plaintext) => plaintext,
+        Err(error) => {
+            failure
+                .log_and_record(&error, "decrypt_current_secret_version")
+                .await;
+            return Err(error);
+        }
+    };
 
     audit_reporter::record_success_audit(
         state,
