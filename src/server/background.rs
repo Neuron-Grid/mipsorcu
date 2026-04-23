@@ -294,11 +294,7 @@ async fn record_audit_fallback_post_resend_tasks(
 async fn resend_pending_once(
     audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
 ) -> Result<ResendAuditSummary, AuditRecordError> {
-    tokio::task::spawn_blocking(move || audit_recorder.resend_pending())
-        .await
-        .map_err(|_| {
-            AuditRecordError::ResendReadFailed(std::io::Error::other("join failed").into())
-        })?
+    audit_recorder.resend_pending().await
 }
 
 fn record_audit_resend_result(result: Result<ResendAuditSummary, AuditRecordError>) {

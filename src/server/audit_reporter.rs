@@ -168,8 +168,8 @@ pub async fn record_success_audit(
     };
 
     let recorder = state.audit_recorder.clone();
-    match tokio::task::spawn_blocking(move || recorder.record(&event)).await {
-        Ok(Ok(AuditRecordOutcome::PrimarySucceeded)) => {
+    match recorder.record(&event).await {
+        Ok(AuditRecordOutcome::PrimarySucceeded) => {
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
                 secret_id = %target_secret_id.as_canonical_string(),
@@ -179,7 +179,7 @@ pub async fn record_success_audit(
                 "decrypt success audit recorded"
             );
         }
-        Ok(Ok(AuditRecordOutcome::FallbackSucceeded)) => {
+        Ok(AuditRecordOutcome::FallbackSucceeded) => {
             tracing::warn!(
                 request_id = %request_id.as_canonical_string(),
                 secret_id = %target_secret_id.as_canonical_string(),
@@ -189,7 +189,7 @@ pub async fn record_success_audit(
                 "decrypt success audit recorded to local fallback"
             );
         }
-        Ok(Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. })) => {
+        Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 secret_id = %target_secret_id.as_canonical_string(),
@@ -200,7 +200,7 @@ pub async fn record_success_audit(
                 "decrypt success audit recording failed"
             );
         }
-        Ok(Err(error @ AuditRecordError::IdempotencyConflict)) => {
+        Err(error @ AuditRecordError::IdempotencyConflict) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 secret_id = %target_secret_id.as_canonical_string(),
@@ -212,10 +212,10 @@ pub async fn record_success_audit(
                 "decrypt success audit recording failed"
             );
         }
-        Ok(Err(
+        Err(
             error @ (AuditRecordError::ResendReadFailed(_)
             | AuditRecordError::ResendMarkSentFailed(_)),
-        )) => {
+        ) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 secret_id = %target_secret_id.as_canonical_string(),
@@ -224,17 +224,6 @@ pub async fn record_success_audit(
                 result = "success",
                 audit_record_outcome = "unexpected_resend_error",
                 "decrypt success audit recording failed"
-            );
-        }
-        Err(error) => {
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                secret_id = %target_secret_id.as_canonical_string(),
-                error = %error,
-                action = AuditAction::Decrypt.as_str(),
-                result = "success",
-                audit_record_outcome = "spawn_failed",
-                "decrypt success audit task failed"
             );
         }
     }
@@ -314,8 +303,8 @@ pub async fn record_restore_test_audit(
     };
 
     let recorder = state.audit_recorder.clone();
-    match tokio::task::spawn_blocking(move || recorder.record(&event)).await {
-        Ok(Ok(AuditRecordOutcome::PrimarySucceeded)) => {
+    match recorder.record(&event).await {
+        Ok(AuditRecordOutcome::PrimarySucceeded) => {
             tracing::debug!(
                 request_id = %request_id.as_canonical_string(),
                 action = "restore_test",
@@ -323,7 +312,7 @@ pub async fn record_restore_test_audit(
                 "restore test audit recorded"
             );
         }
-        Ok(Ok(AuditRecordOutcome::FallbackSucceeded)) => {
+        Ok(AuditRecordOutcome::FallbackSucceeded) => {
             tracing::warn!(
                 request_id = %request_id.as_canonical_string(),
                 action = "restore_test",
@@ -331,7 +320,7 @@ pub async fn record_restore_test_audit(
                 "restore test audit recorded to local fallback"
             );
         }
-        Ok(Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. })) => {
+        Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 error = %error,
@@ -342,7 +331,7 @@ pub async fn record_restore_test_audit(
                 "restore test audit recording failed"
             );
         }
-        Ok(Err(error @ AuditRecordError::IdempotencyConflict)) => {
+        Err(error @ AuditRecordError::IdempotencyConflict) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 error = %error,
@@ -353,10 +342,10 @@ pub async fn record_restore_test_audit(
                 "restore test audit recording failed"
             );
         }
-        Ok(Err(
+        Err(
             error @ (AuditRecordError::ResendReadFailed(_)
             | AuditRecordError::ResendMarkSentFailed(_)),
-        )) => {
+        ) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 error = %error,
@@ -365,17 +354,6 @@ pub async fn record_restore_test_audit(
                 error_code = error_code.unwrap_or("audit_record_failed"),
                 audit_record_outcome = "unexpected_resend_error",
                 "restore test audit recording failed"
-            );
-        }
-        Err(error) => {
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                error = %error,
-                action = "restore_test",
-                result = "failure",
-                error_code = error_code.unwrap_or("audit_record_failed"),
-                audit_record_outcome = "spawn_failed",
-                "restore test audit task failed"
             );
         }
     }
@@ -470,44 +448,46 @@ fn record_failure_audit_nonblocking_with_metadata(
 
     let recorder = state.audit_recorder.clone();
     let readiness_state = state.readiness_state.clone();
-    tokio::task::spawn_blocking(move || match recorder.record(&event) {
-        Ok(AuditRecordOutcome::PrimarySucceeded) => {
-            tracing::debug!(
-                audit_record_outcome = "primary_succeeded",
-                "failure audit recorded"
-            );
-        }
-        Ok(AuditRecordOutcome::FallbackSucceeded) => {
-            tracing::warn!(
-                audit_record_outcome = "fallback_succeeded",
-                "failure audit recorded to local fallback"
-            );
-        }
-        Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
-            readiness_state.mark_failure_audit_both_failed();
-            tracing::error!(
-                error = %error,
-                audit_record_outcome = "both_failed",
-                "audit recording failed (including fallback)"
-            );
-        }
-        Err(error @ AuditRecordError::IdempotencyConflict) => {
-            tracing::error!(
-                error = %error,
-                error_code = "audit_idempotency_conflict",
-                audit_record_outcome = "idempotency_conflict",
-                "audit recording failed"
-            );
-        }
-        Err(
-            error @ (AuditRecordError::ResendReadFailed(_)
-            | AuditRecordError::ResendMarkSentFailed(_)),
-        ) => {
-            tracing::error!(
-                error = %error,
-                audit_record_outcome = "unexpected_resend_error",
-                "audit recording failed"
-            );
+    let _audit_task = tokio::spawn(async move {
+        match recorder.record(&event).await {
+            Ok(AuditRecordOutcome::PrimarySucceeded) => {
+                tracing::debug!(
+                    audit_record_outcome = "primary_succeeded",
+                    "failure audit recorded"
+                );
+            }
+            Ok(AuditRecordOutcome::FallbackSucceeded) => {
+                tracing::warn!(
+                    audit_record_outcome = "fallback_succeeded",
+                    "failure audit recorded to local fallback"
+                );
+            }
+            Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
+                readiness_state.mark_failure_audit_both_failed();
+                tracing::error!(
+                    error = %error,
+                    audit_record_outcome = "both_failed",
+                    "audit recording failed (including fallback)"
+                );
+            }
+            Err(error @ AuditRecordError::IdempotencyConflict) => {
+                tracing::error!(
+                    error = %error,
+                    error_code = "audit_idempotency_conflict",
+                    audit_record_outcome = "idempotency_conflict",
+                    "audit recording failed"
+                );
+            }
+            Err(
+                error @ (AuditRecordError::ResendReadFailed(_)
+                | AuditRecordError::ResendMarkSentFailed(_)),
+            ) => {
+                tracing::error!(
+                    error = %error,
+                    audit_record_outcome = "unexpected_resend_error",
+                    "audit recording failed"
+                );
+            }
         }
     });
 }

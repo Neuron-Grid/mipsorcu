@@ -74,8 +74,7 @@ pub async fn run() {
         shutdown_sender.subscribe(),
     ));
 
-    let audit_appender =
-        SupabaseAuditAppender::new(supabase_client.clone(), tokio::runtime::Handle::current());
+    let audit_appender = SupabaseAuditAppender::new(supabase_client.clone());
     let fallback_store = LocalAuditFallbackStore::with_rollover_config(
         &config.audit_fallback_path,
         &config.audit_fallback_archive_dir,

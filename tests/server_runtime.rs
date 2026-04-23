@@ -287,8 +287,7 @@ fn test_app_state(
         "service-role-key",
         "publishable-key",
     ));
-    let audit_appender =
-        SupabaseAuditAppender::new(supabase_client.clone(), tokio::runtime::Handle::current());
+    let audit_appender = SupabaseAuditAppender::new(supabase_client.clone());
     let audit_fallback_store = LocalAuditFallbackStore::new(audit_fallback_path);
     let audit_recorder = Arc::new(AuditRecorder::new(
         audit_appender,

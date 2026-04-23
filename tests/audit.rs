@@ -1,8 +1,9 @@
-use std::cell::RefCell;
 use std::error::Error;
 use std::fs;
+use std::future::{Future, ready};
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
@@ -33,44 +34,52 @@ enum AppendBehavior {
 
 #[derive(Debug)]
 struct FakeAppender {
-    behavior: RefCell<AppendBehavior>,
-    appended_event_ids: RefCell<Vec<String>>,
+    behavior: Mutex<AppendBehavior>,
+    appended_event_ids: Mutex<Vec<String>>,
 }
 
 impl FakeAppender {
     fn always_ok() -> Self {
         Self {
-            behavior: RefCell::new(AppendBehavior::AlwaysOk),
-            appended_event_ids: RefCell::new(Vec::new()),
+            behavior: Mutex::new(AppendBehavior::AlwaysOk),
+            appended_event_ids: Mutex::new(Vec::new()),
         }
     }
 
     fn always_err() -> Self {
         Self {
-            behavior: RefCell::new(AppendBehavior::AlwaysErr),
-            appended_event_ids: RefCell::new(Vec::new()),
+            behavior: Mutex::new(AppendBehavior::AlwaysErr),
+            appended_event_ids: Mutex::new(Vec::new()),
         }
     }
 
     fn outcomes(outcomes: Vec<Result<(), AuditAppendError>>) -> Self {
         Self {
-            behavior: RefCell::new(AppendBehavior::Outcomes(outcomes)),
-            appended_event_ids: RefCell::new(Vec::new()),
+            behavior: Mutex::new(AppendBehavior::Outcomes(outcomes)),
+            appended_event_ids: Mutex::new(Vec::new()),
         }
     }
 
     fn appended_event_ids(&self) -> Vec<String> {
-        self.appended_event_ids.borrow().clone()
-    }
-}
-
-impl AuditEventAppender for FakeAppender {
-    fn append_audit_event(&self, event: &AuditEvent) -> Result<(), AuditAppendError> {
         self.appended_event_ids
-            .borrow_mut()
+            .lock()
+            .map(|event_ids| event_ids.clone())
+            .unwrap_or_default()
+    }
+
+    fn append_audit_event_sync(&self, event: &AuditEvent) -> Result<(), AuditAppendError> {
+        self.appended_event_ids
+            .lock()
+            .map_err(|_| AuditAppendError::ExternalDependencyFailed {
+                code: "test_lock_poisoned",
+            })?
             .push(event.audit_event_id().as_canonical_string());
 
-        match &mut *self.behavior.borrow_mut() {
+        match &mut *self.behavior.lock().map_err(|_| {
+            AuditAppendError::ExternalDependencyFailed {
+                code: "test_lock_poisoned",
+            }
+        })? {
             AppendBehavior::AlwaysOk => Ok(()),
             AppendBehavior::AlwaysErr => Err(AuditAppendError::ExternalDependencyFailed {
                 code: "network_unavailable",
@@ -83,6 +92,15 @@ impl AuditEventAppender for FakeAppender {
                 }
             }
         }
+    }
+}
+
+impl AuditEventAppender for FakeAppender {
+    fn append_audit_event<'a>(
+        &'a self,
+        event: &'a AuditEvent,
+    ) -> impl Future<Output = Result<(), AuditAppendError>> + Send + 'a {
+        ready(self.append_audit_event_sync(event))
     }
 }
 
@@ -353,8 +371,8 @@ fn metadata_rejects_non_canonical_source_event_at_forms() -> TestResult<()> {
     Ok(())
 }
 
-#[test]
-fn fallback_json_keeps_null_target_and_attempted_secret_metadata() -> TestResult<()> {
+#[tokio::test]
+async fn fallback_json_keeps_null_target_and_attempted_secret_metadata() -> TestResult<()> {
     let path = temp_jsonl_path("attempted-secret-null-target");
     let recorder = AuditRecorder::new(
         FakeAppender::always_err(),
@@ -375,7 +393,7 @@ fn fallback_json_keeps_null_target_and_attempted_secret_metadata() -> TestResult
             .with_source_event_at(SourceEventAt::parse(SOURCE_EVENT_AT)?)?,
     })?;
 
-    let outcome = recorder.record(&event)?;
+    let outcome = recorder.record(&event).await?;
 
     assert_eq!(outcome, AuditRecordOutcome::FallbackSucceeded);
     let lines = read_json_lines(&path)?;
@@ -396,15 +414,16 @@ fn fallback_json_keeps_null_target_and_attempted_secret_metadata() -> TestResult
     Ok(())
 }
 
-#[test]
-fn recorder_does_not_write_fallback_when_appender_succeeds() -> TestResult<()> {
+#[tokio::test]
+async fn recorder_does_not_write_fallback_when_appender_succeeds() -> TestResult<()> {
     let path = temp_jsonl_path("success-no-fallback");
     let recorder = AuditRecorder::new(
         FakeAppender::always_ok(),
         LocalAuditFallbackStore::new(path.clone()),
     );
 
-    let outcome = recorder.record(&sample_event()?)?;
+    let event = sample_event()?;
+    let outcome = recorder.record(&event).await?;
 
     assert_eq!(outcome, AuditRecordOutcome::PrimarySucceeded);
     assert!(!path.exists());
@@ -412,16 +431,18 @@ fn recorder_does_not_write_fallback_when_appender_succeeds() -> TestResult<()> {
     Ok(())
 }
 
-#[test]
-fn recorder_returns_idempotency_conflict_without_writing_fallback() -> TestResult<()> {
+#[tokio::test]
+async fn recorder_returns_idempotency_conflict_without_writing_fallback() -> TestResult<()> {
     let path = temp_jsonl_path("idempotency-conflict-no-fallback");
     let recorder = AuditRecorder::new(
         FakeAppender::outcomes(vec![Err(AuditAppendError::IdempotencyConflict)]),
         LocalAuditFallbackStore::new(path.clone()),
     );
 
+    let event = sample_event()?;
     let error = recorder
-        .record(&sample_event()?)
+        .record(&event)
+        .await
         .expect_err("idempotency conflict should not write fallback");
 
     assert!(matches!(error, AuditRecordError::IdempotencyConflict));
@@ -430,8 +451,8 @@ fn recorder_returns_idempotency_conflict_without_writing_fallback() -> TestResul
     Ok(())
 }
 
-#[test]
-fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
+#[tokio::test]
+async fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
     let path = temp_jsonl_path("pending-on-failure");
     let recorder = AuditRecorder::new(
         FakeAppender::always_err(),
@@ -446,7 +467,7 @@ fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
         .ok_or_else(|| std::io::Error::other("source_event_at must exist"))?
         .to_owned();
 
-    let outcome = recorder.record(&event)?;
+    let outcome = recorder.record(&event).await?;
 
     assert_eq!(outcome, AuditRecordOutcome::FallbackSucceeded);
     let lines = read_json_lines(&path)?;
@@ -471,8 +492,8 @@ fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<()> {
     Ok(())
 }
 
-#[test]
-fn resend_pending_returns_idempotency_conflict_without_sent_marker() -> TestResult<()> {
+#[tokio::test]
+async fn resend_pending_returns_idempotency_conflict_without_sent_marker() -> TestResult<()> {
     let path = temp_jsonl_path("resend-idempotency-conflict");
     let store = LocalAuditFallbackStore::new(path.clone());
     let event = sample_event()?;
@@ -491,6 +512,7 @@ fn resend_pending_returns_idempotency_conflict_without_sent_marker() -> TestResu
 
     let error = recorder
         .resend_pending()
+        .await
         .expect_err("idempotency conflict should stop resend");
 
     assert!(matches!(error, AuditRecordError::IdempotencyConflict));
@@ -506,8 +528,8 @@ fn resend_pending_returns_idempotency_conflict_without_sent_marker() -> TestResu
     Ok(())
 }
 
-#[test]
-fn recorder_returns_primary_and_fallback_failed_when_both_paths_fail() -> TestResult<()> {
+#[tokio::test]
+async fn recorder_returns_primary_and_fallback_failed_when_both_paths_fail() -> TestResult<()> {
     let path = temp_jsonl_path("fallback-directory");
     fs::create_dir_all(&path)?;
     let recorder = AuditRecorder::new(
@@ -515,8 +537,10 @@ fn recorder_returns_primary_and_fallback_failed_when_both_paths_fail() -> TestRe
         LocalAuditFallbackStore::new(path.clone()),
     );
 
+    let event = sample_event()?;
     let error = recorder
-        .record(&sample_event()?)
+        .record(&event)
+        .await
         .expect_err("primary and fallback should both fail");
 
     assert!(matches!(
@@ -550,8 +574,8 @@ fn pending_tracking_uses_audit_event_id_not_request_id() -> TestResult<()> {
     Ok(())
 }
 
-#[test]
-fn resend_success_appends_sent_marker_without_deleting_pending_line() -> TestResult<()> {
+#[tokio::test]
+async fn resend_success_appends_sent_marker_without_deleting_pending_line() -> TestResult<()> {
     let path = temp_jsonl_path("resend-success");
     let store = LocalAuditFallbackStore::new(path.clone());
     let event = sample_event()?;
@@ -565,7 +589,7 @@ fn resend_success_appends_sent_marker_without_deleting_pending_line() -> TestRes
     store.append_pending(&event)?;
     let recorder = AuditRecorder::new(FakeAppender::always_ok(), store.clone());
 
-    let summary = recorder.resend_pending()?;
+    let summary = recorder.resend_pending().await?;
 
     assert_eq!(summary.attempted, 1);
     assert_eq!(summary.sent, 1);
@@ -585,14 +609,14 @@ fn resend_success_appends_sent_marker_without_deleting_pending_line() -> TestRes
     );
     assert_eq!(store.pending_events()?.len(), 0);
 
-    let second_summary = recorder.resend_pending()?;
+    let second_summary = recorder.resend_pending().await?;
     assert_eq!(second_summary.attempted, 0);
 
     Ok(())
 }
 
-#[test]
-fn resend_marks_only_successful_events_as_sent() -> TestResult<()> {
+#[tokio::test]
+async fn resend_marks_only_successful_events_as_sent() -> TestResult<()> {
     let path = temp_jsonl_path("partial-resend");
     let store = LocalAuditFallbackStore::new(path.clone());
     store.append_pending(&sample_event_with_ids(AUDIT_EVENT_ID, REQUEST_ID)?)?;
@@ -603,7 +627,7 @@ fn resend_marks_only_successful_events_as_sent() -> TestResult<()> {
     ]);
     let recorder = AuditRecorder::new(appender, store.clone());
 
-    let summary = recorder.resend_pending()?;
+    let summary = recorder.resend_pending().await?;
 
     assert_eq!(summary.attempted, 2);
     assert_eq!(summary.sent, 1);
@@ -739,8 +763,8 @@ fn pending_events_ignores_sealed_archives_after_rollover() -> TestResult<()> {
     Ok(())
 }
 
-#[test]
-fn rollover_skips_after_partial_resend_leaves_pending_event() -> TestResult<()> {
+#[tokio::test]
+async fn rollover_skips_after_partial_resend_leaves_pending_event() -> TestResult<()> {
     let path = temp_jsonl_path("rollover-partial-resend");
     let archive_dir = temp_jsonl_path("rollover-partial-resend-archive");
     let store = LocalAuditFallbackStore::with_rollover_config(path.clone(), archive_dir.clone(), 1);
@@ -752,7 +776,7 @@ fn rollover_skips_after_partial_resend_leaves_pending_event() -> TestResult<()> 
     ]);
     let recorder = AuditRecorder::new(appender, store.clone());
 
-    let summary = recorder.resend_pending()?;
+    let summary = recorder.resend_pending().await?;
     let outcome = store.rollover()?;
 
     assert_eq!(summary.attempted, 2);
@@ -816,12 +840,12 @@ fn debug_and_error_messages_do_not_expose_secret_metadata_values() -> TestResult
     Ok(())
 }
 
-#[test]
-fn fake_appender_records_attempted_audit_event_ids() -> TestResult<()> {
+#[tokio::test]
+async fn fake_appender_records_attempted_audit_event_ids() -> TestResult<()> {
     let appender = FakeAppender::always_err();
     let event = sample_event()?;
 
-    let _ = appender.append_audit_event(&event);
+    let _ = appender.append_audit_event(&event).await;
 
     assert_eq!(appender.appended_event_ids(), vec![AUDIT_EVENT_ID]);
 

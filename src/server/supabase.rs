@@ -384,28 +384,20 @@ impl AppendAuditEventParams {
 
 pub struct SupabaseAuditAppender {
     client: Arc<SupabaseClient>,
-    runtime_handle: tokio::runtime::Handle,
 }
 
 impl SupabaseAuditAppender {
     /// Builds the Supabase-backed audit appender.
-    ///
-    /// This implementation currently bridges to async HTTP with
-    /// `tokio::runtime::Handle::block_on`, so callers must obey the
-    /// `AuditEventAppender` call contract and invoke it only from
-    /// `tokio::task::spawn_blocking` or a dedicated non-Tokio thread.
-    pub fn new(client: Arc<SupabaseClient>, runtime_handle: tokio::runtime::Handle) -> Self {
-        Self {
-            client,
-            runtime_handle,
-        }
+    pub fn new(client: Arc<SupabaseClient>) -> Self {
+        Self { client }
     }
 }
 
 impl AuditEventAppender for SupabaseAuditAppender {
-    fn append_audit_event(&self, event: &AuditEvent) -> Result<(), AuditAppendError> {
-        self.runtime_handle
-            .block_on(self.client.call_append_audit_event(event))
+    async fn append_audit_event(&self, event: &AuditEvent) -> Result<(), AuditAppendError> {
+        self.client
+            .call_append_audit_event(event)
+            .await
             .map_err(classify_append_audit_error)
     }
 }

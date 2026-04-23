@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 
 use serde_json::{Map, Value, json};
 use uuid::{Builder, Uuid};
@@ -390,23 +391,11 @@ pub struct AuditEventParts {
 }
 
 /// Appends an audit event to the authoritative `audit_events` store.
-///
-/// # Call contract
-///
-/// Current implementations may bridge to async I/O by calling
-/// `tokio::runtime::Handle::block_on` internally. Callers must therefore invoke
-/// this method only from:
-/// - `tokio::task::spawn_blocking`
-/// - a dedicated non-Tokio thread
-///
-/// Do not call this method directly from a Tokio runtime worker thread.
-///
-/// # Future change
-///
-/// ADR-023 keeps this trait synchronous for the MVP period and reserves an
-/// async trait conversion for a later phase.
-pub trait AuditEventAppender {
-    fn append_audit_event(&self, event: &AuditEvent) -> Result<(), AuditAppendError>;
+pub trait AuditEventAppender: Send + Sync + 'static {
+    fn append_audit_event<'a>(
+        &'a self,
+        event: &'a AuditEvent,
+    ) -> impl Future<Output = Result<(), AuditAppendError>> + Send + 'a;
 }
 
 fn reject_forbidden_metadata_keys_in_object(

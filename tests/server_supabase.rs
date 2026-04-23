@@ -61,25 +61,21 @@ fn supabase_error_debug_does_not_expose_response_body() {
     assert!(!rendered.contains("secret internal upstream details"));
 }
 
-#[test]
-fn audit_appender_maps_conflict_response_to_idempotency_conflict() {
+#[tokio::test(flavor = "current_thread")]
+async fn audit_appender_maps_conflict_response_to_idempotency_conflict() {
     let (base_url, receiver, server_thread) =
         spawn_capture_server(409, r#"{"details":"audit_event_id_conflict"}"#)
             .expect("capture server should start");
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("runtime should build");
     let client = SupabaseClient::new(
         reqwest::Client::new(),
         base_url,
         "service-role-secret",
         "publishable-key",
     );
-    let appender = SupabaseAuditAppender::new(Arc::new(client), runtime.handle().clone());
+    let appender = SupabaseAuditAppender::new(Arc::new(client));
 
-    let result = appender.append_audit_event(&sample_audit_event());
+    let event = sample_audit_event();
+    let result = appender.append_audit_event(&event).await;
     let request = receiver
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("request should be captured");
@@ -101,25 +97,21 @@ fn audit_appender_maps_conflict_response_to_idempotency_conflict() {
     );
 }
 
-#[test]
-fn audit_appender_keeps_non_conflict_responses_as_external_dependency_failure() {
+#[tokio::test(flavor = "current_thread")]
+async fn audit_appender_keeps_non_conflict_responses_as_external_dependency_failure() {
     let (base_url, receiver, server_thread) =
         spawn_capture_server(409, r#"{"message":"different_conflict"}"#)
             .expect("capture server should start");
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("runtime should build");
     let client = SupabaseClient::new(
         reqwest::Client::new(),
         base_url,
         "service-role-secret",
         "publishable-key",
     );
-    let appender = SupabaseAuditAppender::new(Arc::new(client), runtime.handle().clone());
+    let appender = SupabaseAuditAppender::new(Arc::new(client));
 
-    let result = appender.append_audit_event(&sample_audit_event());
+    let event = sample_audit_event();
+    let result = appender.append_audit_event(&event).await;
     let request = receiver
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("request should be captured");
