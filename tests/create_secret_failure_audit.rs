@@ -16,7 +16,8 @@ use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use mipsorcu::{
     AuditRecorder, Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore,
-    MASTER_KEY_LENGTH, MasterKey, RawJwt, RequestId, SourceEventAt, VerifiedJwtClaims,
+    MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, RawJwt, RequestId, SourceEventAt,
+    VerifiedJwtClaims,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -245,8 +246,10 @@ fn test_app_state_with_fallback(
     ));
 
     Ok(AppState {
-        master_key: Arc::new(MasterKey::from_bytes([42u8; MASTER_KEY_LENGTH])),
-        key_version: KeyVersion::new(1)?,
+        master_key_ring: Arc::new(MasterKeyRing::single(
+            KeyVersion::new(1)?,
+            MasterKey::from_bytes([42u8; MASTER_KEY_LENGTH]),
+        )?),
         jwt_verifier: Arc::new(test_jwt_verifier()?),
         supabase_client,
         audit_recorder,

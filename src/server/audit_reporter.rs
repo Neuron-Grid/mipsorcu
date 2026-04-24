@@ -4,6 +4,7 @@ use crate::audit::{
     AuditAction, AuditEvent, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
     AuditRecordError, AuditRecordOutcome, AuditResult, RequestId,
 };
+use crate::server::errors::ApiError;
 use crate::server::state::AppState;
 use crate::server::supabase::SupabaseRpcError;
 use crate::{KeyVersion, OwnerUserId, SecretId};
@@ -148,7 +149,7 @@ pub async fn record_success_audit(
     actor_user_id: &OwnerUserId,
     target_secret_id: &SecretId,
     key_version: KeyVersion,
-) {
+) -> Result<AuditRecordOutcome, ApiError> {
     let event = match build_success_decrypt_audit_event(
         request_id,
         actor_user_id,
@@ -165,7 +166,7 @@ pub async fn record_success_audit(
                 result = "success",
                 "failed to construct decrypt success audit event"
             );
-            return;
+            return Err(audit_recording_failed());
         }
     };
 
@@ -180,6 +181,7 @@ pub async fn record_success_audit(
                 audit_record_outcome = "primary_succeeded",
                 "decrypt success audit recorded"
             );
+            Ok(AuditRecordOutcome::PrimarySucceeded)
         }
         Ok(AuditRecordOutcome::FallbackSucceeded) => {
             tracing::warn!(
@@ -190,6 +192,7 @@ pub async fn record_success_audit(
                 audit_record_outcome = "fallback_succeeded",
                 "decrypt success audit recorded to local fallback"
             );
+            Ok(AuditRecordOutcome::FallbackSucceeded)
         }
         Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
             tracing::error!(
@@ -201,6 +204,7 @@ pub async fn record_success_audit(
                 audit_record_outcome = "both_failed",
                 "decrypt success audit recording failed"
             );
+            Err(audit_recording_failed())
         }
         Err(error @ AuditRecordError::IdempotencyConflict) => {
             tracing::error!(
@@ -213,6 +217,7 @@ pub async fn record_success_audit(
                 audit_record_outcome = "idempotency_conflict",
                 "decrypt success audit recording failed"
             );
+            Err(audit_recording_failed())
         }
         Err(
             error @ (AuditRecordError::ResendReadFailed(_)
@@ -227,8 +232,13 @@ pub async fn record_success_audit(
                 audit_record_outcome = "unexpected_resend_error",
                 "decrypt success audit recording failed"
             );
+            Err(audit_recording_failed())
         }
     }
+}
+
+fn audit_recording_failed() -> ApiError {
+    ApiError::AuditRecordFailed
 }
 
 pub struct RestoreTestAudit {

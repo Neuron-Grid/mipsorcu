@@ -11,7 +11,8 @@ use crate::types::{Classification, CreatedAt, DeviceId, Plaintext};
 use crate::{
     ExistingSecretVersionInput, NewSecretVersionInput, OwnerUserId, PreparedSecretVersion,
     SecretId, SecretVersion, SecretWriteAction, authorize_existing_secret_version_write,
-    authorize_new_secret_create, prepare_existing_secret_version, prepare_new_secret_version,
+    authorize_new_secret_create, prepare_existing_secret_version_with_keyring,
+    prepare_new_secret_version_with_keyring,
 };
 
 #[derive(Debug)]
@@ -235,12 +236,12 @@ async fn prepare_new_secret_version_for_request(
     owner_user_id: OwnerUserId,
     command: CreateSecretCommand,
 ) -> Result<PreparedSecretVersion, ApiError> {
-    let master_key = state.master_key.clone();
-    let key_version = state.key_version;
+    let master_key_ring = state.master_key_ring.clone();
+    let key_version = master_key_ring.active_key_version();
 
     tokio::task::spawn_blocking(move || {
-        prepare_new_secret_version(
-            &master_key,
+        prepare_new_secret_version_with_keyring(
+            &master_key_ring,
             NewSecretVersionInput::new(
                 owner_user_id,
                 command.classification,
@@ -261,12 +262,12 @@ async fn prepare_existing_secret_version_for_request(
     current: read_model::PreparedDecryptRow,
     command: RotateSecretCommand,
 ) -> Result<PreparedSecretVersion, ApiError> {
-    let master_key = state.master_key.clone();
+    let master_key_ring = state.master_key_ring.clone();
     let current_state = current.into_current_secret_version_state();
 
     tokio::task::spawn_blocking(move || {
-        prepare_existing_secret_version(
-            &master_key,
+        prepare_existing_secret_version_with_keyring(
+            &master_key_ring,
             ExistingSecretVersionInput::new(
                 current_state,
                 command.device_id,

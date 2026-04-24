@@ -4,9 +4,10 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mipsorcu::{
     AadError, AuthorizationError, Ciphertext, Classification, CreatedAt, CryptoError,
     DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts, DecryptIntegrityError,
-    Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
-    NewSecretVersionInput, OwnerUserId, Plaintext, PreparedSecretVersion, RawJwt,
-    SecretDecryptError, SecretId, SecretVersion, VerifiedJwtClaims, decrypt_current_secret_version,
+    Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion, KeyringError, MASTER_KEY_LENGTH,
+    MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext, PreparedSecretVersion,
+    RawJwt, SecretDecryptError, SecretId, SecretVersion, VerifiedJwtClaims,
+    decrypt_current_secret_version, decrypt_current_secret_version_with_keyring,
     prepare_new_secret_version,
 };
 use serde::Serialize;
@@ -356,6 +357,50 @@ fn decrypt_rejects_wrong_key_version_as_key_unwrap_failure() -> TestResult<()> {
     assert!(matches!(
         result,
         Err(SecretDecryptError::Crypto(CryptoError::KeyUnwrapFailed))
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_with_keyring_selects_row_key_version() -> TestResult<()> {
+    let (old_master_key, prepared, plaintext) =
+        prepared_secret_with_plaintext(b"old key row still decrypts".to_vec())?;
+    let keyring = MasterKeyRing::from_key_entries(
+        KeyVersion::new(2)?,
+        [
+            (KeyVersion::new(1)?, old_master_key),
+            (
+                KeyVersion::new(2)?,
+                MasterKey::from_bytes([12u8; MASTER_KEY_LENGTH]),
+            ),
+        ],
+    )?;
+    let input = base_input(&prepared, OWNER_USER_ID, prepared.version())?;
+
+    let decrypted = decrypt_current_secret_version_with_keyring(&keyring, input)?;
+
+    assert_eq!(decrypted.as_bytes(), plaintext.as_slice());
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_with_keyring_fails_closed_when_row_key_is_unavailable() -> TestResult<()> {
+    let (_, prepared, _) = prepared_secret_with_plaintext(b"missing key row".to_vec())?;
+    let keyring = MasterKeyRing::single(
+        KeyVersion::new(2)?,
+        MasterKey::from_bytes([12u8; MASTER_KEY_LENGTH]),
+    )?;
+    let input = base_input(&prepared, OWNER_USER_ID, prepared.version())?;
+
+    let result = decrypt_current_secret_version_with_keyring(&keyring, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Keyring(
+            KeyringError::KeyUnavailable { key_version }
+        )) if key_version == 1
     ));
 
     Ok(())

@@ -2,6 +2,7 @@ use std::fmt;
 
 use serde_json::Value;
 
+use crate::MasterKeyRing;
 use crate::aad::AadV1;
 use crate::auth::VerifiedJwtClaims;
 use crate::authorization::authorize_current_version_decrypt;
@@ -86,6 +87,23 @@ pub fn decrypt_current_secret_version(
     master_key: &MasterKey,
     input: DecryptCurrentSecretVersionInput,
 ) -> Result<Plaintext, SecretDecryptError> {
+    let row_aad = validate_decrypt_input(&input)?;
+    decrypt_current_secret_version_with_selected_master_key(master_key, &row_aad, &input)
+}
+
+pub fn decrypt_current_secret_version_with_keyring(
+    master_key_ring: &MasterKeyRing,
+    input: DecryptCurrentSecretVersionInput,
+) -> Result<Plaintext, SecretDecryptError> {
+    let row_aad = validate_decrypt_input(&input)?;
+    let master_key = master_key_ring.get(input.key_version)?;
+
+    decrypt_current_secret_version_with_selected_master_key(master_key, &row_aad, &input)
+}
+
+fn validate_decrypt_input(
+    input: &DecryptCurrentSecretVersionInput,
+) -> Result<AadV1, SecretDecryptError> {
     authorize_current_version_decrypt(
         &input.claims,
         &input.owner_user_id,
@@ -93,13 +111,21 @@ pub fn decrypt_current_secret_version(
         input.current_version,
     )?;
 
-    let row_aad = row_aad_from_input(&input);
+    let row_aad = row_aad_from_input(input);
     verify_stored_aad_matches_row(&input.aad_context, &row_aad)?;
 
-    let key_wrap_context = KeyWrapContext::new(input.secret_id, input.key_version);
+    Ok(row_aad)
+}
+
+fn decrypt_current_secret_version_with_selected_master_key(
+    master_key: &MasterKey,
+    row_aad: &AadV1,
+    input: &DecryptCurrentSecretVersionInput,
+) -> Result<Plaintext, SecretDecryptError> {
+    let key_wrap_context = KeyWrapContext::new(input.secret_id.clone(), input.key_version);
     let data_key = unwrap_data_key(master_key, &key_wrap_context, &input.encrypted_data_key)?;
 
-    decrypt_secret(&data_key, &row_aad, &input.nonce_or_iv, &input.ciphertext)
+    decrypt_secret(&data_key, row_aad, &input.nonce_or_iv, &input.ciphertext)
         .map_err(SecretDecryptError::from)
 }
 

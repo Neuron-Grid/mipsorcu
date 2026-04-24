@@ -2,6 +2,7 @@ use std::fmt;
 
 use serde_json::Value;
 
+use crate::MasterKeyRing;
 use crate::aad::AadV1;
 use crate::crypto::{
     ALGORITHM_XCHACHA20_POLY1305, KeyWrapContext, encrypt_secret, unwrap_data_key, wrap_data_key,
@@ -127,10 +128,28 @@ pub fn prepare_new_secret_version(
     input: NewSecretVersionInput,
 ) -> Result<PreparedSecretVersion, SecretWriteError> {
     let input = input.into_parts();
+    prepare_new_secret_version_parts(master_key, input.key_version, input)
+}
+
+pub fn prepare_new_secret_version_with_keyring(
+    master_key_ring: &MasterKeyRing,
+    input: NewSecretVersionInput,
+) -> Result<PreparedSecretVersion, SecretWriteError> {
+    let input = input.into_parts();
+    let (key_version, master_key) = master_key_ring.active();
+
+    prepare_new_secret_version_parts(master_key, key_version, input)
+}
+
+fn prepare_new_secret_version_parts(
+    master_key: &MasterKey,
+    key_version: KeyVersion,
+    input: super::input::NewSecretVersionInputParts,
+) -> Result<PreparedSecretVersion, SecretWriteError> {
     let secret_id = SecretId::generate()?;
     let version = SecretVersion::first();
     let data_key = DataKey::generate()?;
-    let key_wrap_context = KeyWrapContext::new(secret_id.clone(), input.key_version);
+    let key_wrap_context = KeyWrapContext::new(secret_id.clone(), key_version);
     let encrypted_data_key = wrap_data_key(master_key, &key_wrap_context, &data_key)?;
 
     prepare_secret_version_with_data_key(
@@ -142,7 +161,7 @@ pub fn prepare_new_secret_version(
             classification: input.classification,
             created_by_device_id: input.created_by_device_id,
             created_at: input.created_at,
-            key_version: input.key_version,
+            key_version,
             encrypted_data_key,
         },
         &data_key,
@@ -178,6 +197,48 @@ pub fn prepare_existing_secret_version(
             created_at: input.created_at,
             key_version,
             encrypted_data_key,
+        },
+        &data_key,
+        &input.plaintext,
+    )
+}
+
+pub fn prepare_existing_secret_version_with_keyring(
+    master_key_ring: &MasterKeyRing,
+    input: ExistingSecretVersionInput,
+) -> Result<PreparedSecretVersion, SecretWriteError> {
+    let input = input.into_parts();
+    let CurrentSecretVersionStateParts {
+        secret_id,
+        current_version,
+        owner_user_id,
+        classification,
+        key_version: current_key_version,
+        encrypted_data_key,
+    } = input.current.into_parts();
+    let version = current_version.next()?;
+    let current_master_key = master_key_ring.get(current_key_version)?;
+    let current_key_wrap_context = KeyWrapContext::new(secret_id.clone(), current_key_version);
+    let data_key = unwrap_data_key(
+        current_master_key,
+        &current_key_wrap_context,
+        &encrypted_data_key,
+    )?;
+    let (active_key_version, active_master_key) = master_key_ring.active();
+    let active_key_wrap_context = KeyWrapContext::new(secret_id.clone(), active_key_version);
+    let rewrapped_data_key = wrap_data_key(active_master_key, &active_key_wrap_context, &data_key)?;
+
+    prepare_secret_version_with_data_key(
+        SecretWriteAction::EncryptRotate,
+        SecretVersionMetadata {
+            secret_id,
+            version,
+            owner_user_id,
+            classification,
+            created_by_device_id: input.created_by_device_id,
+            created_at: input.created_at,
+            key_version: active_key_version,
+            encrypted_data_key: rewrapped_data_key,
         },
         &data_key,
         &input.plaintext,

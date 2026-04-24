@@ -139,6 +139,54 @@ exception
 end;
 $$;
 
+create function test_helpers.try_apply_key_rotation_batch(
+    p_request_id uuid,
+    p_old_key_version integer,
+    p_new_key_version integer,
+    p_rows jsonb
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_apply_key_rotation_batch(
+        p_request_id,
+        p_old_key_version,
+        p_new_key_version,
+        p_rows
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_complete_key_rotation(
+    p_request_id uuid,
+    p_old_key_version integer,
+    p_new_key_version integer
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_complete_key_rotation(
+        p_request_id,
+        p_old_key_version,
+        p_new_key_version
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
 create function test_helpers.try_insert_audit_event(
     p_audit_event_id uuid,
     p_request_id uuid,

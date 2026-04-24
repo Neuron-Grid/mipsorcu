@@ -134,7 +134,7 @@ impl fmt::Debug for DeviceId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyVersion(NonZeroU32);
 
 impl KeyVersion {

@@ -26,16 +26,16 @@ pub use authorization::{
     authorize_new_secret_create,
 };
 pub use crypto::{
-    ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, KeyWrapContext, decrypt_secret, encrypt_secret,
-    unwrap_data_key, wrap_data_key,
+    ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, KeyWrapContext, MasterKeyRing, decrypt_secret,
+    encrypt_secret, unwrap_data_key, wrap_data_key,
 };
 pub use error::{
     AadError, AuthorizationError, CryptoError, DecryptIntegrityError, InputError,
-    JwtVerificationError, SecretDecryptError, SecretWriteError,
+    JwtVerificationError, KeyringError, SecretDecryptError, SecretWriteError,
 };
 pub use read::{
     DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts,
-    decrypt_current_secret_version,
+    decrypt_current_secret_version, decrypt_current_secret_version_with_keyring,
 };
 pub use types::{
     Ciphertext, Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,
@@ -46,5 +46,6 @@ pub use types::{
 pub use write::{
     CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,
     PreparedSecretVersion, SecretWriteAction, prepare_existing_secret_version,
-    prepare_new_secret_version,
+    prepare_existing_secret_version_with_keyring, prepare_new_secret_version,
+    prepare_new_secret_version_with_keyring,
 };

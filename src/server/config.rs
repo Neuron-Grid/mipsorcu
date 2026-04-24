@@ -5,6 +5,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::MasterKeyRing;
+use crate::error::KeyringError;
 use crate::types::{KeyVersion, MasterKey};
 
 const DEFAULT_DOTENV_PATH: &str = ".env";
@@ -23,6 +25,8 @@ const DEFAULT_HEALTH_READINESS_POLL_INTERVAL_SECONDS: u64 = 30;
 const ENV_LISTEN_ADDR: &str = "MIPSORCU_LISTEN_ADDR";
 const ENV_MASTER_KEY: &str = "MIPSORCU_MASTER_KEY";
 const ENV_KEY_VERSION: &str = "MIPSORCU_KEY_VERSION";
+const ENV_ACTIVE_KEY_VERSION: &str = "MIPSORCU_ACTIVE_KEY_VERSION";
+const ENV_MASTER_KEY_DIR: &str = "MIPSORCU_MASTER_KEY_DIR";
 const ENV_SUPABASE_URL: &str = "MIPSORCU_SUPABASE_URL";
 const ENV_SUPABASE_SERVICE_ROLE_KEY: &str = "MIPSORCU_SUPABASE_SERVICE_ROLE_KEY";
 const ENV_SUPABASE_PUBLISHABLE_KEY: &str = "MIPSORCU_SUPABASE_PUBLISHABLE_KEY";
@@ -50,8 +54,7 @@ pub type DotenvVars = HashMap<String, String>;
 
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
-    pub master_key: MasterKey,
-    pub key_version: KeyVersion,
+    pub master_key_ring: MasterKeyRing,
     pub supabase_url: String,
     pub supabase_service_role_key: String,
     pub supabase_publishable_key: String,
@@ -76,8 +79,7 @@ impl fmt::Debug for AppConfig {
         formatter
             .debug_struct("AppConfig")
             .field("listen_addr", &self.listen_addr)
-            .field("master_key", &"<redacted>")
-            .field("key_version", &self.key_version)
+            .field("master_key_ring", &self.master_key_ring)
             .field("supabase_url", &self.supabase_url)
             .field("supabase_service_role_key", &"<redacted>")
             .field("supabase_publishable_key", &"<redacted>")
@@ -182,31 +184,7 @@ where
             reason: error.to_string(),
         })?;
 
-    let master_key_hex = required_var(ENV_MASTER_KEY, dotenv, get_process_var)?;
-    let master_key_bytes =
-        hex::decode(&master_key_hex).map_err(|error| ConfigError::InvalidValue {
-            name: ENV_MASTER_KEY,
-            reason: error.to_string(),
-        })?;
-    let master_key =
-        MasterKey::parse(&master_key_bytes).map_err(|error| ConfigError::InvalidValue {
-            name: ENV_MASTER_KEY,
-            reason: error.to_string(),
-        })?;
-
-    let key_version_str = required_var(ENV_KEY_VERSION, dotenv, get_process_var)?;
-    let key_version_u32 =
-        key_version_str
-            .parse::<u32>()
-            .map_err(|error| ConfigError::InvalidValue {
-                name: ENV_KEY_VERSION,
-                reason: error.to_string(),
-            })?;
-    let key_version =
-        KeyVersion::new(key_version_u32).map_err(|error| ConfigError::InvalidValue {
-            name: ENV_KEY_VERSION,
-            reason: error.to_string(),
-        })?;
+    let master_key_ring = load_master_key_ring(dotenv, get_process_var)?;
 
     let supabase_url = required_var(ENV_SUPABASE_URL, dotenv, get_process_var)?;
     let supabase_service_role_key =
@@ -275,8 +253,7 @@ where
 
     Ok(AppConfig {
         listen_addr,
-        master_key,
-        key_version,
+        master_key_ring,
         supabase_url,
         supabase_service_role_key,
         supabase_publishable_key,
@@ -295,6 +272,145 @@ where
         restore_test_interval,
         restore_test_sample_limit,
     })
+}
+
+fn load_master_key_ring<F>(
+    dotenv: &DotenvVars,
+    get_process_var: &F,
+) -> Result<MasterKeyRing, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match optional_var(ENV_MASTER_KEY_DIR, dotenv, get_process_var) {
+        Some(directory) => {
+            load_master_key_ring_from_directory(&PathBuf::from(directory), dotenv, get_process_var)
+        }
+        None => load_legacy_single_master_key_ring(dotenv, get_process_var),
+    }
+}
+
+fn load_legacy_single_master_key_ring<F>(
+    dotenv: &DotenvVars,
+    get_process_var: &F,
+) -> Result<MasterKeyRing, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let master_key = parse_master_key_hex(
+        ENV_MASTER_KEY,
+        &required_var(ENV_MASTER_KEY, dotenv, get_process_var)?,
+    )?;
+    let key_version = parse_key_version_config(
+        ENV_KEY_VERSION,
+        &required_var(ENV_KEY_VERSION, dotenv, get_process_var)?,
+    )?;
+
+    MasterKeyRing::single(key_version, master_key).map_err(keyring_config_error)
+}
+
+fn load_master_key_ring_from_directory<F>(
+    directory: &Path,
+    dotenv: &DotenvVars,
+    get_process_var: &F,
+) -> Result<MasterKeyRing, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let active_key_version = parse_key_version_config(
+        ENV_ACTIVE_KEY_VERSION,
+        &required_var(ENV_ACTIVE_KEY_VERSION, dotenv, get_process_var)?,
+    )?;
+    let entries = fs::read_dir(directory)
+        .map_err(|error| ConfigError::InvalidValue {
+            name: ENV_MASTER_KEY_DIR,
+            reason: format!("failed to read directory {}: {error}", directory.display()),
+        })?
+        .map(|entry| parse_master_key_file_entry(directory, entry))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    MasterKeyRing::from_key_entries(active_key_version, entries).map_err(keyring_config_error)
+}
+
+fn parse_master_key_file_entry(
+    directory: &Path,
+    entry: Result<fs::DirEntry, std::io::Error>,
+) -> Result<(KeyVersion, MasterKey), ConfigError> {
+    let entry = entry.map_err(|error| ConfigError::InvalidValue {
+        name: ENV_MASTER_KEY_DIR,
+        reason: format!(
+            "failed to read directory entry in {}: {error}",
+            directory.display()
+        ),
+    })?;
+    let path = entry.path();
+    let metadata = entry
+        .metadata()
+        .map_err(|error| ConfigError::InvalidValue {
+            name: ENV_MASTER_KEY_DIR,
+            reason: format!("failed to inspect key file {}: {error}", path.display()),
+        })?;
+
+    if !metadata.is_file() {
+        return Err(ConfigError::InvalidValue {
+            name: ENV_MASTER_KEY_DIR,
+            reason: format!("keyring entry must be a file: {}", path.display()),
+        });
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ConfigError::InvalidValue {
+            name: ENV_MASTER_KEY_DIR,
+            reason: format!("key file name must be UTF-8: {}", path.display()),
+        })?;
+    let Some(key_version_text) = file_name.strip_suffix(".key") else {
+        return Err(ConfigError::InvalidValue {
+            name: ENV_MASTER_KEY_DIR,
+            reason: format!("key file name must match <positive-version>.key: {file_name}"),
+        });
+    };
+    let key_version = parse_key_version_config(ENV_MASTER_KEY_DIR, key_version_text)?;
+    let key_hex = fs::read_to_string(&path).map_err(|error| ConfigError::InvalidValue {
+        name: ENV_MASTER_KEY_DIR,
+        reason: format!("failed to read key file {}: {error}", path.display()),
+    })?;
+    let master_key = parse_master_key_hex(ENV_MASTER_KEY_DIR, key_hex.trim())?;
+
+    Ok((key_version, master_key))
+}
+
+fn parse_master_key_hex(name: &'static str, value: &str) -> Result<MasterKey, ConfigError> {
+    let master_key_bytes = hex::decode(value).map_err(|error| ConfigError::InvalidValue {
+        name,
+        reason: error.to_string(),
+    })?;
+
+    MasterKey::parse(&master_key_bytes).map_err(|error| ConfigError::InvalidValue {
+        name,
+        reason: error.to_string(),
+    })
+}
+
+fn parse_key_version_config(name: &'static str, value: &str) -> Result<KeyVersion, ConfigError> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|error| ConfigError::InvalidValue {
+            name,
+            reason: error.to_string(),
+        })?;
+
+    KeyVersion::new(parsed).map_err(|error| ConfigError::InvalidValue {
+        name,
+        reason: error.to_string(),
+    })
+}
+
+fn keyring_config_error(error: KeyringError) -> ConfigError {
+    ConfigError::InvalidValue {
+        name: ENV_MASTER_KEY_DIR,
+        reason: error.to_string(),
+    }
 }
 
 pub fn parse_audit_resend_interval(value: Option<String>) -> Result<Duration, ConfigError> {

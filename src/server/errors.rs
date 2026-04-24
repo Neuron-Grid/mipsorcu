@@ -18,6 +18,8 @@ pub enum ApiError {
     UnsupportedMediaType(String),
     PayloadTooLarge(String),
     DecryptFailed,
+    KeyUnavailable,
+    AuditRecordFailed,
     SupabaseError(SupabaseRpcError),
     DbIntegrityViolation(String),
     InternalInvariantViolation(String),
@@ -36,6 +38,8 @@ impl fmt::Display for ApiError {
             }
             Self::PayloadTooLarge(message) => write!(formatter, "payload too large: {message}"),
             Self::DecryptFailed => write!(formatter, "decrypt failed"),
+            Self::KeyUnavailable => write!(formatter, "key unavailable"),
+            Self::AuditRecordFailed => write!(formatter, "audit record failed"),
             Self::SupabaseError(error) => write!(formatter, "{error}"),
             Self::DbIntegrityViolation(message) => {
                 write!(formatter, "db integrity violation: {message}")
@@ -62,6 +66,8 @@ impl ApiError {
             }
             Self::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             Self::DecryptFailed => (StatusCode::BAD_REQUEST, "decrypt_failed"),
+            Self::KeyUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "key_unavailable"),
+            Self::AuditRecordFailed => (StatusCode::SERVICE_UNAVAILABLE, "audit_record_failed"),
             Self::SupabaseError(_) => (StatusCode::BAD_GATEWAY, "upstream_dependency_failed"),
             Self::DbIntegrityViolation(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "db_integrity_violation")
@@ -97,6 +103,7 @@ impl From<SecretWriteError> for ApiError {
             SecretWriteError::Input(_) | SecretWriteError::Aad(_) => {
                 Self::BadRequest(error.to_string())
             }
+            SecretWriteError::Keyring(_) => Self::KeyUnavailable,
             SecretWriteError::Crypto(_) => Self::InternalError(error.to_string()),
         }
     }
@@ -106,6 +113,7 @@ impl From<SecretDecryptError> for ApiError {
     fn from(error: SecretDecryptError) -> Self {
         match error {
             SecretDecryptError::Authorization(_) => Self::Forbidden("forbidden".to_owned()),
+            SecretDecryptError::Keyring(_) => Self::KeyUnavailable,
             SecretDecryptError::Aad(_)
             | SecretDecryptError::Crypto(_)
             | SecretDecryptError::Integrity(_) => Self::DecryptFailed,

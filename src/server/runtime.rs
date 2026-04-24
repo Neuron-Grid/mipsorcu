@@ -8,7 +8,7 @@ use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::{JwksCache, JwtVerifier, JwtVerifierConfig, fetch_jwks};
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
-use crate::server::{background, config, restore_test, router};
+use crate::server::{background, config, key_rotation, restore_test, router};
 
 pub use crate::server::background::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
@@ -16,17 +16,49 @@ pub use crate::server::background::{
     run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
 
+pub async fn run_entrypoint() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+
+    match args.split_first() {
+        None => run().await,
+        Some((command, command_args)) if command == "key-rotation" => {
+            init_tracing();
+            let config = config::load_config().unwrap_or_else(|error| {
+                tracing::error!(error = %error, "configuration loading failed");
+                std::process::exit(1);
+            });
+
+            if let Err(error) = key_rotation::run_cli(config, command_args).await {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        Some(_) => {
+            eprintln!("{}", key_rotation::usage());
+            std::process::exit(2);
+        }
+    }
+}
+
 pub async fn run() {
-    fmt::fmt()
-        .json()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    init_tracing();
 
     let config = config::load_config().unwrap_or_else(|error| {
         tracing::error!(error = %error, "configuration loading failed");
         std::process::exit(1);
     });
 
+    run_server_with_config(config).await;
+}
+
+fn init_tracing() {
+    fmt::fmt()
+        .json()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+}
+
+async fn run_server_with_config(config: config::AppConfig) {
     let listen_addr = config.listen_addr;
     tracing::info!(listen_addr = %listen_addr, "starting mipsorcu");
 
@@ -93,8 +125,7 @@ pub async fn run() {
     ));
 
     let state = AppState {
-        master_key: Arc::new(config.master_key),
-        key_version: config.key_version,
+        master_key_ring: Arc::new(config.master_key_ring),
         jwt_verifier,
         supabase_client,
         audit_recorder,

@@ -1,6 +1,6 @@
 use crate::audit::{AuditMetadata, AuditResult, RequestId};
 use crate::auth::VerifiedJwtClaims;
-use crate::decrypt_current_secret_version;
+use crate::decrypt_current_secret_version_with_keyring;
 use crate::server::audit_reporter::{self, RestoreTestAudit};
 use crate::server::errors::ApiError;
 use crate::server::read_model::{self, PreparedDecryptRow};
@@ -120,12 +120,13 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
 
         let failure_context = RestoreTestFailureContext::from_prepared(&prepared);
         let input = build_restore_test_decrypt_input_from_prepared(prepared);
-        let master_key = state.master_key.clone();
-        let decrypt_result =
-            tokio::task::spawn_blocking(move || decrypt_current_secret_version(&master_key, input))
-                .await
-                .map_err(|error| ApiError::InternalError(error.to_string()))
-                .and_then(|result| result.map_err(ApiError::from));
+        let master_key_ring = state.master_key_ring.clone();
+        let decrypt_result = tokio::task::spawn_blocking(move || {
+            decrypt_current_secret_version_with_keyring(&master_key_ring, input)
+        })
+        .await
+        .map_err(|error| ApiError::InternalError(error.to_string()))
+        .and_then(|result| result.map_err(ApiError::from));
 
         if decrypt_result.is_err() {
             audit_reporter::record_restore_test_audit(

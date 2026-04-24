@@ -3,16 +3,15 @@ use std::time::Duration;
 
 use time::OffsetDateTime;
 
+use crate::MasterKeyRing;
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::JwtVerifier;
-use crate::types::{KeyVersion, MasterKey};
 
 use super::supabase::{SupabaseAuditAppender, SupabaseClient};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub master_key: Arc<MasterKey>,
-    pub key_version: KeyVersion,
+    pub master_key_ring: Arc<MasterKeyRing>,
     pub jwt_verifier: Arc<JwtVerifier>,
     pub supabase_client: Arc<SupabaseClient>,
     pub audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,

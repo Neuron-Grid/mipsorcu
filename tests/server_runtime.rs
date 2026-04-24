@@ -18,8 +18,8 @@ use mipsorcu::server::supabase::{RestoreTestSampleRow, SupabaseAuditAppender, Su
 use mipsorcu::{
     AuditRecorder, Classification, CreatedAt, DeviceId, Jwk, Jwks, JwksCache, JwtVerifier,
     JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore, MASTER_KEY_LENGTH, MasterKey,
-    NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome, SecretDecryptError,
-    SourceEventAt, prepare_new_secret_version,
+    MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
+    SecretDecryptError, SourceEventAt, prepare_new_secret_version,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -295,8 +295,10 @@ fn test_app_state(
     ));
 
     Ok(AppState {
-        master_key: Arc::new(sample_master_key()),
-        key_version: KeyVersion::new(1)?,
+        master_key_ring: Arc::new(MasterKeyRing::single(
+            KeyVersion::new(1)?,
+            sample_master_key(),
+        )?),
         jwt_verifier: Arc::new(test_jwt_verifier()?),
         supabase_client,
         audit_recorder,
@@ -1015,7 +1017,7 @@ async fn decrypt_endpoint_returns_plaintext_hex_encoding_and_no_store_when_audit
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn decrypt_endpoint_still_succeeds_when_primary_and_fallback_audit_both_fail() {
+async fn decrypt_endpoint_fails_closed_when_primary_and_fallback_audit_both_fail() {
     let plaintext = b"both fail secret";
     let (secret_id, row_json) =
         decrypt_row_json(plaintext).expect("decrypt row JSON should be constructed");
@@ -1037,12 +1039,17 @@ async fn decrypt_endpoint_still_succeeds_when_primary_and_fallback_audit_both_fa
         .await
         .expect("decrypt request should succeed");
 
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let json: Value = response
         .json()
         .await
         .expect("decrypt response should be JSON");
-    assert_eq!(json["plaintext_hex"], Value::String(hex::encode(plaintext)));
+    assert_eq!(
+        json["code"],
+        Value::String("audit_record_failed".to_owned())
+    );
+    assert!(json.get("request_id").is_some());
+    assert!(json.get("plaintext_hex").is_none());
 
     let read_request = receiver
         .recv_timeout(Duration::from_secs(2))

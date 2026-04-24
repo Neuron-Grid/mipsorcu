@@ -304,11 +304,45 @@ impl From<AadError> for CryptoError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyringError {
+    Empty,
+    DuplicateKeyVersion { key_version: u32 },
+    ActiveKeyMissing { key_version: u32 },
+    KeyUnavailable { key_version: u32 },
+}
+
+impl fmt::Display for KeyringError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(formatter, "master keyring must not be empty"),
+            Self::DuplicateKeyVersion { key_version } => {
+                write!(formatter, "duplicate master key version: {key_version}")
+            }
+            Self::ActiveKeyMissing { key_version } => {
+                write!(
+                    formatter,
+                    "active master key version is not present: {key_version}"
+                )
+            }
+            Self::KeyUnavailable { key_version } => {
+                write!(
+                    formatter,
+                    "master key version is unavailable: {key_version}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for KeyringError {}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum SecretWriteError {
     Input(InputError),
     Aad(AadError),
     Crypto(CryptoError),
+    Keyring(KeyringError),
 }
 
 impl fmt::Debug for SecretWriteError {
@@ -317,6 +351,7 @@ impl fmt::Debug for SecretWriteError {
             Self::Input(error) => formatter.debug_tuple("Input").field(error).finish(),
             Self::Aad(error) => formatter.debug_tuple("Aad").field(error).finish(),
             Self::Crypto(error) => formatter.debug_tuple("Crypto").field(error).finish(),
+            Self::Keyring(error) => formatter.debug_tuple("Keyring").field(error).finish(),
         }
     }
 }
@@ -327,6 +362,7 @@ impl fmt::Display for SecretWriteError {
             Self::Input(error) => write!(formatter, "{error}"),
             Self::Aad(error) => write!(formatter, "{error}"),
             Self::Crypto(error) => write!(formatter, "{error}"),
+            Self::Keyring(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -348,6 +384,12 @@ impl From<AadError> for SecretWriteError {
 impl From<CryptoError> for SecretWriteError {
     fn from(error: CryptoError) -> Self {
         Self::Crypto(error)
+    }
+}
+
+impl From<KeyringError> for SecretWriteError {
+    fn from(error: KeyringError) -> Self {
+        Self::Keyring(error)
     }
 }
 
@@ -395,6 +437,7 @@ pub enum SecretDecryptError {
     Aad(AadError),
     Crypto(CryptoError),
     Integrity(DecryptIntegrityError),
+    Keyring(KeyringError),
 }
 
 impl fmt::Debug for SecretDecryptError {
@@ -406,6 +449,7 @@ impl fmt::Debug for SecretDecryptError {
             Self::Aad(error) => formatter.debug_tuple("Aad").field(error).finish(),
             Self::Crypto(error) => formatter.debug_tuple("Crypto").field(error).finish(),
             Self::Integrity(error) => formatter.debug_tuple("Integrity").field(error).finish(),
+            Self::Keyring(error) => formatter.debug_tuple("Keyring").field(error).finish(),
         }
     }
 }
@@ -417,6 +461,7 @@ impl fmt::Display for SecretDecryptError {
             Self::Aad(error) => write!(formatter, "{error}"),
             Self::Crypto(error) => write!(formatter, "{error}"),
             Self::Integrity(error) => write!(formatter, "{error}"),
+            Self::Keyring(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -444,5 +489,11 @@ impl From<CryptoError> for SecretDecryptError {
 impl From<DecryptIntegrityError> for SecretDecryptError {
     fn from(error: DecryptIntegrityError) -> Self {
         Self::Integrity(error)
+    }
+}
+
+impl From<KeyringError> for SecretDecryptError {
+    fn from(error: KeyringError) -> Self {
+        Self::Keyring(error)
     }
 }

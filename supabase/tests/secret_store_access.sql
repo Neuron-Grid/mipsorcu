@@ -500,6 +500,114 @@ select ok(
     'service_role can execute append audit RPC'
 );
 
+select ok(
+    not has_function_privilege(
+        'anon',
+        'public.rpc_key_rotation_status(integer)',
+        'execute'
+    ),
+    'anon cannot execute key rotation status RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'authenticated',
+        'public.rpc_key_rotation_status(integer)',
+        'execute'
+    ),
+    'authenticated cannot execute key rotation status RPC'
+);
+
+select ok(
+    has_function_privilege(
+        'service_role',
+        'public.rpc_key_rotation_status(integer)',
+        'execute'
+    ),
+    'service_role can execute key rotation status RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'anon',
+        'public.rpc_list_key_rotation_batch(integer,integer)',
+        'execute'
+    ),
+    'anon cannot execute list key rotation batch RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'authenticated',
+        'public.rpc_list_key_rotation_batch(integer,integer)',
+        'execute'
+    ),
+    'authenticated cannot execute list key rotation batch RPC'
+);
+
+select ok(
+    has_function_privilege(
+        'service_role',
+        'public.rpc_list_key_rotation_batch(integer,integer)',
+        'execute'
+    ),
+    'service_role can execute list key rotation batch RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'anon',
+        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb)',
+        'execute'
+    ),
+    'anon cannot execute apply key rotation batch RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'authenticated',
+        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb)',
+        'execute'
+    ),
+    'authenticated cannot execute apply key rotation batch RPC'
+);
+
+select ok(
+    has_function_privilege(
+        'service_role',
+        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb)',
+        'execute'
+    ),
+    'service_role can execute apply key rotation batch RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'anon',
+        'public.rpc_complete_key_rotation(uuid,integer,integer)',
+        'execute'
+    ),
+    'anon cannot execute complete key rotation RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'authenticated',
+        'public.rpc_complete_key_rotation(uuid,integer,integer)',
+        'execute'
+    ),
+    'authenticated cannot execute complete key rotation RPC'
+);
+
+select ok(
+    has_function_privilege(
+        'service_role',
+        'public.rpc_complete_key_rotation(uuid,integer,integer)',
+        'execute'
+    ),
+    'service_role can execute complete key rotation RPC'
+);
+
 select * from finish();
 
 rollback;

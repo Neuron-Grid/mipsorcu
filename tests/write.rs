@@ -1,9 +1,10 @@
 use mipsorcu::{
     ALGORITHM_XCHACHA20_POLY1305, AadV1, Classification, CreatedAt, CryptoError,
     CurrentSecretVersionState, DATA_KEY_LENGTH, DeviceId, ExistingSecretVersionInput, InputError,
-    KeyVersion, KeyWrapContext, MASTER_KEY_LENGTH, MasterKey, OwnerUserId, Plaintext, SecretId,
-    SecretVersion, SecretWriteError, decrypt_secret, prepare_existing_secret_version,
-    prepare_new_secret_version, unwrap_data_key,
+    KeyVersion, KeyWrapContext, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, OwnerUserId,
+    Plaintext, SecretId, SecretVersion, SecretWriteError, decrypt_secret,
+    prepare_existing_secret_version, prepare_existing_secret_version_with_keyring,
+    prepare_new_secret_version, prepare_new_secret_version_with_keyring, unwrap_data_key,
 };
 use serde_json::Value;
 
@@ -15,6 +16,22 @@ const DEVICE_ID: &str = "sbc-device-1";
 
 fn sample_master_key() -> MasterKey {
     MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH])
+}
+
+fn rotation_keyring() -> Result<MasterKeyRing, SecretWriteError> {
+    Ok(MasterKeyRing::from_key_entries(
+        KeyVersion::new(2)?,
+        [
+            (
+                KeyVersion::new(1)?,
+                MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH]),
+            ),
+            (
+                KeyVersion::new(2)?,
+                MasterKey::from_bytes([12u8; MASTER_KEY_LENGTH]),
+            ),
+        ],
+    )?)
 }
 
 fn sample_input(plaintext: Plaintext) -> Result<mipsorcu::NewSecretVersionInput, SecretWriteError> {
@@ -209,6 +226,79 @@ fn prepare_existing_secret_version_reuses_data_key_and_round_trips() -> Result<(
         rotated.ciphertext(),
     )?;
 
+    assert_eq!(decrypted.as_bytes(), next_plaintext.as_slice());
+
+    Ok(())
+}
+
+#[test]
+fn prepare_new_secret_version_with_keyring_uses_active_key_version() -> Result<(), SecretWriteError>
+{
+    let keyring = rotation_keyring()?;
+    let input = sample_input(Plaintext::new(b"new active key secret".to_vec()))?;
+
+    let prepared = prepare_new_secret_version_with_keyring(&keyring, input)?;
+
+    assert_eq!(prepared.key_version().get(), 2);
+    let active_master_key = keyring.get(KeyVersion::new(2)?)?;
+    let active_context = KeyWrapContext::new(prepared.secret_id().clone(), prepared.key_version());
+    let data_key = unwrap_data_key(
+        active_master_key,
+        &active_context,
+        prepared.encrypted_data_key(),
+    )?;
+    assert_eq!(data_key.as_bytes().len(), DATA_KEY_LENGTH);
+
+    Ok(())
+}
+
+#[test]
+fn prepare_existing_secret_version_with_keyring_rewraps_data_key_to_active_version()
+-> Result<(), SecretWriteError> {
+    let old_master_key = sample_master_key();
+    let current = prepare_new_secret_version(
+        &old_master_key,
+        sample_input(Plaintext::new(b"current dummy secret".to_vec()))?,
+    )?;
+    let current_state = current_state_from_prepared(&current);
+    let keyring = rotation_keyring()?;
+    let next_plaintext = b"rotated under active key".to_vec();
+    let input = ExistingSecretVersionInput::new(
+        current_state,
+        DeviceId::new(DEVICE_ID)?,
+        CreatedAt::parse(ROTATED_CREATED_AT)?,
+        Plaintext::new(next_plaintext.clone()),
+    );
+
+    let rotated = prepare_existing_secret_version_with_keyring(&keyring, input)?;
+
+    assert_eq!(rotated.key_version().get(), 2);
+    assert_ne!(
+        rotated.encrypted_data_key().as_bytes(),
+        current.encrypted_data_key().as_bytes()
+    );
+
+    let old_context = KeyWrapContext::new(current.secret_id().clone(), current.key_version());
+    let old_data_key = unwrap_data_key(
+        keyring.get(KeyVersion::new(1)?)?,
+        &old_context,
+        current.encrypted_data_key(),
+    )?;
+    let new_context = KeyWrapContext::new(rotated.secret_id().clone(), rotated.key_version());
+    let new_data_key = unwrap_data_key(
+        keyring.get(KeyVersion::new(2)?)?,
+        &new_context,
+        rotated.encrypted_data_key(),
+    )?;
+    assert_eq!(new_data_key.as_bytes(), old_data_key.as_bytes());
+
+    let aad = AadV1::from_stored_context(rotated.aad_context())?;
+    let decrypted = decrypt_secret(
+        &new_data_key,
+        &aad,
+        rotated.nonce_or_iv(),
+        rotated.ciphertext(),
+    )?;
     assert_eq!(decrypted.as_bytes(), next_plaintext.as_slice());
 
     Ok(())

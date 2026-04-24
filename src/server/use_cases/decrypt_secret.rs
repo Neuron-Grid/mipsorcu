@@ -1,6 +1,6 @@
 use crate::audit::{AuditAction, RequestId};
 use crate::auth::{RawJwt, VerifiedJwtClaims};
-use crate::decrypt_current_secret_version as decrypt_current_secret_version_with_master_key;
+use crate::decrypt_current_secret_version_with_keyring;
 use crate::server::audit_reporter::{self, FailureAuditContext};
 use crate::server::errors::ApiError;
 use crate::server::read_model::{self, FetchCurrentSecretVersionError};
@@ -84,7 +84,7 @@ pub(in crate::server) async fn decrypt_secret(
         &response_secret_id,
         key_version,
     )
-    .await;
+    .await?;
 
     tracing::info!(
         request_id = %request_id.as_canonical_string(),
@@ -105,10 +105,10 @@ async fn decrypt_prepared_input(
     state: &AppState,
     input: crate::DecryptCurrentSecretVersionInput,
 ) -> Result<Plaintext, ApiError> {
-    let master_key = state.master_key.clone();
+    let master_key_ring = state.master_key_ring.clone();
 
     tokio::task::spawn_blocking(move || {
-        decrypt_current_secret_version_with_master_key(&master_key, input)
+        decrypt_current_secret_version_with_keyring(&master_key_ring, input)
     })
     .await
     .map_err(|error| ApiError::InternalError(error.to_string()))?

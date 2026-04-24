@@ -1,8 +1,8 @@
 use mipsorcu::{
     ALGORITHM_XCHACHA20_POLY1305, AadV1, Ciphertext, CryptoError, DATA_KEY_LENGTH, DataKey,
     ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KeyVersion,
-    KeyWrapContext, MASTER_KEY_LENGTH, MasterKey, NONCE_LENGTH, Nonce, Plaintext, SecretId,
-    decrypt_secret, encrypt_secret, unwrap_data_key, wrap_data_key,
+    KeyWrapContext, KeyringError, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, NONCE_LENGTH, Nonce,
+    Plaintext, SecretId, decrypt_secret, encrypt_secret, unwrap_data_key, wrap_data_key,
 };
 
 fn sample_aad() -> Result<AadV1, CryptoError> {
@@ -201,6 +201,91 @@ fn key_version_rejects_zero() {
         Err(CryptoError::InvalidKeyVersion { value }) if value == 0
     ));
     assert_eq!(KeyVersion::new(1).map(KeyVersion::get), Ok(1));
+}
+
+#[test]
+fn master_key_ring_selects_active_and_versioned_keys() -> Result<(), CryptoError> {
+    let old_version = KeyVersion::new(1)?;
+    let new_version = KeyVersion::new(2)?;
+    let keyring = MasterKeyRing::from_key_entries(
+        new_version,
+        [
+            (
+                old_version,
+                MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH]),
+            ),
+            (
+                new_version,
+                MasterKey::from_bytes([12u8; MASTER_KEY_LENGTH]),
+            ),
+        ],
+    )
+    .expect("keyring should be valid");
+
+    assert_eq!(keyring.active().0, new_version);
+    assert!(keyring.contains(old_version));
+    assert!(keyring.contains(new_version));
+    assert_eq!(
+        keyring.get(old_version).unwrap().as_bytes(),
+        &[11u8; MASTER_KEY_LENGTH]
+    );
+    assert_eq!(
+        keyring.get(new_version).unwrap().as_bytes(),
+        &[12u8; MASTER_KEY_LENGTH]
+    );
+    assert!(matches!(
+        keyring.get(KeyVersion::new(3)?),
+        Err(KeyringError::KeyUnavailable { key_version }) if key_version == 3
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn master_key_ring_rejects_invalid_construction() -> Result<(), CryptoError> {
+    let version_one = KeyVersion::new(1)?;
+    let version_two = KeyVersion::new(2)?;
+
+    assert!(matches!(
+        MasterKeyRing::from_key_entries(version_one, []),
+        Err(KeyringError::Empty)
+    ));
+    assert!(matches!(
+        MasterKeyRing::from_key_entries(
+            version_one,
+            [
+                (version_one, MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH])),
+                (version_one, MasterKey::from_bytes([12u8; MASTER_KEY_LENGTH])),
+            ],
+        ),
+        Err(KeyringError::DuplicateKeyVersion { key_version }) if key_version == 1
+    ));
+    assert!(matches!(
+        MasterKeyRing::from_key_entries(
+            version_two,
+            [(version_one, MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH]))],
+        ),
+        Err(KeyringError::ActiveKeyMissing { key_version }) if key_version == 2
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn master_key_ring_debug_redacts_key_material() -> Result<(), CryptoError> {
+    let keyring = MasterKeyRing::single(
+        KeyVersion::new(1)?,
+        MasterKey::from_bytes([77u8; MASTER_KEY_LENGTH]),
+    )
+    .expect("keyring should be valid");
+
+    let output = format!("{keyring:?}");
+
+    assert!(output.contains("active_key_version"));
+    assert!(!output.contains("77, 77"));
+    assert!(!output.contains("MasterKey(<redacted>)"));
+
+    Ok(())
 }
 
 #[test]

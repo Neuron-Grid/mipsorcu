@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -7,7 +8,7 @@ use serde_json::Value;
 use zeroize::Zeroize;
 
 use crate::aad::AadV1;
-use crate::error::CryptoError;
+use crate::error::{CryptoError, KeyringError};
 use crate::types::{
     Ciphertext, DATA_KEY_LENGTH, DataKey, ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH,
     ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KeyVersion, MasterKey,
@@ -50,6 +51,99 @@ impl KeyWrapContext {
         };
 
         serde_json::to_vec(&aad).map_err(|_| CryptoError::AadFailed)
+    }
+}
+
+pub struct MasterKeyRing {
+    active_key_version: KeyVersion,
+    keys: BTreeMap<KeyVersion, MasterKey>,
+}
+
+impl MasterKeyRing {
+    pub fn new(
+        active_key_version: KeyVersion,
+        keys: BTreeMap<KeyVersion, MasterKey>,
+    ) -> Result<Self, KeyringError> {
+        if keys.is_empty() {
+            return Err(KeyringError::Empty);
+        }
+
+        if !keys.contains_key(&active_key_version) {
+            return Err(KeyringError::ActiveKeyMissing {
+                key_version: active_key_version.get(),
+            });
+        }
+
+        Ok(Self {
+            active_key_version,
+            keys,
+        })
+    }
+
+    pub fn from_key_entries<I>(
+        active_key_version: KeyVersion,
+        entries: I,
+    ) -> Result<Self, KeyringError>
+    where
+        I: IntoIterator<Item = (KeyVersion, MasterKey)>,
+    {
+        let mut keys = BTreeMap::new();
+
+        for (key_version, master_key) in entries {
+            if keys.insert(key_version, master_key).is_some() {
+                return Err(KeyringError::DuplicateKeyVersion {
+                    key_version: key_version.get(),
+                });
+            }
+        }
+
+        Self::new(active_key_version, keys)
+    }
+
+    pub fn single(
+        active_key_version: KeyVersion,
+        master_key: MasterKey,
+    ) -> Result<Self, KeyringError> {
+        Self::from_key_entries(active_key_version, [(active_key_version, master_key)])
+    }
+
+    pub fn active(&self) -> (KeyVersion, &MasterKey) {
+        let master_key = self.keys.get(&self.active_key_version).expect(
+            "MasterKeyRing invariant violated: active key version must be present after construction",
+        );
+
+        (self.active_key_version, master_key)
+    }
+
+    pub fn active_key_version(&self) -> KeyVersion {
+        self.active_key_version
+    }
+
+    pub fn get(&self, key_version: KeyVersion) -> Result<&MasterKey, KeyringError> {
+        self.keys
+            .get(&key_version)
+            .ok_or(KeyringError::KeyUnavailable {
+                key_version: key_version.get(),
+            })
+    }
+
+    pub fn contains(&self, key_version: KeyVersion) -> bool {
+        self.keys.contains_key(&key_version)
+    }
+
+    pub fn key_versions(&self) -> Vec<KeyVersion> {
+        self.keys.keys().copied().collect()
+    }
+}
+
+impl fmt::Debug for MasterKeyRing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MasterKeyRing")
+            .field("active_key_version", &self.active_key_version)
+            .field("key_versions", &self.key_versions())
+            .field("keys", &"<redacted>")
+            .finish()
     }
 }
 

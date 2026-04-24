@@ -6,9 +6,9 @@ use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender};
+use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender, RequestId};
 use crate::auth::RawJwt;
-use crate::{SecretId, SecretVersion};
+use crate::{KeyVersion, SecretId, SecretVersion};
 
 const CURRENT_SECRET_VERSION_READ_COLUMNS: &str = "\
 id,secret_id,version,ciphertext,encrypted_data_key,key_version,\
@@ -163,6 +163,99 @@ impl SupabaseClient {
             .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))
     }
 
+    pub async fn call_key_rotation_status(
+        &self,
+        key_version: KeyVersion,
+    ) -> Result<KeyRotationStatus, SupabaseRpcError> {
+        let params = KeyRotationStatusParams {
+            p_key_version: key_version.get(),
+        };
+        let response = self.post_rpc("rpc_key_rotation_status", &params).await?;
+        let rows: Vec<KeyRotationStatusResponse> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .next()
+            .ok_or(SupabaseRpcError::EmptyResult)
+            .map(KeyRotationStatus::from)
+    }
+
+    pub async fn call_list_key_rotation_batch(
+        &self,
+        old_key_version: KeyVersion,
+        batch_limit: u32,
+    ) -> Result<Vec<KeyRotationBatchRow>, SupabaseRpcError> {
+        let params = KeyRotationBatchParams {
+            p_old_key_version: old_key_version.get(),
+            p_limit: batch_limit,
+        };
+        let response = self
+            .post_rpc("rpc_list_key_rotation_batch", &params)
+            .await?;
+
+        ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))
+    }
+
+    pub async fn call_apply_key_rotation_batch(
+        &self,
+        request_id: &RequestId,
+        old_key_version: KeyVersion,
+        new_key_version: KeyVersion,
+        rows: Vec<KeyRotationApplyRow>,
+    ) -> Result<KeyRotationApplyOutcome, SupabaseRpcError> {
+        let params = ApplyKeyRotationBatchParams {
+            p_request_id: request_id.as_canonical_string(),
+            p_old_key_version: old_key_version.get(),
+            p_new_key_version: new_key_version.get(),
+            p_rows: rows,
+        };
+        let response = self
+            .post_rpc("rpc_apply_key_rotation_batch", &params)
+            .await?;
+        let rows: Vec<KeyRotationApplyResponse> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .next()
+            .ok_or(SupabaseRpcError::EmptyResult)
+            .map(KeyRotationApplyOutcome::from)
+    }
+
+    pub async fn call_complete_key_rotation(
+        &self,
+        request_id: &RequestId,
+        old_key_version: KeyVersion,
+        new_key_version: KeyVersion,
+    ) -> Result<KeyRotationCompleteOutcome, SupabaseRpcError> {
+        let params = CompleteKeyRotationParams {
+            p_request_id: request_id.as_canonical_string(),
+            p_old_key_version: old_key_version.get(),
+            p_new_key_version: new_key_version.get(),
+        };
+        let response = self.post_rpc("rpc_complete_key_rotation", &params).await?;
+        let rows: Vec<KeyRotationCompleteResponse> =
+            ensure_success(response)
+                .await?
+                .json()
+                .await
+                .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .next()
+            .ok_or(SupabaseRpcError::EmptyResult)
+            .map(KeyRotationCompleteOutcome::from)
+    }
+
     pub async fn probe_readiness(&self) -> bool {
         let url = format!("{}/rest/v1/", self.base_url);
 
@@ -270,6 +363,64 @@ pub struct RestoreTestSampleRow {
     pub created_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct KeyRotationBatchRow {
+    pub id: String,
+    pub secret_id: String,
+    pub version: i32,
+    pub encrypted_data_key: String,
+    pub key_version: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyRotationApplyRow {
+    pub id: String,
+    pub encrypted_data_key: String,
+}
+
+#[derive(Debug)]
+pub struct KeyRotationStatus {
+    pub key_version: i32,
+    pub remaining_count: i64,
+}
+
+impl From<KeyRotationStatusResponse> for KeyRotationStatus {
+    fn from(response: KeyRotationStatusResponse) -> Self {
+        Self {
+            key_version: response.key_version,
+            remaining_count: response.remaining_count,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct KeyRotationApplyOutcome {
+    pub processed_count: i64,
+    pub remaining_count: i64,
+}
+
+impl From<KeyRotationApplyResponse> for KeyRotationApplyOutcome {
+    fn from(response: KeyRotationApplyResponse) -> Self {
+        Self {
+            processed_count: response.processed_count,
+            remaining_count: response.remaining_count,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct KeyRotationCompleteOutcome {
+    pub remaining_count: i64,
+}
+
+impl From<KeyRotationCompleteResponse> for KeyRotationCompleteOutcome {
+    fn from(response: KeyRotationCompleteResponse) -> Self {
+        Self {
+            remaining_count: response.remaining_count,
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct WriteSecretVersionParams {
     pub p_request_id: String,
@@ -364,6 +515,49 @@ struct AppendAuditEventParams {
 #[derive(Serialize)]
 struct SampleRestoreTestParams {
     p_limit: u32,
+}
+
+#[derive(Serialize)]
+struct KeyRotationStatusParams {
+    p_key_version: u32,
+}
+
+#[derive(Serialize)]
+struct KeyRotationBatchParams {
+    p_old_key_version: u32,
+    p_limit: u32,
+}
+
+#[derive(Serialize)]
+struct ApplyKeyRotationBatchParams {
+    p_request_id: String,
+    p_old_key_version: u32,
+    p_new_key_version: u32,
+    p_rows: Vec<KeyRotationApplyRow>,
+}
+
+#[derive(Serialize)]
+struct CompleteKeyRotationParams {
+    p_request_id: String,
+    p_old_key_version: u32,
+    p_new_key_version: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeyRotationStatusResponse {
+    key_version: i32,
+    remaining_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeyRotationApplyResponse {
+    processed_count: i64,
+    remaining_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeyRotationCompleteResponse {
+    remaining_count: i64,
 }
 
 impl AppendAuditEventParams {

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mipsorcu::server::config::{
     AppConfig, ConfigError, load_config_from_sources, parse_audit_fallback_alert_threshold,
@@ -10,7 +11,7 @@ use mipsorcu::server::config::{
     parse_health_readiness_poll_interval, parse_jwks_refresh_interval, parse_restore_test_interval,
     parse_restore_test_sample_limit,
 };
-use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
+use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing};
 
 fn base_dotenv() -> HashMap<String, String> {
     HashMap::from([
@@ -44,6 +45,15 @@ fn base_dotenv() -> HashMap<String, String> {
             "https://example.supabase.co/auth/v1/.well-known/jwks.json".to_owned(),
         ),
     ])
+}
+
+fn temp_dir(test_name: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+
+    std::env::temp_dir().join(format!("mipsorcu-config-{test_name}-{unique}"))
 }
 
 #[test]
@@ -101,6 +111,90 @@ fn load_config_from_sources_prefers_process_env_over_dotenv() {
 
     assert_eq!(config.listen_addr, "127.0.0.1:4000".parse().unwrap());
     assert_eq!(config.supabase_url, "https://from-process.supabase.co");
+}
+
+#[test]
+fn load_config_from_sources_loads_master_keyring_from_directory() {
+    let key_dir = temp_dir("keyring");
+    fs::create_dir(&key_dir).expect("key directory should be created");
+    fs::write(key_dir.join("1.key"), hex::encode([7u8; MASTER_KEY_LENGTH]))
+        .expect("old key should be written");
+    fs::write(
+        key_dir.join("2.key"),
+        format!("{}\n", hex::encode([8u8; MASTER_KEY_LENGTH])),
+    )
+    .expect("new key should be written");
+
+    let mut dotenv = base_dotenv();
+    dotenv.remove("MIPSORCU_MASTER_KEY");
+    dotenv.remove("MIPSORCU_KEY_VERSION");
+    dotenv.insert(
+        "MIPSORCU_MASTER_KEY_DIR".to_owned(),
+        key_dir.to_string_lossy().into_owned(),
+    );
+    dotenv.insert("MIPSORCU_ACTIVE_KEY_VERSION".to_owned(), "2".to_owned());
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let config =
+        load_config_from_sources(&get_process_var, &dotenv).expect("keyring config should load");
+
+    assert!(config.master_key_ring.contains(KeyVersion::new(1).unwrap()));
+    assert!(config.master_key_ring.contains(KeyVersion::new(2).unwrap()));
+    assert_eq!(config.master_key_ring.active_key_version().get(), 2);
+
+    fs::remove_dir_all(key_dir).expect("key directory should be removed");
+}
+
+#[test]
+fn load_config_from_sources_rejects_duplicate_key_versions_in_directory() {
+    let key_dir = temp_dir("duplicate-keyring");
+    fs::create_dir(&key_dir).expect("key directory should be created");
+    fs::write(key_dir.join("1.key"), hex::encode([7u8; MASTER_KEY_LENGTH]))
+        .expect("key should be written");
+    fs::write(
+        key_dir.join("01.key"),
+        hex::encode([8u8; MASTER_KEY_LENGTH]),
+    )
+    .expect("duplicate key should be written");
+
+    let mut dotenv = base_dotenv();
+    dotenv.insert(
+        "MIPSORCU_MASTER_KEY_DIR".to_owned(),
+        key_dir.to_string_lossy().into_owned(),
+    );
+    dotenv.insert("MIPSORCU_ACTIVE_KEY_VERSION".to_owned(), "1".to_owned());
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let result = load_config_from_sources(&get_process_var, &dotenv);
+
+    assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+
+    fs::remove_dir_all(key_dir).expect("key directory should be removed");
+}
+
+#[test]
+fn load_config_from_sources_rejects_missing_active_key_in_directory() {
+    let key_dir = temp_dir("missing-active-keyring");
+    fs::create_dir(&key_dir).expect("key directory should be created");
+    fs::write(key_dir.join("1.key"), hex::encode([7u8; MASTER_KEY_LENGTH]))
+        .expect("key should be written");
+
+    let mut dotenv = base_dotenv();
+    dotenv.insert(
+        "MIPSORCU_MASTER_KEY_DIR".to_owned(),
+        key_dir.to_string_lossy().into_owned(),
+    );
+    dotenv.insert("MIPSORCU_ACTIVE_KEY_VERSION".to_owned(), "2".to_owned());
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let result = load_config_from_sources(&get_process_var, &dotenv);
+
+    assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+
+    fs::remove_dir_all(key_dir).expect("key directory should be removed");
 }
 
 #[test]
@@ -395,12 +489,16 @@ fn health_readiness_poll_interval_rejects_zero_empty_and_non_numeric_values() {
 #[test]
 fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     let master_key_bytes = vec![7; MASTER_KEY_LENGTH];
+    let key_version = KeyVersion::new(1).expect("key version should be valid");
     let config = AppConfig {
         listen_addr: "127.0.0.1:3000"
             .parse()
             .expect("listen address should parse"),
-        master_key: MasterKey::parse(&master_key_bytes).expect("master key should parse"),
-        key_version: KeyVersion::new(1).expect("key version should be valid"),
+        master_key_ring: MasterKeyRing::single(
+            key_version,
+            MasterKey::parse(&master_key_bytes).expect("master key should parse"),
+        )
+        .expect("master keyring should be valid"),
         supabase_url: "https://example.supabase.co".to_owned(),
         supabase_service_role_key: "service-role-secret".to_owned(),
         supabase_publishable_key: "publishable-secret".to_owned(),
