@@ -318,6 +318,7 @@ fn record_audit_resend_result(result: Result<ResendAuditSummary, AuditRecordErro
 
 fn resend_audit_error_kind(error: &AuditRecordError) -> &'static str {
     match error {
+        AuditRecordError::EventConstructionFailed(_) => "event_construction_failed",
         AuditRecordError::PrimaryAndFallbackFailed { .. } => "primary_and_fallback_failed",
         AuditRecordError::IdempotencyConflict => "idempotency_conflict",
         AuditRecordError::ResendReadFailed(_) => "resend_read_failed",

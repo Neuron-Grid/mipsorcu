@@ -51,13 +51,26 @@ pub(in crate::server) async fn decrypt_secret(
         Ok(row) => row,
         Err(FetchCurrentSecretVersionError::Upstream(rpc_error)) => {
             failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
-            failure.record().await;
+            if let Err(audit_err) = failure.record().await {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
             return Err(ApiError::from(rpc_error));
         }
         Err(FetchCurrentSecretVersionError::Api(api_error)) => {
-            failure
+            if let Err(audit_err) = failure
                 .log_and_record(&api_error, "fetch_current_secret_version")
-                .await;
+                .await
+            {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
             return Err(api_error);
         }
     };
@@ -70,9 +83,16 @@ pub(in crate::server) async fn decrypt_secret(
     let plaintext = match decrypt_prepared_input(state, input).await {
         Ok(plaintext) => plaintext,
         Err(error) => {
-            failure
+            if let Err(audit_err) = failure
                 .log_and_record(&error, "decrypt_current_secret_version")
-                .await;
+                .await
+            {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
             return Err(error);
         }
     };

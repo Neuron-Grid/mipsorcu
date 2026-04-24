@@ -60,7 +60,7 @@ impl<'a> FailureAuditContext<'a> {
         }
     }
 
-    pub async fn record(&self) {
+    pub async fn record(&self) -> Result<AuditRecordOutcome, AuditRecordError> {
         record_failure_audit_with_metadata(
             self.state,
             self.request_id,
@@ -69,10 +69,13 @@ impl<'a> FailureAuditContext<'a> {
             self.action,
             AuditMetadata::empty(),
         )
-        .await;
+        .await
     }
 
-    pub async fn record_with_metadata(&self, metadata_json: AuditMetadata) {
+    pub async fn record_with_metadata(
+        &self,
+        metadata_json: AuditMetadata,
+    ) -> Result<AuditRecordOutcome, AuditRecordError> {
         record_failure_audit_with_metadata(
             self.state,
             self.request_id,
@@ -81,12 +84,16 @@ impl<'a> FailureAuditContext<'a> {
             self.action,
             metadata_json,
         )
-        .await;
+        .await
     }
 
-    pub async fn log_and_record(&self, error: &impl Display, stage: &'static str) {
+    pub async fn log_and_record(
+        &self,
+        error: &impl Display,
+        stage: &'static str,
+    ) -> Result<AuditRecordOutcome, AuditRecordError> {
         self.log(error, stage);
-        self.record().await;
+        self.record().await
     }
 
     pub fn log_upstream_failure(&self, error: &SupabaseRpcError, stage: &'static str) {
@@ -221,7 +228,8 @@ pub async fn record_success_audit(
         }
         Err(
             error @ (AuditRecordError::ResendReadFailed(_)
-            | AuditRecordError::ResendMarkSentFailed(_)),
+            | AuditRecordError::ResendMarkSentFailed(_)
+            | AuditRecordError::EventConstructionFailed(_)),
         ) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
@@ -253,7 +261,7 @@ pub async fn record_restore_test_audit(
     state: &AppState,
     request_id: &RequestId,
     audit: RestoreTestAudit,
-) {
+) -> Result<AuditRecordOutcome, AuditRecordError> {
     let RestoreTestAudit {
         result,
         target_secret_id,
@@ -272,7 +280,7 @@ pub async fn record_restore_test_audit(
                 error_code = "audit_event_id_generation_failed",
                 "restore test audit setup failed"
             );
-            return;
+            return Err(AuditRecordError::EventConstructionFailed(error));
         }
     };
     let metadata_json = match metadata.with_current_source_event_at() {
@@ -286,7 +294,7 @@ pub async fn record_restore_test_audit(
                 error_code = "audit_metadata_build_failed",
                 "restore test audit metadata setup failed"
             );
-            return;
+            return Err(AuditRecordError::EventConstructionFailed(error));
         }
     };
     let event = match AuditEvent::new(AuditEventParts {
@@ -310,7 +318,7 @@ pub async fn record_restore_test_audit(
                 error_code = "audit_event_build_failed",
                 "restore test audit setup failed"
             );
-            return;
+            return Err(AuditRecordError::EventConstructionFailed(error));
         }
     };
 
@@ -323,6 +331,7 @@ pub async fn record_restore_test_audit(
                 audit_record_outcome = "primary_succeeded",
                 "restore test audit recorded"
             );
+            Ok(AuditRecordOutcome::PrimarySucceeded)
         }
         Ok(AuditRecordOutcome::FallbackSucceeded) => {
             tracing::warn!(
@@ -331,6 +340,7 @@ pub async fn record_restore_test_audit(
                 audit_record_outcome = "fallback_succeeded",
                 "restore test audit recorded to local fallback"
             );
+            Ok(AuditRecordOutcome::FallbackSucceeded)
         }
         Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
             tracing::error!(
@@ -342,6 +352,7 @@ pub async fn record_restore_test_audit(
                 audit_record_outcome = "both_failed",
                 "restore test audit recording failed"
             );
+            Err(error)
         }
         Err(error @ AuditRecordError::IdempotencyConflict) => {
             tracing::error!(
@@ -353,10 +364,12 @@ pub async fn record_restore_test_audit(
                 audit_record_outcome = "idempotency_conflict",
                 "restore test audit recording failed"
             );
+            Err(error)
         }
         Err(
             error @ (AuditRecordError::ResendReadFailed(_)
-            | AuditRecordError::ResendMarkSentFailed(_)),
+            | AuditRecordError::ResendMarkSentFailed(_)
+            | AuditRecordError::EventConstructionFailed(_)),
         ) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
@@ -367,6 +380,7 @@ pub async fn record_restore_test_audit(
                 audit_record_outcome = "unexpected_resend_error",
                 "restore test audit recording failed"
             );
+            Err(error)
         }
     }
 }
@@ -434,7 +448,7 @@ async fn record_failure_audit_with_metadata(
     target_secret_id: Option<&SecretId>,
     action: AuditAction,
     metadata_json: AuditMetadata,
-) {
+) -> Result<AuditRecordOutcome, AuditRecordError> {
     let audit_event_id = match AuditEventId::generate() {
         Ok(id) => id,
         Err(error) => {
@@ -447,7 +461,7 @@ async fn record_failure_audit_with_metadata(
                 error_code = "audit_event_id_generation_failed",
                 "failed to generate failure audit event id"
             );
-            return;
+            return Err(AuditRecordError::EventConstructionFailed(error));
         }
     };
 
@@ -470,7 +484,7 @@ async fn record_failure_audit_with_metadata(
                 error_code = "audit_event_build_failed",
                 "failed to construct failure audit event"
             );
-            return;
+            return Err(AuditRecordError::EventConstructionFailed(error));
         }
     };
 
@@ -485,6 +499,7 @@ async fn record_failure_audit_with_metadata(
                 audit_record_outcome = "primary_succeeded",
                 "failure audit recorded"
             );
+            Ok(AuditRecordOutcome::PrimarySucceeded)
         }
         Ok(AuditRecordOutcome::FallbackSucceeded) => {
             tracing::warn!(
@@ -494,6 +509,7 @@ async fn record_failure_audit_with_metadata(
                 audit_record_outcome = "fallback_succeeded",
                 "failure audit recorded to local fallback"
             );
+            Ok(AuditRecordOutcome::FallbackSucceeded)
         }
         Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
             readiness_state.mark_failure_audit_both_failed();
@@ -505,6 +521,7 @@ async fn record_failure_audit_with_metadata(
                 audit_record_outcome = "both_failed",
                 "audit recording failed (including fallback)"
             );
+            Err(error)
         }
         Err(error @ AuditRecordError::IdempotencyConflict) => {
             tracing::error!(
@@ -516,10 +533,12 @@ async fn record_failure_audit_with_metadata(
                 audit_record_outcome = "idempotency_conflict",
                 "audit recording failed"
             );
+            Err(error)
         }
         Err(
             error @ (AuditRecordError::ResendReadFailed(_)
-            | AuditRecordError::ResendMarkSentFailed(_)),
+            | AuditRecordError::ResendMarkSentFailed(_)
+            | AuditRecordError::EventConstructionFailed(_)),
         ) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
@@ -529,6 +548,7 @@ async fn record_failure_audit_with_metadata(
                 audit_record_outcome = "unexpected_resend_error",
                 "audit recording failed"
             );
+            Err(error)
         }
     }
 }

@@ -197,6 +197,7 @@ impl From<AuditEventError> for LocalAuditStoreError {
 
 #[derive(Debug)]
 pub enum AuditRecordError {
+    EventConstructionFailed(AuditEventError),
     PrimaryAndFallbackFailed {
         append_error: AuditAppendError,
         store_error: LocalAuditStoreError,
@@ -209,6 +210,9 @@ pub enum AuditRecordError {
 impl fmt::Display for AuditRecordError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EventConstructionFailed(error) => {
+                write!(formatter, "audit event construction failed: {error}")
+            }
             Self::PrimaryAndFallbackFailed {
                 append_error,
                 store_error,

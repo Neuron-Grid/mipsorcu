@@ -264,6 +264,17 @@ select is(
     'new secret write rejects blank device id'
 );
 
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000000001'
+            and public.audit_metadata_has_forbidden_key(ae.metadata_json)
+    ),
+    0,
+    'write RPC audit metadata passes forbidden key check'
+);
+
 select * from finish();
 
 rollback;

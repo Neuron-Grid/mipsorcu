@@ -100,9 +100,16 @@ pub(in crate::server) async fn create_secret(
     );
 
     if let Err(error) = authorize_new_secret_create(claims) {
-        failure
+        if let Err(audit_err) = failure
             .log_and_record(&error, "authorize_new_secret_create")
-            .await;
+            .await
+        {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %audit_err,
+                "failure audit recording also failed"
+            );
+        }
         return Err(ApiError::Forbidden("forbidden".to_owned()));
     }
 
@@ -110,9 +117,16 @@ pub(in crate::server) async fn create_secret(
         match prepare_new_secret_version_for_request(state, owner_user_id.clone(), command).await {
             Ok(prepared) => prepared,
             Err(error) => {
-                failure
+                if let Err(audit_err) = failure
                     .log_and_record(&error, "prepare_secret_version")
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        request_id = %request_id.as_canonical_string(),
+                        error = %audit_err,
+                        "failure audit recording also failed"
+                    );
+                }
                 return Err(error);
             }
         };
@@ -157,21 +171,41 @@ pub(in crate::server) async fn rotate_secret(
         Ok(current) => current,
         Err(FetchCurrentSecretVersionError::Upstream(rpc_error)) => {
             failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
-            failure.record().await;
+            if let Err(audit_err) = failure.record().await {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
             return Err(ApiError::from(rpc_error));
         }
         Err(FetchCurrentSecretVersionError::Api(api_error)) => {
-            failure
+            if let Err(audit_err) = failure
                 .log_and_record(&api_error, "fetch_current_secret_version")
-                .await;
+                .await
+            {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
             return Err(api_error);
         }
     };
 
     if let Err(error) = authorize_existing_secret_version_write(claims, current.owner_user_id()) {
-        failure
+        if let Err(audit_err) = failure
             .log_and_record(&error, "authorize_existing_secret_version_write")
-            .await;
+            .await
+        {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %audit_err,
+                "failure audit recording also failed"
+            );
+        }
         return Err(ApiError::Forbidden("forbidden".to_owned()));
     }
 
@@ -179,9 +213,16 @@ pub(in crate::server) async fn rotate_secret(
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            failure
+            if let Err(audit_err) = failure
                 .log_and_record(&error, "prepare_existing_secret_version")
-                .await;
+                .await
+            {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
             return Err(error);
         }
     };
@@ -200,9 +241,16 @@ async fn submit_prepared_secret_version(
     let rpc_params = match build_rpc_params(request_id, &prepared) {
         Ok(rpc_params) => rpc_params,
         Err(error) => {
-            failure
+            if let Err(audit_err) = failure
                 .log_and_record(&error, "build_write_secret_version_params")
-                .await;
+                .await
+            {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
             return Err(error);
         }
     };
@@ -222,9 +270,16 @@ async fn submit_prepared_secret_version(
         }
         Err(rpc_error) => {
             failure.log_upstream_failure(&rpc_error, "call_write_secret_version");
-            match upstream_failure_metadata {
+            let audit_result = match upstream_failure_metadata {
                 Some(metadata) => failure.record_with_metadata(metadata).await,
                 None => failure.record().await,
+            };
+            if let Err(audit_err) = audit_result {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
             }
             Err(ApiError::from(rpc_error))
         }

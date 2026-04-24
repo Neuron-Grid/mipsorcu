@@ -29,7 +29,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
         .await
     {
         Ok(rows) if rows.is_empty() => {
-            audit_reporter::record_restore_test_audit(
+            if let Err(audit_err) = audit_reporter::record_restore_test_audit(
                 state,
                 &request_id,
                 RestoreTestAudit {
@@ -40,7 +40,14 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
                     error_code: None,
                 },
             )
-            .await;
+            .await
+            {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "restore test audit recording failed"
+                );
+            }
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
                 action = "restore_test",
@@ -51,7 +58,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
         }
         Ok(rows) => rows,
         Err(_error) => {
-            audit_reporter::record_restore_test_audit(
+            if let Err(audit_err) = audit_reporter::record_restore_test_audit(
                 state,
                 &request_id,
                 RestoreTestAudit {
@@ -62,7 +69,14 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
                     error_code: Some("sample_fetch_failed"),
                 },
             )
-            .await;
+            .await
+            {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "restore test audit recording failed"
+                );
+            }
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 action = "restore_test",
@@ -87,7 +101,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
                     .as_ref()
                     .map(SecretId::as_canonical_string);
                 let log_key_version = failure_context.key_version.map(KeyVersion::get);
-                audit_reporter::record_restore_test_audit(
+                if let Err(audit_err) = audit_reporter::record_restore_test_audit(
                     state,
                     &request_id,
                     RestoreTestAudit {
@@ -102,7 +116,14 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
                         error_code: Some("row_validation_failed"),
                     },
                 )
-                .await;
+                .await
+                {
+                    tracing::error!(
+                        request_id = %request_id.as_canonical_string(),
+                        error = %audit_err,
+                        "restore test audit recording failed"
+                    );
+                }
                 tracing::error!(
                     request_id = %request_id.as_canonical_string(),
                     target_secret_id = log_target_secret_id.as_deref(),
@@ -129,7 +150,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
         .and_then(|result| result.map_err(ApiError::from));
 
         if decrypt_result.is_err() {
-            audit_reporter::record_restore_test_audit(
+            if let Err(audit_err) = audit_reporter::record_restore_test_audit(
                 state,
                 &request_id,
                 RestoreTestAudit {
@@ -144,7 +165,14 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
                     error_code: Some("decrypt_failed"),
                 },
             )
-            .await;
+            .await
+            {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %audit_err,
+                    "restore test audit recording failed"
+                );
+            }
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 target_secret_id = failure_context
@@ -164,7 +192,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
         }
     }
 
-    audit_reporter::record_restore_test_audit(
+    if let Err(audit_err) = audit_reporter::record_restore_test_audit(
         state,
         &request_id,
         RestoreTestAudit {
@@ -175,7 +203,14 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
             error_code: None,
         },
     )
-    .await;
+    .await
+    {
+        tracing::error!(
+            request_id = %request_id.as_canonical_string(),
+            error = %audit_err,
+            "restore test audit recording failed"
+        );
+    }
     tracing::info!(
         request_id = %request_id.as_canonical_string(),
         action = "restore_test",
