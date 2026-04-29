@@ -4,7 +4,7 @@ use mipsorcu::aad::AAD_VERSION_V1;
 use mipsorcu::{AadError, AadV1};
 use proptest::prelude::*;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::{Builder, Uuid};
@@ -78,6 +78,27 @@ fn aad_input_strategy() -> impl Strategy<Value = AadInput> {
         )
 }
 
+fn sample_stored_context() -> Result<Value, AadError> {
+    AadV1::parse(
+        "550e8400-e29b-41d4-a716-446655440000",
+        1,
+        "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "confidential",
+        "2026-04-08T12:00:00Z",
+    )
+    .and_then(|aad| aad.to_stored_context())
+}
+
+fn sample_stored_context_with_field(field: &'static str, value: Value) -> Result<Value, AadError> {
+    let mut context = sample_stored_context()?;
+    context
+        .as_object_mut()
+        .ok_or(AadError::ExpectedJsonObject)?
+        .insert(field.to_owned(), value);
+
+    Ok(context)
+}
+
 #[test]
 fn canonical_json_uses_alphabetical_keys_without_extra_whitespace() -> Result<(), AadError> {
     let aad = AadV1::parse(
@@ -149,6 +170,119 @@ fn stored_context_rejects_unexpected_fields() -> Result<(), AadError> {
         result,
         Err(AadError::UnexpectedField { field }) if field == "unexpected"
     ));
+
+    Ok(())
+}
+
+#[test]
+fn stored_context_rejects_non_number_aad_version_types() -> Result<(), AadError> {
+    let invalid_values = [json!("1"), json!(true), Value::Null, json!([]), json!({})];
+
+    for value in invalid_values {
+        let context = sample_stored_context_with_field("aad_version", value)?;
+        let result = AadV1::from_stored_context(&context);
+
+        assert!(matches!(
+            result,
+            Err(AadError::InvalidFieldType {
+                field: "aad_version",
+                ..
+            })
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn stored_context_rejects_invalid_aad_version_numbers() -> Result<(), AadError> {
+    let invalid_values = [
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!(u16::from(u8::MAX) + 1),
+    ];
+
+    for value in invalid_values {
+        let context = sample_stored_context_with_field("aad_version", value)?;
+        let result = AadV1::from_stored_context(&context);
+
+        assert!(matches!(
+            result,
+            Err(AadError::UnsupportedAadVersion { .. })
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn stored_context_rejects_non_number_version_types() -> Result<(), AadError> {
+    let invalid_values = [json!("1"), json!(true), Value::Null, json!([]), json!({})];
+
+    for value in invalid_values {
+        let context = sample_stored_context_with_field("version", value)?;
+        let result = AadV1::from_stored_context(&context);
+
+        assert!(matches!(
+            result,
+            Err(AadError::InvalidFieldType {
+                field: "version",
+                ..
+            })
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn stored_context_rejects_invalid_version_numbers() -> Result<(), AadError> {
+    let invalid_values = [
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!(u64::from(u32::MAX) + 1),
+    ];
+
+    for value in invalid_values {
+        let context = sample_stored_context_with_field("version", value)?;
+        let result = AadV1::from_stored_context(&context);
+
+        assert!(matches!(
+            result,
+            Err(AadError::InvalidPositiveInteger {
+                field: "version",
+                ..
+            })
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn stored_context_rejects_non_string_identity_and_metadata_fields() -> Result<(), AadError> {
+    let fields = ["secret_id", "owner_user_id", "classification", "created_at"];
+    let invalid_values = [json!(1), json!(true), Value::Null, json!([]), json!({})];
+
+    for field in fields {
+        for value in &invalid_values {
+            let context = sample_stored_context_with_field(field, value.clone())?;
+            let result = AadV1::from_stored_context(&context);
+
+            assert!(
+                matches!(
+                    result,
+                    Err(AadError::InvalidFieldType {
+                        field: actual,
+                        ..
+                    }) if actual == field
+                ),
+                "field {field} should reject non-string aad_context values"
+            );
+        }
+    }
 
     Ok(())
 }

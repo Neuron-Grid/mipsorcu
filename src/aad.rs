@@ -193,24 +193,26 @@ fn parse_required_positive_integer(
 }
 
 fn parse_positive_integer(value: &Value, field: &'static str) -> Result<u32, AadError> {
-    if let Some(number) = value.as_u64() {
-        let parsed = u32::try_from(number).map_err(|_| AadError::InvalidPositiveInteger {
+    if let Value::Number(number) = value {
+        let parsed = number
+            .as_u64()
+            .ok_or_else(|| AadError::InvalidPositiveInteger {
+                field,
+                value: number.to_string(),
+            })?;
+        let parsed = u32::try_from(parsed).map_err(|_| AadError::InvalidPositiveInteger {
             field,
             value: number.to_string(),
         })?;
 
-        return SecretVersion::new(parsed).map(SecretVersion::get);
-    }
-
-    if let Some(text) = value.as_str() {
-        let parsed = text
-            .parse::<u32>()
-            .map_err(|_| AadError::InvalidPositiveInteger {
+        if parsed == 0 {
+            return Err(AadError::InvalidPositiveInteger {
                 field,
-                value: text.to_owned(),
-            })?;
+                value: number.to_string(),
+            });
+        }
 
-        return SecretVersion::new(parsed).map(SecretVersion::get);
+        return Ok(parsed);
     }
 
     Err(AadError::InvalidFieldType {
@@ -222,16 +224,20 @@ fn parse_positive_integer(value: &Value, field: &'static str) -> Result<u32, Aad
 fn parse_aad_version(value: &Value) -> Result<u8, AadError> {
     let field = "aad_version";
 
-    if let Some(number) = value.as_u64() {
-        return u8::try_from(number).map_err(|_| AadError::UnsupportedAadVersion {
-            value: number.to_string(),
-        });
-    }
+    if let Value::Number(number) = value {
+        let parsed = number
+            .as_u64()
+            .and_then(|number| u8::try_from(number).ok())
+            .ok_or_else(|| AadError::UnsupportedAadVersion {
+                value: number.to_string(),
+            })?;
 
-    if let Some(text) = value.as_str() {
-        return text.parse::<u8>().map_err(|_| AadError::InvalidFieldType {
-            field,
-            expected: "the integer 1",
+        if parsed == AAD_VERSION_V1 {
+            return Ok(parsed);
+        }
+
+        return Err(AadError::UnsupportedAadVersion {
+            value: number.to_string(),
         });
     }
 

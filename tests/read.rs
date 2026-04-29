@@ -327,6 +327,34 @@ fn decrypt_rejects_invalid_aad_context_field_type_as_aad_error() -> TestResult<(
 }
 
 #[test]
+fn decrypt_rejects_quoted_numeric_aad_context_fields_as_aad_error() -> TestResult<()> {
+    let (master_key, prepared, _) =
+        prepared_secret_with_plaintext(b"dummy secret from read test".to_vec())?;
+    let cases = [("aad_version", json!("1")), ("version", json!("1"))];
+
+    for (field, value) in cases {
+        let mut parts = base_input_parts(&prepared, OWNER_USER_ID, prepared.version())?;
+        parts.aad_context = replace_aad_field(prepared.aad_context(), field, value)?;
+        let input = DecryptCurrentSecretVersionInput::new(parts);
+
+        let result = decrypt_current_secret_version(&master_key, input);
+
+        assert!(
+            matches!(
+                result,
+                Err(SecretDecryptError::Aad(AadError::InvalidFieldType {
+                    field: actual,
+                    ..
+                })) if actual == field
+            ),
+            "field {field} should reject quoted numeric aad_context values before decryption"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn decrypt_rejects_ciphertext_tampering_as_crypto_error() -> TestResult<()> {
     let (master_key, prepared, _) =
         prepared_secret_with_plaintext(b"dummy secret from read test".to_vec())?;

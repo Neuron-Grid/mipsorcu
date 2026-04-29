@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+    # jsonwebtoken pulls in rsa through the rust_crypto backend. Production code
+    # verifies RS256 JWTs with public keys only and does not perform RSA
+    # private-key operations; revisit if that changes.
+    "RUSTSEC-2023-0071",
+]
