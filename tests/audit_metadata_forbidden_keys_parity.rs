@@ -3,7 +3,7 @@ use std::fs;
 
 use mipsorcu::FORBIDDEN_AUDIT_METADATA_KEYS;
 
-const MIGRATION_PATH: &str = "supabase/migrations/700_align_audit_metadata_forbidden_keys.sql";
+const MIGRATION_PATH: &str = "supabase/migrations/300_create_audit_event_guards_and_rpc.sql";
 const START_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_START";
 const END_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_END";
 

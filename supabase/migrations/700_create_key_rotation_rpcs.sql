@@ -108,38 +108,38 @@ begin
             ] <> '{}'::jsonb
             or jsonb_typeof(rows.row_value -> 'id') <> 'string'
             or jsonb_typeof(rows.row_value -> 'encrypted_data_key') <> 'string'
-            or rows.row_value ->> 'encrypted_data_key' !~ '^\\x[0-9A-Fa-f]+$'
+            or rows.row_value ->> 'id' !~ '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+            or rows.row_value ->> 'encrypted_data_key' !~ '^\\x([0-9A-Fa-f]{2})+$'
     ) then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
-    drop table if exists pg_temp.key_rotation_rows;
-    create temp table key_rotation_rows (
-        id uuid primary key,
-        encrypted_data_key bytea not null check (octet_length(encrypted_data_key) > 0)
-    ) on commit drop;
+    if exists (
+        select 1
+        from (
+            select lower(rows.row_value ->> 'id') as id
+            from jsonb_array_elements(p_rows) as rows(row_value)
+            group by lower(rows.row_value ->> 'id')
+            having count(*) > 1
+        ) duplicate_rows
+    ) then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
 
-    begin
-        insert into key_rotation_rows (id, encrypted_data_key)
+    v_batch_size := jsonb_array_length(p_rows)::bigint;
+
+    with rotation_rows as (
         select
-            (rows.row_value ->> 'id')::uuid,
-            decode(substr(rows.row_value ->> 'encrypted_data_key', 3), 'hex')
-        from jsonb_array_elements(p_rows) as rows(row_value);
-    exception
-        when others then
-            raise exception 'invalid_rpc_input' using errcode = '22023';
-    end;
-
-    select count(*)::bigint
-    into v_batch_size
-    from key_rotation_rows;
-
-    with updated as (
+            (rows.row_value ->> 'id')::uuid as id,
+            decode(substr(rows.row_value ->> 'encrypted_data_key', 3), 'hex') as encrypted_data_key
+        from jsonb_array_elements(p_rows) as rows(row_value)
+    ),
+    updated as (
         update public.secret_versions sv
         set
             encrypted_data_key = rotation_rows.encrypted_data_key,
             key_version = p_new_key_version
-        from key_rotation_rows rotation_rows
+        from rotation_rows
         where sv.id = rotation_rows.id
             and sv.key_version = p_old_key_version
         returning sv.id
@@ -263,6 +263,18 @@ begin
     select v_remaining_count;
 end;
 $$;
+
+comment on function public.rpc_key_rotation_status(integer) is
+    'Counts rows still wrapped with a given Master Key version.';
+
+comment on function public.rpc_list_key_rotation_batch(integer, integer) is
+    'Lists encrypted data keys requiring rewrap for a Master Key rotation batch. Does not expose plaintext.';
+
+comment on function public.rpc_apply_key_rotation_batch(uuid, integer, integer, jsonb) is
+    'Applies a validated encrypted_data_key rewrap batch and records key_rotation_reencrypt audit in one transaction.';
+
+comment on function public.rpc_complete_key_rotation(uuid, integer, integer) is
+    'Completes Master Key rotation only after no rows remain on the old key version, then records key_rotation_complete audit.';
 
 revoke execute on function public.rpc_key_rotation_status(integer) from public, anon, authenticated;
 revoke execute on function public.rpc_key_rotation_status(integer) from public;

@@ -41,6 +41,9 @@ begin
 end;
 $$;
 
+comment on function public.rpc_sample_restore_test(integer) is
+    'Returns current encrypted rows for restore verification. Service-role only; plaintext recovery remains outside Postgres.';
+
 revoke execute on function public.rpc_sample_restore_test(integer) from public, anon, authenticated;
 revoke execute on function public.rpc_sample_restore_test(integer) from public;
 

@@ -97,7 +97,7 @@ select is(
 select ok(
     coalesce(
         position(
-            'SBC が AAD 構成時に決定した値を保存する' in test_helpers.column_comment(
+            'Timestamp determined by the SBC when constructing AAD' in test_helpers.column_comment(
                 'public.secret_versions'::regclass,
                 'created_at'
             )
@@ -110,7 +110,7 @@ select ok(
 select ok(
     coalesce(
         position(
-            '初回 secret_versions.created_at と同じ SBC 決定値' in test_helpers.column_comment(
+            'same SBC-determined timestamp as the initial secret_versions.created_at' in test_helpers.column_comment(
                 'public.secrets'::regclass,
                 'created_at'
             )
@@ -123,7 +123,7 @@ select ok(
 select ok(
     coalesce(
         position(
-            'tg_set_updated_at トリガで自動更新する' in test_helpers.column_comment(
+            'Automatically maintained by the tg_set_updated_at trigger' in test_helpers.column_comment(
                 'public.secrets'::regclass,
                 'updated_at'
             )
@@ -136,7 +136,7 @@ select ok(
 select ok(
     coalesce(
         position(
-            'metadata_json.source_event_at を参照する' in test_helpers.column_comment(
+            'producer-side event time is stored in metadata_json.source_event_at' in test_helpers.column_comment(
                 'public.audit_events'::regclass,
                 'occurred_at'
             )

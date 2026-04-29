@@ -306,6 +306,48 @@ select is(
     'apply key rotation batch rejects invalid input rows'
 );
 
+select is(
+    test_helpers.try_apply_key_rotation_batch(
+        '00000000-0000-4000-8000-000000000109',
+        1,
+        2,
+        jsonb_build_array(
+            jsonb_build_object(
+                'id',
+                '00000000-0000-4000-8000-000000000201',
+                'encrypted_data_key',
+                '\x' || repeat('f2', 73)
+            ),
+            jsonb_build_object(
+                'id',
+                '00000000-0000-4000-8000-000000000201',
+                'encrypted_data_key',
+                '\x' || repeat('f3', 73)
+            )
+        )
+    ),
+    'invalid_rpc_input',
+    'apply key rotation batch rejects duplicate input row ids'
+);
+
+select is(
+    test_helpers.try_apply_key_rotation_batch(
+        '00000000-0000-4000-8000-000000000110',
+        1,
+        2,
+        jsonb_build_array(
+            jsonb_build_object(
+                'id',
+                '00000000-0000-4000-8000-000000000202',
+                'encrypted_data_key',
+                '\xabc'
+            )
+        )
+    ),
+    'invalid_rpc_input',
+    'apply key rotation batch rejects malformed encrypted_data_key hex'
+);
+
 select * from finish();
 
 rollback;

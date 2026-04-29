@@ -1,6 +1,9 @@
 create schema if not exists extensions;
 create extension if not exists pgcrypto with schema extensions;
 
+comment on schema public is
+    'mipsorcu production schema. Stores ciphertext and non-secret metadata only; the SBC remains the trust boundary for keys, plaintext, JWT verification, and authorization.';
+
 create table public.secrets (
     id uuid primary key,
     current_version_id uuid,
@@ -14,6 +17,19 @@ create table public.secrets (
     constraint secrets_classification_not_blank check (btrim(classification) <> '')
 );
 
+comment on table public.secrets is
+    'Secret aggregate metadata. Owner and classification are stable after creation; current_version_id points to the only decryptable version.';
+comment on column public.secrets.current_version_id is
+    'Current decryptable version. RLS for authenticated reads exposes only this version through secret_versions.';
+comment on column public.secrets.owner_user_id is
+    'Supabase Auth user id that owns the secret. Authorization decisions are made on the SBC, with RLS as a read-side boundary.';
+comment on column public.secrets.classification is
+    'Immutable classification bound into each secret version AAD.';
+comment on column public.secrets.created_at is
+    'Secret aggregate metadata. Not bound into AAD. The write RPC stores the same SBC-determined timestamp as the initial secret_versions.created_at; the DB default is only a direct-insert fallback.';
+comment on column public.secrets.updated_at is
+    'Secret aggregate metadata. Automatically maintained by the tg_set_updated_at trigger.';
+
 create table public.secret_versions (
     id uuid primary key default gen_random_uuid(),
     secret_id uuid not null references public.secrets (id) on delete restrict,
@@ -22,6 +38,7 @@ create table public.secret_versions (
     encrypted_data_key bytea not null,
     key_version integer not null,
     algorithm text not null,
+    classification text not null,
     nonce_or_iv bytea not null,
     aad_context jsonb not null,
     created_by_user_id uuid not null references auth.users (id) on delete restrict,
@@ -34,6 +51,9 @@ create table public.secret_versions (
     ),
     constraint secret_versions_key_version_positive check (key_version > 0),
     constraint secret_versions_algorithm_fixed check (algorithm = 'xchacha20-poly1305'),
+    constraint secret_versions_classification_non_blank check (
+        btrim(classification) <> ''
+    ),
     constraint secret_versions_nonce_length check (octet_length(nonce_or_iv) = 24),
     constraint secret_versions_created_by_device_id_not_blank check (
         btrim(created_by_device_id) <> ''
@@ -61,17 +81,22 @@ create table public.secret_versions (
             'created_at'
         ] = '{}'::jsonb
     ),
+    constraint secret_versions_classification_matches_aad check (
+        aad_context ->> 'classification' = classification
+    ),
     constraint secret_versions_aad_context_matches_row check (
-        aad_context ->> 'aad_version' is not null
-        and aad_context ->> 'secret_id' is not null
-        and aad_context ->> 'version' is not null
-        and aad_context ->> 'owner_user_id' is not null
-        and aad_context ->> 'classification' is not null
-        and aad_context ->> 'created_at' is not null
+        jsonb_typeof(aad_context -> 'aad_version') = 'number'
+        and jsonb_typeof(aad_context -> 'secret_id') = 'string'
+        and jsonb_typeof(aad_context -> 'version') = 'number'
+        and jsonb_typeof(aad_context -> 'owner_user_id') = 'string'
+        and jsonb_typeof(aad_context -> 'classification') = 'string'
+        and jsonb_typeof(aad_context -> 'created_at') = 'string'
         and aad_context ->> 'aad_version' = '1'
         and aad_context ->> 'secret_id' = secret_id::text
-        and (aad_context ->> 'version')::integer = version
+        and aad_context ->> 'version' ~ '^[1-9][0-9]*$'
+        and aad_context ->> 'version' = version::text
         and aad_context ->> 'owner_user_id' = created_by_user_id::text
+        and aad_context ->> 'classification' = classification
         and btrim(aad_context ->> 'classification') <> ''
         and aad_context ->> 'created_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$'
         and (aad_context ->> 'created_at')::timestamptz = created_at
@@ -80,6 +105,25 @@ create table public.secret_versions (
     constraint secret_versions_secret_nonce_unique unique (secret_id, nonce_or_iv),
     constraint secret_versions_secret_id_id_unique unique (secret_id, id)
 );
+
+comment on table public.secret_versions is
+    'Encrypted secret versions. Stores ciphertext, wrapped data key, nonce, key version, and structured AAD context; plaintext is never stored.';
+comment on column public.secret_versions.ciphertext is
+    'AEAD ciphertext produced on the SBC. Plaintext must never be stored in Postgres.';
+comment on column public.secret_versions.encrypted_data_key is
+    'Data key wrapped by the SBC Master Key. Stored for rewrap and decrypt workflows, but forbidden in logs and audit metadata.';
+comment on column public.secret_versions.key_version is
+    'SBC Master Key version used to wrap encrypted_data_key.';
+comment on column public.secret_versions.algorithm is
+    'Fixed AEAD algorithm. Multiple algorithm support is intentionally not part of the MVP.';
+comment on column public.secret_versions.classification is
+    'Classification snapshot for this encrypted version. Must match secrets.classification and aad_context.classification.';
+comment on column public.secret_versions.nonce_or_iv is
+    'XChaCha20-Poly1305 nonce. Must be 24 bytes and unique per secret.';
+comment on column public.secret_versions.aad_context is
+    'Structured AAD v1 context with exactly six keys. Decrypt code must reconstruct canonical AAD on the SBC instead of serializing JSONB directly.';
+comment on column public.secret_versions.created_at is
+    'Timestamp determined by the SBC when constructing AAD. No DB default is allowed because this value is bound into AAD.';
 
 alter table public.secrets
     add constraint secrets_current_version_fk
@@ -123,6 +167,13 @@ create table public.audit_events (
     )
 );
 
+comment on table public.audit_events is
+    'Append-only audit source of truth. Runtime roles append through SECURITY DEFINER RPCs; direct DML privileges are revoked and UPDATE, DELETE, and TRUNCATE are rejected by trigger.';
+comment on column public.audit_events.metadata_json is
+    'Non-secret audit metadata. Forbidden secret-bearing keys are rejected recursively; source_event_at is reserved for producer-side event time.';
+comment on column public.audit_events.occurred_at is
+    'DB-confirmed audit event timestamp. For fallback resend events this is the resend time; producer-side event time is stored in metadata_json.source_event_at.';
+
 create index secret_versions_key_version_idx on public.secret_versions (key_version);
 create index secret_versions_created_by_user_id_idx
     on public.secret_versions (created_by_user_id);
@@ -146,7 +197,8 @@ alter table public.audit_events force row level security;
 revoke all on table public.secrets from anon, authenticated;
 revoke all on table public.secret_versions from anon, authenticated;
 revoke all on table public.audit_events from anon, authenticated;
+revoke all privileges on table public.audit_events from service_role;
+revoke select, insert, update, delete, truncate on table public.audit_events from service_role;
 
 grant all on table public.secrets to service_role;
 grant all on table public.secret_versions to service_role;
-grant all on table public.audit_events to service_role;

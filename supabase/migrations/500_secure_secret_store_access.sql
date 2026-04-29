@@ -4,6 +4,9 @@ for select
 to authenticated
 using ((select auth.uid()) = owner_user_id);
 
+comment on policy secrets_select_own on public.secrets is
+    'Allows authenticated users to read only their own secret aggregate metadata.';
+
 create policy secret_versions_select_current_own
 on public.secret_versions
 for select
@@ -18,6 +21,9 @@ using (
     )
 );
 
+comment on policy secret_versions_select_current_own on public.secret_versions is
+    'Allows authenticated users to read only the current version of their own secrets.';
+
 create policy audit_events_deny_all
 on public.audit_events
 as restrictive
@@ -26,9 +32,14 @@ to public
 using (false)
 with check (false);
 
+comment on policy audit_events_deny_all on public.audit_events is
+    'Restrictive deny-all policy for runtime roles; audit reads and writes must not bypass the dedicated RPC boundary.';
+
 revoke all on table public.secrets from anon, authenticated;
 revoke all on table public.secret_versions from anon, authenticated;
 revoke all on table public.audit_events from anon, authenticated;
+revoke all privileges on table public.audit_events from service_role;
+revoke select, insert, update, delete, truncate on table public.audit_events from service_role;
 
 grant select on table public.secrets to authenticated;
 grant select on table public.secret_versions to authenticated;
@@ -38,32 +49,3 @@ alter default privileges in schema public revoke all on sequences from anon, aut
 alter default privileges in schema public revoke all on functions from anon, authenticated;
 revoke execute on all functions in schema public from public;
 alter default privileges revoke execute on functions from public;
-
-grant execute on function public.rpc_append_audit_event(
-    uuid,
-    uuid,
-    uuid,
-    text,
-    text,
-    uuid,
-    text,
-    integer,
-    jsonb
-) to service_role;
-
-grant execute on function public.rpc_write_secret_version(
-    uuid,
-    text,
-    uuid,
-    uuid,
-    text,
-    text,
-    timestamptz,
-    integer,
-    bytea,
-    bytea,
-    integer,
-    text,
-    bytea,
-    jsonb
-) to service_role;

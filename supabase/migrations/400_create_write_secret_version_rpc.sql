@@ -52,18 +52,47 @@ begin
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
-    if p_action not in ('encrypt_create', 'encrypt_rotate')
-        or p_secret_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-        or btrim(p_classification) = ''
-        or btrim(p_created_by_device_id) = ''
-        or p_version <= 0
-        or octet_length(p_ciphertext) = 0
-        or octet_length(p_encrypted_data_key) = 0
-        or p_key_version <= 0
-        or p_algorithm <> 'xchacha20-poly1305'
-        or octet_length(p_nonce_or_iv) <> 24
-        or jsonb_typeof(p_aad_context) <> 'object'
-    then
+    if p_action not in ('encrypt_create', 'encrypt_rotate') then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if p_secret_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if btrim(p_classification) = '' then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if btrim(p_created_by_device_id) = '' then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if p_version <= 0 then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if octet_length(p_ciphertext) = 0 then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if octet_length(p_encrypted_data_key) = 0 then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if p_key_version <= 0 then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if p_algorithm <> 'xchacha20-poly1305' then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if octet_length(p_nonce_or_iv) <> 24 then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if jsonb_typeof(p_aad_context) is distinct from 'object' then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
@@ -89,17 +118,15 @@ begin
         raise exception 'aad_context_mismatch' using errcode = '22023';
     end if;
 
-    if p_aad_context ->> 'aad_version' is null
-        or p_aad_context ->> 'secret_id' is null
-        or p_aad_context ->> 'version' is null
-        or p_aad_context ->> 'owner_user_id' is null
-        or p_aad_context ->> 'classification' is null
-        or p_aad_context ->> 'created_at' is null
+    if jsonb_typeof(p_aad_context -> 'aad_version') is distinct from 'number'
+        or jsonb_typeof(p_aad_context -> 'secret_id') is distinct from 'string'
+        or jsonb_typeof(p_aad_context -> 'version') is distinct from 'number'
+        or jsonb_typeof(p_aad_context -> 'owner_user_id') is distinct from 'string'
+        or jsonb_typeof(p_aad_context -> 'classification') is distinct from 'string'
+        or jsonb_typeof(p_aad_context -> 'created_at') is distinct from 'string'
+        or p_aad_context ->> 'version' !~ '^[1-9][0-9]*$'
+        or p_aad_context ->> 'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$'
     then
-        raise exception 'aad_context_mismatch' using errcode = '22023';
-    end if;
-
-    if p_aad_context ->> 'created_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$' then
         raise exception 'aad_context_mismatch' using errcode = '22023';
     end if;
 
@@ -181,6 +208,7 @@ begin
         encrypted_data_key,
         key_version,
         algorithm,
+        classification,
         nonce_or_iv,
         aad_context,
         created_by_user_id,
@@ -194,6 +222,7 @@ begin
         p_encrypted_data_key,
         p_key_version,
         p_algorithm,
+        p_classification,
         p_nonce_or_iv,
         p_aad_context,
         p_owner_user_id,
@@ -300,6 +329,24 @@ begin
         v_purged_version_ids;
 end;
 $$;
+
+comment on function public.rpc_write_secret_version(
+    uuid,
+    text,
+    uuid,
+    uuid,
+    text,
+    text,
+    timestamptz,
+    integer,
+    bytea,
+    bytea,
+    integer,
+    text,
+    bytea,
+    jsonb
+) is
+    'Authoritative production write RPC for encrypt_create and encrypt_rotate. Inserts the version, advances current_version_id, appends success audit events, and purges versions beyond retention in one transaction.';
 
 revoke execute on function public.rpc_write_secret_version(
     uuid,

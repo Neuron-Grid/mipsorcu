@@ -42,23 +42,73 @@ as $$
         ) as metadata_keys(key)
         where jsonb_typeof(nodes.value) = 'object'
             and lower(metadata_keys.key) in (
+                -- FORBIDDEN_AUDIT_METADATA_KEYS_START
                 'plaintext',
+                'plain_text',
                 'decrypted',
-                'data_key',
+                'decrypted_data',
                 'master_key',
+                'data_key',
                 'jwt',
                 'service_role_key',
                 'secret_key',
                 'passphrase',
                 'ciphertext',
                 'encrypted_data_key'
+                -- FORBIDDEN_AUDIT_METADATA_KEYS_END
             )
     );
 $$;
 
+comment on function public.audit_metadata_has_forbidden_key(jsonb) is
+    'Recursive guard used by audit constraints and RPCs to reject metadata keys that could carry plaintext, keys, JWTs, or ciphertext material.';
+
+create function public.audit_metadata_source_event_at_is_valid(p_metadata_json jsonb)
+returns boolean
+language plpgsql
+stable
+set search_path = public, pg_temp
+as $$
+declare
+    v_source_event_at text;
+begin
+    if jsonb_typeof(p_metadata_json) <> 'object' then
+        return false;
+    end if;
+
+    if not (p_metadata_json ? 'source_event_at') then
+        return true;
+    end if;
+
+    if jsonb_typeof(p_metadata_json -> 'source_event_at') <> 'string' then
+        return false;
+    end if;
+
+    v_source_event_at := p_metadata_json ->> 'source_event_at';
+
+    if v_source_event_at !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$' then
+        return false;
+    end if;
+
+    begin
+        perform v_source_event_at::timestamptz;
+    exception
+        when others then
+            return false;
+    end;
+
+    return true;
+end;
+$$;
+
+comment on function public.audit_metadata_source_event_at_is_valid(jsonb) is
+    'Validates optional top-level metadata_json.source_event_at as canonical RFC 3339 UTC producer time.';
+
 alter table public.audit_events
     add constraint audit_events_metadata_json_no_forbidden_keys
-    check (not public.audit_metadata_has_forbidden_key(metadata_json));
+    check (not public.audit_metadata_has_forbidden_key(metadata_json)),
+    add constraint audit_events_metadata_json_source_event_at_valid
+    check (public.audit_metadata_source_event_at_is_valid(metadata_json));
 
 create function public.rpc_append_audit_event(
     p_audit_event_id uuid,
@@ -124,7 +174,9 @@ begin
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
-    if public.audit_metadata_has_forbidden_key(p_metadata_json) then
+    if public.audit_metadata_has_forbidden_key(p_metadata_json)
+        or not public.audit_metadata_source_event_at_is_valid(p_metadata_json)
+    then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
@@ -177,8 +229,23 @@ begin
 end;
 $$;
 
+comment on function public.rpc_append_audit_event(
+    uuid,
+    uuid,
+    uuid,
+    text,
+    text,
+    uuid,
+    text,
+    integer,
+    jsonb
+) is
+    'Audit append RPC for non-write-path audit events and failure events. Caller supplies a stable audit_event_id so fallback resend remains idempotent.';
+
 revoke execute on function public.audit_metadata_has_forbidden_key(jsonb) from public, anon, authenticated;
 revoke execute on function public.audit_metadata_has_forbidden_key(jsonb) from public;
+revoke execute on function public.audit_metadata_source_event_at_is_valid(jsonb) from public, anon, authenticated;
+revoke execute on function public.audit_metadata_source_event_at_is_valid(jsonb) from public;
 
 revoke execute on function public.rpc_append_audit_event(
     uuid,
