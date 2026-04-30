@@ -37,12 +37,19 @@ comment on policy audit_events_deny_all on public.audit_events is
 
 revoke all on table public.secrets from anon, authenticated;
 revoke all on table public.secret_versions from anon, authenticated;
+revoke all on table public.secret_nonce_ledger from anon, authenticated;
 revoke all on table public.audit_events from anon, authenticated;
 revoke all privileges on table public.audit_events from service_role;
 revoke select, insert, update, delete, truncate on table public.audit_events from service_role;
+revoke all privileges on table public.secret_nonce_ledger from service_role;
+revoke select, insert, update, delete, truncate on table public.secret_nonce_ledger from service_role;
+revoke insert, update, delete, truncate on table public.secrets from service_role;
+revoke insert, update, delete, truncate on table public.secret_versions from service_role;
 
 grant select on table public.secrets to authenticated;
 grant select on table public.secret_versions to authenticated;
+grant select on table public.secrets to service_role;
+grant select on table public.secret_versions to service_role;
 
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;

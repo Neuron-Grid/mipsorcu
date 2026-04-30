@@ -41,6 +41,7 @@ begin
         or p_old_key_version <= 0
         or p_limit is null
         or p_limit <= 0
+        or p_limit > 1000
     then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
@@ -88,6 +89,7 @@ begin
         or p_rows is null
         or jsonb_typeof(p_rows) <> 'array'
         or jsonb_array_length(p_rows) = 0
+        or jsonb_array_length(p_rows) > 1000
     then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
@@ -109,7 +111,7 @@ begin
             or jsonb_typeof(rows.row_value -> 'id') <> 'string'
             or jsonb_typeof(rows.row_value -> 'encrypted_data_key') <> 'string'
             or rows.row_value ->> 'id' !~ '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
-            or rows.row_value ->> 'encrypted_data_key' !~ '^\\x([0-9A-Fa-f]{2})+$'
+            or rows.row_value ->> 'encrypted_data_key' !~ '^\\x([0-9A-Fa-f]{2}){73}$'
     ) then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
@@ -268,10 +270,10 @@ comment on function public.rpc_key_rotation_status(integer) is
     'Counts rows still wrapped with a given Master Key version.';
 
 comment on function public.rpc_list_key_rotation_batch(integer, integer) is
-    'Lists encrypted data keys requiring rewrap for a Master Key rotation batch. Does not expose plaintext.';
+    'Lists encrypted data keys requiring rewrap for a Master Key rotation batch. Does not expose plaintext. The batch limit is capped at 1000.';
 
 comment on function public.rpc_apply_key_rotation_batch(uuid, integer, integer, jsonb) is
-    'Applies a validated encrypted_data_key rewrap batch and records key_rotation_reencrypt audit in one transaction.';
+    'Applies a validated encrypted_data_key rewrap batch and records key_rotation_reencrypt audit in one transaction. Each encrypted_data_key must be the 73-byte SBC envelope.';
 
 comment on function public.rpc_complete_key_rotation(uuid, integer, integer) is
     'Completes Master Key rotation only after no rows remain on the old key version, then records key_rotation_complete audit.';

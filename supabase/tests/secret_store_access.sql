@@ -180,6 +180,11 @@ select is(
                 ('public.secret_versions', 'insert'),
                 ('public.secret_versions', 'update'),
                 ('public.secret_versions', 'delete'),
+                ('public.secret_nonce_ledger', 'select'),
+                ('public.secret_nonce_ledger', 'insert'),
+                ('public.secret_nonce_ledger', 'update'),
+                ('public.secret_nonce_ledger', 'delete'),
+                ('public.secret_nonce_ledger', 'truncate'),
                 ('public.audit_events', 'select'),
                 ('public.audit_events', 'insert'),
                 ('public.audit_events', 'update'),
@@ -217,7 +222,12 @@ select is(
                 ('public.secrets', 'delete'),
                 ('public.secret_versions', 'insert'),
                 ('public.secret_versions', 'update'),
-                ('public.secret_versions', 'delete')
+                ('public.secret_versions', 'delete'),
+                ('public.secret_nonce_ledger', 'select'),
+                ('public.secret_nonce_ledger', 'insert'),
+                ('public.secret_nonce_ledger', 'update'),
+                ('public.secret_nonce_ledger', 'delete'),
+                ('public.secret_nonce_ledger', 'truncate')
             ) as table_privileges(table_name, privilege_name)
             where has_table_privilege(
                 'authenticated',
@@ -263,7 +273,12 @@ select is(
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where n.nspname = 'public'
-            and c.relname in ('secrets', 'secret_versions', 'audit_events')
+            and c.relname in (
+                'secrets',
+                'secret_versions',
+                'secret_nonce_ledger',
+                'audit_events'
+            )
     ),
     true,
     'secret store tables enable and force row level security'
@@ -306,6 +321,150 @@ select is(
     ),
     false,
     'service_role has no direct table privileges on audit_events'
+);
+
+select ok(
+    has_table_privilege('service_role', 'public.secrets', 'select'),
+    'service_role keeps direct select on secrets for current read paths'
+);
+
+select ok(
+    has_table_privilege('service_role', 'public.secret_versions', 'select'),
+    'service_role keeps direct select on secret_versions for current read paths'
+);
+
+select is(
+    (
+        select exists (
+            select 1
+            from (values
+                ('public.secrets', 'insert'),
+                ('public.secrets', 'update'),
+                ('public.secrets', 'delete'),
+                ('public.secrets', 'truncate'),
+                ('public.secret_versions', 'insert'),
+                ('public.secret_versions', 'update'),
+                ('public.secret_versions', 'delete'),
+                ('public.secret_versions', 'truncate')
+            ) as table_privileges(table_name, privilege_name)
+            where has_table_privilege(
+                'service_role',
+                table_privileges.table_name,
+                table_privileges.privilege_name
+            )
+        )
+    ),
+    false,
+    'service_role cannot write secrets or secret_versions directly'
+);
+
+select is(
+    (
+        select exists (
+            select 1
+            from (values
+                ('select'),
+                ('insert'),
+                ('update'),
+                ('delete'),
+                ('truncate')
+            ) as table_privileges(privilege_name)
+            where has_table_privilege(
+                'service_role',
+                'public.secret_nonce_ledger',
+                table_privileges.privilege_name
+            )
+        )
+    ),
+    false,
+    'service_role has no direct table privileges on secret_nonce_ledger'
+);
+
+select is(
+    (
+        with expected_rpc(proname) as (
+            values
+                ('rpc_write_secret_version'),
+                ('rpc_append_audit_event'),
+                ('rpc_sample_restore_test'),
+                ('rpc_key_rotation_status'),
+                ('rpc_list_key_rotation_batch'),
+                ('rpc_apply_key_rotation_batch'),
+                ('rpc_complete_key_rotation')
+        ),
+        table_owner as (
+            select c.relowner
+            from pg_class c
+            where c.oid = 'public.secrets'::regclass
+        )
+        select count(*)::integer
+        from expected_rpc e
+        join pg_proc p on p.proname = e.proname
+        join pg_namespace n on n.oid = p.pronamespace
+        cross join table_owner t
+        where n.nspname = 'public'
+            and p.prosecdef
+            and p.proowner = t.relowner
+            and pg_get_userbyid(p.proowner) not in (
+                'anon',
+                'authenticated',
+                'service_role'
+            )
+    ),
+    7,
+    'service-role RPCs are SECURITY DEFINER and owned by the schema/table owner, not runtime roles'
+);
+
+set local role service_role;
+
+select is(
+    (
+        select count(*)::integer
+        from public.rpc_write_secret_version(
+            '00000000-0000-4000-8000-000000000020',
+            'encrypt_create',
+            '750e8400-e29b-41d4-a716-446655440000',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            'sbc-device-1',
+            '2026-04-08T12:00:00Z',
+            1,
+            decode(repeat('ac', 32), 'hex'),
+            decode(repeat('bd', 73), 'hex'),
+            1,
+            'xchacha20-poly1305',
+            decode(repeat('21', 24), 'hex'),
+            jsonb_build_object(
+                'aad_version',
+                1,
+                'secret_id',
+                '750e8400-e29b-41d4-a716-446655440000',
+                'version',
+                1,
+                'owner_user_id',
+                'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                'classification',
+                'confidential',
+                'created_at',
+                '2026-04-08T12:00:00Z'
+            )
+        )
+    ),
+    1,
+    'service_role can execute write RPC without direct table DML privileges'
+);
+
+reset role;
+
+select is(
+    (
+        select count(*)::integer
+        from public.secret_nonce_ledger snl
+        where snl.secret_id = '750e8400-e29b-41d4-a716-446655440000'
+            and snl.nonce_or_iv = decode(repeat('21', 24), 'hex')
+    ),
+    1,
+    'write RPC inserts nonce ledger rows through the SECURITY DEFINER boundary'
 );
 
 select is(
@@ -394,6 +553,24 @@ select is(
     ),
     1,
     'restore test sample RPC respects the requested limit'
+);
+
+select is(
+    test_helpers.try_sample_restore_test(0),
+    'invalid_rpc_input',
+    'restore test sample RPC rejects zero limit'
+);
+
+select is(
+    test_helpers.try_sample_restore_test(1001),
+    'invalid_rpc_input',
+    'restore test sample RPC rejects excessive limit'
+);
+
+select is(
+    test_helpers.try_sample_restore_test(1000),
+    'ok',
+    'restore test sample RPC accepts the maximum limit'
 );
 
 select is(

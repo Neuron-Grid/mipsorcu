@@ -16,7 +16,8 @@ security definer
 set search_path = public, pg_temp
 as $$
 begin
-    if p_limit is null or p_limit <= 0 then
+    -- Bound restore sampling to the local Supabase max_rows/MVP batch limit.
+    if p_limit is null or p_limit <= 0 or p_limit > 1000 then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
@@ -42,7 +43,7 @@ end;
 $$;
 
 comment on function public.rpc_sample_restore_test(integer) is
-    'Returns current encrypted rows for restore verification. Service-role only; plaintext recovery remains outside Postgres.';
+    'Returns current encrypted rows for restore verification. Service-role only; plaintext recovery remains outside Postgres. The sample limit is capped at 1000.';
 
 revoke execute on function public.rpc_sample_restore_test(integer) from public, anon, authenticated;
 revoke execute on function public.rpc_sample_restore_test(integer) from public;

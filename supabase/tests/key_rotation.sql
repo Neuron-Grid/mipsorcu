@@ -80,6 +80,24 @@ select is(
     'key rotation batch respects the requested limit'
 );
 
+select is(
+    test_helpers.try_list_key_rotation_batch(1, 0),
+    'invalid_rpc_input',
+    'key rotation batch listing rejects zero limit'
+);
+
+select is(
+    test_helpers.try_list_key_rotation_batch(1, 1001),
+    'invalid_rpc_input',
+    'key rotation batch listing rejects excessive limit'
+);
+
+select is(
+    test_helpers.try_list_key_rotation_batch(1, 1000),
+    'ok',
+    'key rotation batch listing accepts the maximum limit'
+);
+
 create temp table first_apply_result as
 select *
 from public.rpc_apply_key_rotation_batch(
@@ -346,6 +364,42 @@ select is(
     ),
     'invalid_rpc_input',
     'apply key rotation batch rejects malformed encrypted_data_key hex'
+);
+
+select is(
+    test_helpers.try_apply_key_rotation_batch(
+        '00000000-0000-4000-8000-000000000111',
+        1,
+        2,
+        jsonb_build_array(
+            jsonb_build_object(
+                'id',
+                '00000000-0000-4000-8000-000000000203',
+                'encrypted_data_key',
+                '\x' || repeat('f4', 72)
+            )
+        )
+    ),
+    'invalid_rpc_input',
+    'apply key rotation batch rejects 72-byte encrypted_data_key hex'
+);
+
+select is(
+    test_helpers.try_apply_key_rotation_batch(
+        '00000000-0000-4000-8000-000000000112',
+        1,
+        2,
+        jsonb_build_array(
+            jsonb_build_object(
+                'id',
+                '00000000-0000-4000-8000-000000000204',
+                'encrypted_data_key',
+                '\x' || repeat('f5', 74)
+            )
+        )
+    ),
+    'invalid_rpc_input',
+    'apply key rotation batch rejects 74-byte encrypted_data_key hex'
 );
 
 select * from finish();

@@ -33,6 +33,7 @@ declare
     v_secret_version_from_aad integer;
     v_aad_created_at timestamptz;
     v_audit_metadata jsonb;
+    v_constraint_name text;
 begin
     if p_request_id is null
         or p_action is null
@@ -76,7 +77,8 @@ begin
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
-    if octet_length(p_encrypted_data_key) = 0 then
+    -- Keep aligned with Rust ENCRYPTED_DATA_KEY_LENGTH: 1 + 24 + 32 + 16 = 73 bytes.
+    if octet_length(p_encrypted_data_key) <> 73 then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
@@ -201,35 +203,62 @@ begin
         end if;
     end if;
 
-    insert into public.secret_versions (
-        secret_id,
-        version,
-        ciphertext,
-        encrypted_data_key,
-        key_version,
-        algorithm,
-        classification,
-        nonce_or_iv,
-        aad_context,
-        created_by_user_id,
-        created_by_device_id,
-        created_at
-    )
-    values (
-        p_secret_id,
-        p_version,
-        p_ciphertext,
-        p_encrypted_data_key,
-        p_key_version,
-        p_algorithm,
-        p_classification,
-        p_nonce_or_iv,
-        p_aad_context,
-        p_owner_user_id,
-        p_created_by_device_id,
-        p_created_at
-    )
-    returning id into v_secret_version_id;
+    begin
+        insert into public.secret_versions (
+            secret_id,
+            version,
+            ciphertext,
+            encrypted_data_key,
+            key_version,
+            algorithm,
+            classification,
+            nonce_or_iv,
+            aad_context,
+            created_by_user_id,
+            created_by_device_id,
+            created_at
+        )
+        values (
+            p_secret_id,
+            p_version,
+            p_ciphertext,
+            p_encrypted_data_key,
+            p_key_version,
+            p_algorithm,
+            p_classification,
+            p_nonce_or_iv,
+            p_aad_context,
+            p_owner_user_id,
+            p_created_by_device_id,
+            p_created_at
+        )
+        returning id into v_secret_version_id;
+    exception
+        when unique_violation then
+            get stacked diagnostics v_constraint_name = constraint_name;
+
+            if v_constraint_name = 'secret_versions_secret_nonce_unique' then
+                raise exception 'nonce_reuse_detected' using errcode = '23505';
+            end if;
+
+            raise;
+    end;
+
+    begin
+        insert into public.secret_nonce_ledger (
+            secret_id,
+            nonce_or_iv,
+            first_secret_version_id
+        )
+        values (
+            p_secret_id,
+            p_nonce_or_iv,
+            v_secret_version_id
+        );
+    exception
+        when unique_violation then
+            raise exception 'nonce_reuse_detected' using errcode = '23505';
+    end;
 
     update public.secrets
     set current_version_id = v_secret_version_id

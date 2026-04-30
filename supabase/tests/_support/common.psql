@@ -105,6 +105,51 @@ exception
 end;
 $$;
 
+create function test_helpers.try_write_secret_version_diagnostics(
+    p_request_id uuid,
+    p_action text,
+    p_secret_id uuid,
+    p_owner_user_id uuid,
+    p_classification text,
+    p_created_by_device_id text,
+    p_created_at timestamptz,
+    p_version integer,
+    p_ciphertext bytea,
+    p_encrypted_data_key bytea,
+    p_key_version integer,
+    p_algorithm text,
+    p_nonce_or_iv bytea,
+    p_aad_context jsonb
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_write_secret_version(
+        p_request_id,
+        p_action,
+        p_secret_id,
+        p_owner_user_id,
+        p_classification,
+        p_created_by_device_id,
+        p_created_at,
+        p_version,
+        p_ciphertext,
+        p_encrypted_data_key,
+        p_key_version,
+        p_algorithm,
+        p_nonce_or_iv,
+        p_aad_context
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlstate || ':' || sqlerrm;
+end;
+$$;
+
 create function test_helpers.try_append_audit_event(
     p_audit_event_id uuid,
     p_request_id uuid,
@@ -155,6 +200,42 @@ begin
         p_old_key_version,
         p_new_key_version,
         p_rows
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_sample_restore_test(p_limit integer)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_sample_restore_test(p_limit);
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_list_key_rotation_batch(
+    p_old_key_version integer,
+    p_limit integer
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_list_key_rotation_batch(
+        p_old_key_version,
+        p_limit
     );
 
     return 'ok';
@@ -317,6 +398,25 @@ exception
 end;
 $$;
 
+create function test_helpers.try_update_secret_owner(
+    p_secret_id uuid,
+    p_owner_user_id uuid
+)
+returns text
+language plpgsql
+as $$
+begin
+    update public.secrets
+    set owner_user_id = p_owner_user_id
+    where id = p_secret_id;
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
 create function test_helpers.try_insert_secret_version(
     p_secret_id uuid,
     p_owner_user_id uuid,
@@ -367,6 +467,73 @@ begin
         p_classification,
         decode(repeat('0a', 24), 'hex'),
         p_aad_context,
+        p_owner_user_id,
+        'sbc-device-1',
+        p_created_at
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_insert_secret_version_with_encrypted_data_key(
+    p_secret_id uuid,
+    p_owner_user_id uuid,
+    p_created_at timestamptz,
+    p_encrypted_data_key bytea
+)
+returns text
+language plpgsql
+as $$
+begin
+    insert into public.secrets (
+        id,
+        owner_user_id,
+        classification,
+        created_at,
+        updated_at
+    )
+    values (
+        p_secret_id,
+        p_owner_user_id,
+        'confidential',
+        p_created_at,
+        now()
+    );
+
+    insert into public.secret_versions (
+        secret_id,
+        version,
+        ciphertext,
+        encrypted_data_key,
+        key_version,
+        algorithm,
+        classification,
+        nonce_or_iv,
+        aad_context,
+        created_by_user_id,
+        created_by_device_id,
+        created_at
+    )
+    values (
+        p_secret_id,
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        p_encrypted_data_key,
+        1,
+        'xchacha20-poly1305',
+        'confidential',
+        decode(repeat('0a', 24), 'hex'),
+        test_helpers.aad_context(
+            p_secret_id,
+            1,
+            p_owner_user_id,
+            'confidential',
+            to_char(p_created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        ),
         p_owner_user_id,
         'sbc-device-1',
         p_created_at
