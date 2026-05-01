@@ -1,5 +1,8 @@
 use axum::Router;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
+use std::time::Duration;
 use tower_http::LatencyUnit;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::{
@@ -11,7 +14,7 @@ use crate::server::middleware;
 use crate::server::state::AppState;
 
 pub fn build_app(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/v1/secrets", post(handlers::create_secret))
         .route(
             "/v1/secrets/{secret_id}/versions",
@@ -23,7 +26,23 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/health", get(handlers::health_check))
         .route("/ready", get(handlers::ready_check))
-        .fallback(handlers::not_found)
+        .fallback(handlers::not_found);
+
+    apply_standard_layers(router, state)
+}
+
+pub(crate) fn apply_standard_layers(router: Router<AppState>, state: AppState) -> Router {
+    let handler_timeout = state.http_handler_timeout;
+    let rate_limit_requests = state.http_rate_limit_requests;
+    let rate_limit_window = state.http_rate_limit_window;
+    let runtime_resilience =
+        middleware::RuntimeResilience::new(handler_timeout, rate_limit_requests, rate_limit_window);
+
+    router
+        .layer(axum::middleware::from_fn_with_state(
+            runtime_resilience,
+            middleware::enforce_runtime_resilience,
+        ))
         .layer(axum::middleware::from_fn(
             middleware::attach_request_context,
         ))
@@ -47,4 +66,23 @@ pub fn build_app(state: AppState) -> Router {
                 ),
         )
         .with_state(state)
+}
+
+#[doc(hidden)]
+pub fn build_sleep_app_for_testing(state: AppState, sleep_duration: Duration) -> Router {
+    let router = Router::<AppState>::new()
+        .route(
+            "/__test/sleep",
+            get(move || async move {
+                tokio::time::sleep(sleep_duration).await;
+                StatusCode::NO_CONTENT
+            }),
+        )
+        .fallback(|| async {
+            handlers::not_found(middleware::RequestContext::new(crate::RequestId::nil()))
+                .await
+                .into_response()
+        });
+
+    apply_standard_layers(router, state)
 }

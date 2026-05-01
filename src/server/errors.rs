@@ -17,6 +17,8 @@ pub enum ApiError {
     BadRequest(String),
     UnsupportedMediaType(String),
     PayloadTooLarge(String),
+    RequestTimeout,
+    RateLimited,
     DecryptFailed,
     KeyUnavailable,
     AuditRecordFailed,
@@ -37,6 +39,8 @@ impl fmt::Display for ApiError {
                 write!(formatter, "unsupported media type: {message}")
             }
             Self::PayloadTooLarge(message) => write!(formatter, "payload too large: {message}"),
+            Self::RequestTimeout => write!(formatter, "request timeout"),
+            Self::RateLimited => write!(formatter, "rate limited"),
             Self::DecryptFailed => write!(formatter, "decrypt failed"),
             Self::KeyUnavailable => write!(formatter, "key unavailable"),
             Self::AuditRecordFailed => write!(formatter, "audit record failed"),
@@ -65,6 +69,8 @@ impl ApiError {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
             }
             Self::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+            Self::RequestTimeout => (StatusCode::SERVICE_UNAVAILABLE, "request_timeout"),
+            Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             Self::DecryptFailed => (StatusCode::BAD_REQUEST, "decrypt_failed"),
             Self::KeyUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "key_unavailable"),
             Self::AuditRecordFailed => (StatusCode::SERVICE_UNAVAILABLE, "audit_record_failed"),

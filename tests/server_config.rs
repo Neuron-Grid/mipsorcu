@@ -8,8 +8,10 @@ use mipsorcu::server::config::{
     AppConfig, ConfigError, load_config_from_sources, parse_audit_fallback_alert_threshold,
     parse_audit_fallback_archive_auto_delete_enabled, parse_audit_fallback_archive_retention_days,
     parse_audit_fallback_rotate_size, parse_audit_resend_interval, parse_dotenv_contents,
-    parse_health_readiness_poll_interval, parse_jwks_refresh_interval, parse_restore_test_interval,
-    parse_restore_test_sample_limit,
+    parse_health_readiness_poll_interval, parse_http_handler_timeout,
+    parse_http_rate_limit_requests, parse_http_rate_limit_window, parse_jwks_refresh_interval,
+    parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
+    parse_restore_test_interval, parse_restore_test_sample_limit,
 };
 use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing};
 
@@ -487,6 +489,153 @@ fn health_readiness_poll_interval_rejects_zero_empty_and_non_numeric_values() {
 }
 
 #[test]
+fn outbound_http_connect_timeout_defaults_to_five_seconds() {
+    let timeout =
+        parse_outbound_http_connect_timeout(None).expect("default timeout should be valid");
+
+    assert_eq!(timeout, Duration::from_secs(5));
+}
+
+#[test]
+fn outbound_http_request_timeout_defaults_to_twenty_seconds() {
+    let timeout =
+        parse_outbound_http_request_timeout(None).expect("default timeout should be valid");
+
+    assert_eq!(timeout, Duration::from_secs(20));
+}
+
+#[test]
+fn outbound_http_timeouts_accept_positive_seconds() {
+    assert_eq!(
+        parse_outbound_http_connect_timeout(Some("3".to_owned()))
+            .expect("positive connect timeout should be valid"),
+        Duration::from_secs(3)
+    );
+    assert_eq!(
+        parse_outbound_http_request_timeout(Some("9".to_owned()))
+            .expect("positive request timeout should be valid"),
+        Duration::from_secs(9)
+    );
+}
+
+#[test]
+fn outbound_http_timeouts_reject_zero_empty_and_non_numeric_values() {
+    for value in ["0", "", "not-a-number"] {
+        assert!(matches!(
+            parse_outbound_http_connect_timeout(Some(value.to_owned())),
+            Err(ConfigError::InvalidValue { .. })
+        ));
+        assert!(matches!(
+            parse_outbound_http_request_timeout(Some(value.to_owned())),
+            Err(ConfigError::InvalidValue { .. })
+        ));
+    }
+}
+
+#[test]
+fn http_handler_timeout_defaults_to_seventy_five_seconds() {
+    let timeout = parse_http_handler_timeout(None, Duration::from_secs(20))
+        .expect("default handler timeout should be valid");
+
+    assert_eq!(timeout, Duration::from_secs(75));
+}
+
+#[test]
+fn http_handler_timeout_accepts_value_at_outbound_lower_bound() {
+    let timeout = parse_http_handler_timeout(Some("45".to_owned()), Duration::from_secs(10))
+        .expect("handler timeout at lower bound should be valid");
+
+    assert_eq!(timeout, Duration::from_secs(45));
+}
+
+#[test]
+fn http_handler_timeout_rejects_value_below_outbound_lower_bound() {
+    let result = parse_http_handler_timeout(Some("44".to_owned()), Duration::from_secs(10));
+
+    assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+}
+
+#[test]
+fn http_handler_timeout_rejects_zero_empty_and_non_numeric_values() {
+    for value in ["0", "", "not-a-number"] {
+        assert!(matches!(
+            parse_http_handler_timeout(Some(value.to_owned()), Duration::from_secs(1)),
+            Err(ConfigError::InvalidValue { .. })
+        ));
+    }
+}
+
+#[test]
+fn http_rate_limit_defaults_to_three_hundred_requests_per_minute() {
+    let requests =
+        parse_http_rate_limit_requests(None).expect("default request limit should be valid");
+    let window = parse_http_rate_limit_window(None).expect("default rate window should be valid");
+
+    assert_eq!(requests, 300);
+    assert_eq!(window, Duration::from_secs(60));
+}
+
+#[test]
+fn http_rate_limit_accepts_positive_values() {
+    let requests = parse_http_rate_limit_requests(Some("7".to_owned()))
+        .expect("positive request limit should be valid");
+    let window = parse_http_rate_limit_window(Some("11".to_owned()))
+        .expect("positive rate window should be valid");
+
+    assert_eq!(requests, 7);
+    assert_eq!(window, Duration::from_secs(11));
+}
+
+#[test]
+fn http_rate_limit_rejects_zero_empty_and_non_numeric_values() {
+    for value in ["0", "", "not-a-number"] {
+        assert!(matches!(
+            parse_http_rate_limit_requests(Some(value.to_owned())),
+            Err(ConfigError::InvalidValue { .. })
+        ));
+        assert!(matches!(
+            parse_http_rate_limit_window(Some(value.to_owned())),
+            Err(ConfigError::InvalidValue { .. })
+        ));
+    }
+}
+
+#[test]
+fn load_config_from_sources_loads_runtime_resilience_env_values() {
+    let mut dotenv = base_dotenv();
+    dotenv.insert(
+        "MIPSORCU_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS".to_owned(),
+        "4".to_owned(),
+    );
+    dotenv.insert(
+        "MIPSORCU_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS".to_owned(),
+        "8".to_owned(),
+    );
+    dotenv.insert(
+        "MIPSORCU_HTTP_HANDLER_TIMEOUT_SECONDS".to_owned(),
+        "39".to_owned(),
+    );
+    dotenv.insert(
+        "MIPSORCU_HTTP_RATE_LIMIT_REQUESTS".to_owned(),
+        "9".to_owned(),
+    );
+    dotenv.insert(
+        "MIPSORCU_HTTP_RATE_LIMIT_WINDOW_SECONDS".to_owned(),
+        "10".to_owned(),
+    );
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let config = load_config_from_sources(&get_process_var, &dotenv).expect("config should load");
+
+    assert_eq!(config.outbound_http_connect_timeout, Duration::from_secs(4));
+    assert_eq!(config.outbound_http_request_timeout, Duration::from_secs(8));
+    assert_eq!(config.http_handler_timeout, Duration::from_secs(39));
+    assert_eq!(config.http_rate_limit_requests, 9);
+    assert_eq!(config.http_rate_limit_window, Duration::from_secs(10));
+}
+
+#[test]
 fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     let master_key_bytes = vec![7; MASTER_KEY_LENGTH];
     let key_version = KeyVersion::new(1).expect("key version should be valid");
@@ -507,6 +656,11 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         jwks_url: "https://example.supabase.co/auth/v1/.well-known/jwks.json".to_owned(),
         jwks_refresh_interval: Duration::from_secs(300),
         health_readiness_poll_interval: Duration::from_secs(45),
+        outbound_http_connect_timeout: Duration::from_secs(4),
+        outbound_http_request_timeout: Duration::from_secs(8),
+        http_handler_timeout: Duration::from_secs(39),
+        http_rate_limit_requests: 9,
+        http_rate_limit_window: Duration::from_secs(10),
         audit_fallback_path: PathBuf::from("/tmp/mipsorcu-audit.jsonl"),
         audit_resend_interval: Duration::from_secs(60),
         audit_fallback_alert_threshold_bytes: 4096,
@@ -536,6 +690,16 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("300"));
     assert!(output.contains("health_readiness_poll_interval_seconds"));
     assert!(output.contains("45"));
+    assert!(output.contains("outbound_http_connect_timeout_seconds"));
+    assert!(output.contains("4"));
+    assert!(output.contains("outbound_http_request_timeout_seconds"));
+    assert!(output.contains("8"));
+    assert!(output.contains("http_handler_timeout_seconds"));
+    assert!(output.contains("39"));
+    assert!(output.contains("http_rate_limit_requests"));
+    assert!(output.contains("9"));
+    assert!(output.contains("http_rate_limit_window_seconds"));
+    assert!(output.contains("10"));
     assert!(!output.contains("service-role-secret"));
     assert!(!output.contains("publishable-secret"));
 }

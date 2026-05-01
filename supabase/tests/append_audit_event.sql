@@ -423,6 +423,69 @@ select ok(
     'direct audit_events insert rejects synchronized decrypted_data key case-insensitively'
 );
 
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000032',
+        '00000000-0000-4000-8000-000000000032',
+        null,
+        null,
+        'auth_failure',
+        null,
+        'failure',
+        null,
+        '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'ok',
+    'append audit RPC accepts auth_failure failure with null actor and target'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.id = '10000000-0000-4000-8000-000000000032'
+            and ae.action = 'auth_failure'
+            and ae.result = 'failure'
+            and ae.actor_user_id is null
+            and ae.target_secret_id is null
+    ),
+    1,
+    'append audit RPC stores auth_failure failure audit event'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000033',
+        '00000000-0000-4000-8000-000000000033',
+        null,
+        null,
+        'auth_failure',
+        null,
+        'success',
+        null,
+        '{"error_code":"unexpected_success","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects auth_failure success'
+);
+
+select ok(
+    position(
+        'audit_events_auth_failure_failure_only' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000034',
+            '00000000-0000-4000-8000-000000000034',
+            null,
+            null,
+            'auth_failure',
+            null,
+            'success',
+            null,
+            '{"error_code":"unexpected_success","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects auth_failure success via table constraint'
+);
+
 select * from finish();
 
 rollback;

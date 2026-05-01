@@ -196,6 +196,16 @@ fn audit_event_accepts_valid_decrypt_failure_event() -> TestResult<()> {
 }
 
 #[test]
+fn audit_action_accepts_auth_failure() -> TestResult<()> {
+    let action = AuditAction::parse("auth_failure")?;
+
+    assert_eq!(action, AuditAction::AuthFailure);
+    assert_eq!(action.as_str(), "auth_failure");
+
+    Ok(())
+}
+
+#[test]
 fn audit_event_rejects_unknown_action_and_result() {
     assert!(matches!(
         AuditAction::parse("unknown"),
@@ -233,6 +243,55 @@ fn audit_event_rejects_write_success_actions_outside_write_rpc() -> TestResult<(
             Err(AuditEventError::WriteSuccessActionNotAllowed { .. })
         ));
     }
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_rejects_auth_failure_success() -> TestResult<()> {
+    let result = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::AuthFailure,
+        target_secret_id: None,
+        result: AuditResult::Success,
+        key_version: None,
+        metadata_json: AuditMetadata::new(json!({
+            "source_event_at": SOURCE_EVENT_AT
+        }))?,
+    });
+
+    assert!(matches!(
+        result,
+        Err(AuditEventError::FailureOnlyActionSuccessNotAllowed { .. })
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_accepts_auth_failure_failure_with_null_actor_and_target() -> TestResult<()> {
+    let event = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::AuthFailure,
+        target_secret_id: None,
+        result: AuditResult::Failure,
+        key_version: None,
+        metadata_json: AuditMetadata::new(json!({
+            "error_code": "authorization_header_missing",
+            "source_event_at": SOURCE_EVENT_AT
+        }))?,
+    })?;
+
+    assert_eq!(event.action(), AuditAction::AuthFailure);
+    assert_eq!(event.result(), AuditResult::Failure);
+    assert!(event.actor_user_id().is_none());
+    assert!(event.target_secret_id().is_none());
 
     Ok(())
 }

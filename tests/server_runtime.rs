@@ -107,6 +107,7 @@ type TestServerHandle = (
     mpsc::Receiver<CapturedRequest>,
     thread::JoinHandle<std::io::Result<()>>,
 );
+type HangingServerHandle = (String, thread::JoinHandle<std::io::Result<()>>);
 
 #[derive(Debug, Clone, Serialize)]
 struct TestClaims {
@@ -305,6 +306,9 @@ fn test_app_state(
         audit_fallback_store,
         readiness_state: ReadinessState::new(),
         health_readiness_poll_interval: Duration::from_secs(30),
+        http_handler_timeout: Duration::from_secs(75),
+        http_rate_limit_requests: 300,
+        http_rate_limit_window: Duration::from_secs(60),
     })
 }
 
@@ -318,6 +322,22 @@ async fn spawn_app(
         axum::serve(listener, app)
             .await
             .expect("test app should serve requests");
+    });
+
+    Ok((format!("http://{addr}"), handle))
+}
+
+async fn spawn_sleep_app(
+    state: AppState,
+    sleep_duration: Duration,
+) -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let app = runtime_testing::build_sleep_app(state, sleep_duration);
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("test sleep app should serve requests");
     });
 
     Ok((format!("http://{addr}"), handle))
@@ -427,12 +447,52 @@ fn spawn_capture_server(
     Ok((format!("http://{addr}"), receiver, thread))
 }
 
+fn spawn_hanging_jwks_server(
+    response_delay: Duration,
+) -> Result<HangingServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer);
+        thread::sleep(response_delay);
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}/jwks"), thread))
+}
+
 fn build_log_subscriber(buffer: SharedLogBuffer) -> impl tracing::Subscriber + Send + Sync {
     tracing_subscriber::fmt()
         .json()
         .with_writer(buffer)
         .with_env_filter(EnvFilter::new("info"))
         .finish()
+}
+
+fn assert_auth_failure_audit_body(body: &Value, expected_error_code: &str) {
+    assert_eq!(body["p_actor_user_id"], Value::Null);
+    assert_eq!(body["p_actor_device_id"], Value::Null);
+    assert_eq!(body["p_action"], Value::String("auth_failure".to_owned()));
+    assert_eq!(body["p_target_secret_id"], Value::Null);
+    assert_eq!(body["p_result"], Value::String("failure".to_owned()));
+    assert_eq!(body["p_key_version"], Value::Null);
+    assert_eq!(
+        body["p_metadata_json"]["error_code"],
+        Value::String(expected_error_code.to_owned())
+    );
+    let source_event_at = body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .expect("auth failure audit should include source_event_at");
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
+
+    let serialized = body.to_string();
+    assert!(!serialized.contains("Authorization"));
+    assert!(!serialized.contains("authorization_header_value"));
+    assert!(!serialized.contains("not-a-jwt"));
+    assert!(!serialized.contains("service-role-key"));
+    assert!(!serialized.contains("publishable-key"));
 }
 
 #[test]
@@ -560,6 +620,27 @@ async fn initialize_jwt_verifier_from_jwks_url_fails_closed_on_fetch_error() {
     let result = initialize_jwt_verifier_from_jwks_url(&client, &url, "issuer", "audience").await;
 
     assert!(matches!(result, Err(JwtVerifierInitError::Fetch(_))));
+}
+
+#[tokio::test]
+async fn initialize_jwt_verifier_from_jwks_url_uses_configured_request_timeout() {
+    let (url, server_thread) = spawn_hanging_jwks_server(Duration::from_millis(250))
+        .expect("JWKS test server should start");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(20))
+        .timeout(Duration::from_millis(20))
+        .build()
+        .expect("test HTTP client should build");
+    let started_at = Instant::now();
+
+    let result = initialize_jwt_verifier_from_jwks_url(&client, &url, "issuer", "audience").await;
+
+    assert!(matches!(result, Err(JwtVerifierInitError::Fetch(_))));
+    assert!(started_at.elapsed() < Duration::from_millis(200));
+    server_thread
+        .join()
+        .expect("JWKS test server thread should join")
+        .expect("JWKS test server should stop cleanly");
 }
 
 #[tokio::test]
@@ -813,6 +894,75 @@ async fn ready_endpoint_does_not_create_fallback_file_for_probe() {
     assert!(body.get("audit_fallback_pending").is_none());
     assert!(body.get("fallback_writable").is_none());
     assert!(!fallback_path.exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rate_limit_returns_429_with_request_id() {
+    let mut state = test_app_state("http://127.0.0.1:1", temp_path("rate-limit"))
+        .expect("test app state should be created");
+    state
+        .readiness_state
+        .record_supabase_probe_result_at(true, OffsetDateTime::now_utc());
+    state.http_rate_limit_requests = 1;
+    state.http_rate_limit_window = Duration::from_secs(60);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+    let client = reqwest::Client::new();
+
+    let first = client
+        .get(format!("{app_url}/health"))
+        .send()
+        .await
+        .expect("first health request should succeed");
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+
+    let second = client
+        .get(format!("{app_url}/health"))
+        .send()
+        .await
+        .expect("second health request should succeed");
+    assert_eq!(second.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = second
+        .json()
+        .await
+        .expect("rate limit response should be JSON");
+    assert_eq!(body["code"], Value::String("rate_limited".to_owned()));
+    let request_id = body["request_id"]
+        .as_str()
+        .expect("rate limit response should include request_id");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+
+    app_task.abort();
+    let _ = app_task.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn handler_timeout_returns_503_with_request_id() {
+    let mut state = test_app_state("http://127.0.0.1:1", temp_path("handler-timeout"))
+        .expect("test app state should be created");
+    state.http_handler_timeout = Duration::from_millis(20);
+    let (app_url, app_task) = spawn_sleep_app(state, Duration::from_millis(100))
+        .await
+        .expect("test sleep app should start");
+
+    let response = reqwest::Client::new()
+        .get(format!("{app_url}/__test/sleep"))
+        .send()
+        .await
+        .expect("sleep request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response
+        .json()
+        .await
+        .expect("timeout response should be JSON");
+    assert_eq!(body["code"], Value::String("request_timeout".to_owned()));
+    let request_id = body["request_id"]
+        .as_str()
+        .expect("timeout response should include request_id");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok());
+
+    app_task.abort();
+    let _ = app_task.await;
 }
 
 #[test]
@@ -1287,6 +1437,193 @@ async fn create_endpoint_missing_authorization_returns_401_with_request_id() {
 
     app_task.abort();
     let _ = app_task.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_authorization_records_auth_failure_audit() {
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_single_request_server(200, "OK", r#"{"status":"ok"}"#)
+            .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("auth-failure-missing"))
+        .expect("test app state should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets"))
+        .json(&json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("create request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("auth failure audit request should be captured");
+    assert_eq!(audit_request.method, "POST");
+    assert!(
+        audit_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_append_audit_event")
+    );
+    assert_auth_failure_audit_body(
+        audit_request
+            .body
+            .as_ref()
+            .expect("audit append body should be JSON"),
+        "authorization_header_missing",
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_authorization_scheme_records_auth_failure_audit() {
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_single_request_server(200, "OK", r#"{"status":"ok"}"#)
+            .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("auth-failure-scheme"))
+        .expect("test app state should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets"))
+        .header(reqwest::header::AUTHORIZATION, "Basic not-a-jwt")
+        .json(&json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("create request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("auth failure audit request should be captured");
+    assert_auth_failure_audit_body(
+        audit_request
+            .body
+            .as_ref()
+            .expect("audit append body should be JSON"),
+        "authorization_scheme_invalid",
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_jwt_records_auth_failure_audit() {
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_single_request_server(200, "OK", r#"{"status":"ok"}"#)
+            .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("auth-failure-jwt"))
+        .expect("test app state should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets"))
+        .bearer_auth("not-a-jwt")
+        .json(&json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("create request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("auth failure audit request should be captured");
+    assert_auth_failure_audit_body(
+        audit_request
+            .body
+            .as_ref()
+            .expect("audit append body should be JSON"),
+        "jwt_verification_failed",
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auth_failure_audit_falls_back_without_changing_401_response() {
+    let (supabase_url, receiver, server_thread) = spawn_supabase_single_request_server(
+        500,
+        "Internal Server Error",
+        r#"{"error":"audit failed"}"#,
+    )
+    .expect("Supabase test server should start");
+    let fallback_path = temp_path("auth-failure-fallback.jsonl");
+    let state = test_app_state(&supabase_url, fallback_path.clone())
+        .expect("test app state should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets"))
+        .json(&json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("create request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(body["code"], Value::String("unauthorized".to_owned()));
+
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("auth failure audit request should be captured");
+    assert_auth_failure_audit_body(
+        audit_request
+            .body
+            .as_ref()
+            .expect("audit append body should be JSON"),
+        "authorization_header_missing",
+    );
+
+    let fallback_contents =
+        fs::read_to_string(&fallback_path).expect("fallback JSON Lines file should exist");
+    assert!(fallback_contents.contains(r#""action":"auth_failure""#));
+    assert!(fallback_contents.contains(r#""result":"failure""#));
+    assert!(fallback_contents.contains(r#""delivery_status":"pending""#));
+    assert!(fallback_contents.contains(r#""source_event_at":"#));
+    assert!(!fallback_contents.contains("Authorization"));
+    assert!(!fallback_contents.contains("not-a-jwt"));
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
 }
 
 #[tokio::test(flavor = "current_thread")]

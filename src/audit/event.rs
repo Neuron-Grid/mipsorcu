@@ -92,6 +92,7 @@ pub enum AuditAction {
     VersionPurge,
     IntegrityCheck,
     RestoreTest,
+    AuthFailure,
     KeyRotationStart,
     KeyRotationReencrypt,
     KeyRotationComplete,
@@ -106,6 +107,7 @@ impl AuditAction {
             "version_purge" => Ok(Self::VersionPurge),
             "integrity_check" => Ok(Self::IntegrityCheck),
             "restore_test" => Ok(Self::RestoreTest),
+            "auth_failure" => Ok(Self::AuthFailure),
             "key_rotation_start" => Ok(Self::KeyRotationStart),
             "key_rotation_reencrypt" => Ok(Self::KeyRotationReencrypt),
             "key_rotation_complete" => Ok(Self::KeyRotationComplete),
@@ -123,6 +125,7 @@ impl AuditAction {
             Self::VersionPurge => "version_purge",
             Self::IntegrityCheck => "integrity_check",
             Self::RestoreTest => "restore_test",
+            Self::AuthFailure => "auth_failure",
             Self::KeyRotationStart => "key_rotation_start",
             Self::KeyRotationReencrypt => "key_rotation_reencrypt",
             Self::KeyRotationComplete => "key_rotation_complete",
@@ -134,6 +137,10 @@ impl AuditAction {
             self,
             Self::EncryptCreate | Self::EncryptRotate | Self::VersionPurge
         )
+    }
+
+    pub(super) fn is_failure_only(self) -> bool {
+        matches!(self, Self::AuthFailure)
     }
 }
 
@@ -281,6 +288,11 @@ impl AuditEvent {
     pub fn new(parts: AuditEventParts) -> Result<Self, AuditEventError> {
         if parts.result == AuditResult::Success && parts.action.is_write_success_only() {
             return Err(AuditEventError::WriteSuccessActionNotAllowed {
+                action: parts.action,
+            });
+        }
+        if parts.result == AuditResult::Success && parts.action.is_failure_only() {
+            return Err(AuditEventError::FailureOnlyActionSuccessNotAllowed {
                 action: parts.action,
             });
         }

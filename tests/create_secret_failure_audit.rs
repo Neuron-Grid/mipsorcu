@@ -256,6 +256,9 @@ fn test_app_state_with_fallback(
         audit_fallback_store,
         readiness_state: ReadinessState::new(),
         health_readiness_poll_interval: Duration::from_secs(30),
+        http_handler_timeout: Duration::from_secs(75),
+        http_rate_limit_requests: 300,
+        http_rate_limit_window: Duration::from_secs(60),
     })
 }
 

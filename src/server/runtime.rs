@@ -62,7 +62,10 @@ async fn run_server_with_config(config: config::AppConfig) {
     let listen_addr = config.listen_addr;
     tracing::info!(listen_addr = %listen_addr, "starting mipsorcu");
 
-    let http_client = reqwest::Client::new();
+    let http_client = config::build_outbound_http_client(&config).unwrap_or_else(|error| {
+        tracing::error!(error = %error, "HTTP client initialization failed");
+        std::process::exit(1);
+    });
     let jwks = fetch_jwks(&http_client, &config.jwks_url)
         .await
         .unwrap_or_else(|error| {
@@ -132,6 +135,9 @@ async fn run_server_with_config(config: config::AppConfig) {
         audit_fallback_store: app_fallback_store,
         readiness_state,
         health_readiness_poll_interval: config.health_readiness_poll_interval,
+        http_handler_timeout: config.http_handler_timeout,
+        http_rate_limit_requests: config.http_rate_limit_requests,
+        http_rate_limit_window: config.http_rate_limit_window,
     };
     tokio::spawn(background::run_restore_test_loop(
         state.clone(),
@@ -177,9 +183,57 @@ fn build_app(state: AppState) -> Router {
 }
 
 async fn shutdown_signal(shutdown_sender: watch::Sender<bool>) {
-    tokio::signal::ctrl_c().await.ok();
+    let signal = wait_for_shutdown_signal().await;
     let _ = shutdown_sender.send(true);
-    tracing::info!("shutdown signal received");
+    tracing::info!(signal, "shutdown signal received");
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> &'static str {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let terminate = async {
+        let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        match signal {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    error_code = "sigterm_handler_setup_failed",
+                    "failed to install SIGTERM handler"
+                );
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    tokio::select! {
+        result = ctrl_c => {
+            if let Err(error) = result {
+                tracing::error!(
+                    error = %error,
+                    error_code = "sigint_handler_failed",
+                    "SIGINT handler failed"
+                );
+            }
+            "sigint"
+        }
+        () = terminate => "sigterm",
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> &'static str {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(
+            error = %error,
+            error_code = "sigint_handler_failed",
+            "SIGINT handler failed"
+        );
+    }
+
+    "sigint"
 }
 
 #[doc(hidden)]
@@ -216,6 +270,22 @@ pub mod testing {
 
     pub fn build_app(state: AppState) -> Router {
         super::build_app(state)
+    }
+
+    pub fn build_sleep_app(state: AppState, sleep_duration: Duration) -> Router {
+        crate::server::router::build_sleep_app_for_testing(state, sleep_duration)
+    }
+
+    pub async fn wait_for_shutdown_signal_for_testing<SignalFuture>(
+        signal: SignalFuture,
+        shutdown_sender: watch::Sender<bool>,
+        signal_name: &'static str,
+    ) where
+        SignalFuture: std::future::Future<Output = ()>,
+    {
+        signal.await;
+        let _ = shutdown_sender.send(true);
+        tracing::info!(signal = signal_name, "shutdown signal received");
     }
 
     pub async fn run_jwks_refresh_loop(

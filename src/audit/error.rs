@@ -9,6 +9,7 @@ pub enum AuditEventError {
     UnknownAction { value: String },
     UnknownResult { value: String },
     WriteSuccessActionNotAllowed { action: AuditAction },
+    FailureOnlyActionSuccessNotAllowed { action: AuditAction },
     MetadataMustBeObject,
     ForbiddenMetadataKey { key: String },
     InvalidSourceEventAt,
@@ -32,6 +33,13 @@ impl fmt::Display for AuditEventError {
                 write!(
                     formatter,
                     "success audit for {} must be recorded by the write RPC",
+                    action.as_str()
+                )
+            }
+            Self::FailureOnlyActionSuccessNotAllowed { action } => {
+                write!(
+                    formatter,
+                    "success audit for {} is not allowed",
                     action.as_str()
                 )
             }

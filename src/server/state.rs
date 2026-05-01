@@ -18,6 +18,9 @@ pub struct AppState {
     pub audit_fallback_store: LocalAuditFallbackStore,
     pub readiness_state: ReadinessState,
     pub health_readiness_poll_interval: Duration,
+    pub http_handler_timeout: Duration,
+    pub http_rate_limit_requests: u64,
+    pub http_rate_limit_window: Duration,
 }
 
 #[derive(Clone, Default)]

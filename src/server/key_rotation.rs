@@ -49,7 +49,8 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), KeyRotati
         return Err(KeyRotationCliError::Usage(usage()));
     };
 
-    let http_client = reqwest::Client::new();
+    let http_client = crate::server::config::build_outbound_http_client(&config)
+        .map_err(|error| KeyRotationCliError::Config(error.to_string()))?;
     let supabase_client = Arc::new(SupabaseClient::new(
         http_client,
         config.supabase_url.clone(),

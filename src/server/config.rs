@@ -21,6 +21,11 @@ const DEFAULT_RESTORE_TEST_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_RESTORE_TEST_SAMPLE_LIMIT: u32 = 3;
 const DEFAULT_JWKS_REFRESH_INTERVAL_SECONDS: u64 = 60 * 60;
 const DEFAULT_HEALTH_READINESS_POLL_INTERVAL_SECONDS: u64 = 30;
+const DEFAULT_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 5;
+const DEFAULT_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+const DEFAULT_HTTP_HANDLER_TIMEOUT_SECONDS: u64 = 75;
+const DEFAULT_HTTP_RATE_LIMIT_REQUESTS: u64 = 300;
+const DEFAULT_HTTP_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
 
 const ENV_LISTEN_ADDR: &str = "MIPSORCU_LISTEN_ADDR";
 const ENV_MASTER_KEY: &str = "MIPSORCU_MASTER_KEY";
@@ -48,6 +53,13 @@ const ENV_RESTORE_TEST_SAMPLE_LIMIT: &str = "MIPSORCU_RESTORE_TEST_SAMPLE_LIMIT"
 const ENV_JWKS_REFRESH_INTERVAL_SECONDS: &str = "MIPSORCU_JWKS_REFRESH_INTERVAL_SECONDS";
 const ENV_HEALTH_READINESS_POLL_INTERVAL_SECONDS: &str =
     "MIPSORCU_HEALTH_READINESS_POLL_INTERVAL_SECONDS";
+const ENV_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS: &str =
+    "MIPSORCU_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS";
+const ENV_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS: &str =
+    "MIPSORCU_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS";
+const ENV_HTTP_HANDLER_TIMEOUT_SECONDS: &str = "MIPSORCU_HTTP_HANDLER_TIMEOUT_SECONDS";
+const ENV_HTTP_RATE_LIMIT_REQUESTS: &str = "MIPSORCU_HTTP_RATE_LIMIT_REQUESTS";
+const ENV_HTTP_RATE_LIMIT_WINDOW_SECONDS: &str = "MIPSORCU_HTTP_RATE_LIMIT_WINDOW_SECONDS";
 
 #[doc(hidden)]
 pub type DotenvVars = HashMap<String, String>;
@@ -63,6 +75,11 @@ pub struct AppConfig {
     pub jwks_url: String,
     pub jwks_refresh_interval: Duration,
     pub health_readiness_poll_interval: Duration,
+    pub outbound_http_connect_timeout: Duration,
+    pub outbound_http_request_timeout: Duration,
+    pub http_handler_timeout: Duration,
+    pub http_rate_limit_requests: u64,
+    pub http_rate_limit_window: Duration,
     pub audit_fallback_path: PathBuf,
     pub audit_resend_interval: Duration,
     pub audit_fallback_alert_threshold_bytes: u64,
@@ -93,6 +110,23 @@ impl fmt::Debug for AppConfig {
             .field(
                 "health_readiness_poll_interval_seconds",
                 &self.health_readiness_poll_interval.as_secs(),
+            )
+            .field(
+                "outbound_http_connect_timeout_seconds",
+                &self.outbound_http_connect_timeout.as_secs(),
+            )
+            .field(
+                "outbound_http_request_timeout_seconds",
+                &self.outbound_http_request_timeout.as_secs(),
+            )
+            .field(
+                "http_handler_timeout_seconds",
+                &self.http_handler_timeout.as_secs(),
+            )
+            .field("http_rate_limit_requests", &self.http_rate_limit_requests)
+            .field(
+                "http_rate_limit_window_seconds",
+                &self.http_rate_limit_window.as_secs(),
             )
             .field("audit_fallback_path", &self.audit_fallback_path)
             .field(
@@ -204,6 +238,30 @@ where
         dotenv,
         get_process_var,
     ))?;
+    let outbound_http_connect_timeout = parse_outbound_http_connect_timeout(optional_var(
+        ENV_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS,
+        dotenv,
+        get_process_var,
+    ))?;
+    let outbound_http_request_timeout = parse_outbound_http_request_timeout(optional_var(
+        ENV_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS,
+        dotenv,
+        get_process_var,
+    ))?;
+    let http_handler_timeout = parse_http_handler_timeout(
+        optional_var(ENV_HTTP_HANDLER_TIMEOUT_SECONDS, dotenv, get_process_var),
+        outbound_http_request_timeout,
+    )?;
+    let http_rate_limit_requests = parse_http_rate_limit_requests(optional_var(
+        ENV_HTTP_RATE_LIMIT_REQUESTS,
+        dotenv,
+        get_process_var,
+    ))?;
+    let http_rate_limit_window = parse_http_rate_limit_window(optional_var(
+        ENV_HTTP_RATE_LIMIT_WINDOW_SECONDS,
+        dotenv,
+        get_process_var,
+    ))?;
 
     let audit_fallback_path = PathBuf::from(
         optional_var(ENV_AUDIT_FALLBACK_PATH, dotenv, get_process_var)
@@ -262,6 +320,11 @@ where
         jwks_url,
         jwks_refresh_interval,
         health_readiness_poll_interval,
+        outbound_http_connect_timeout,
+        outbound_http_request_timeout,
+        http_handler_timeout,
+        http_rate_limit_requests,
+        http_rate_limit_window,
         audit_fallback_path,
         audit_resend_interval,
         audit_fallback_alert_threshold_bytes,
@@ -538,6 +601,73 @@ pub fn parse_health_readiness_poll_interval(
     .map(Duration::from_secs)
 }
 
+pub fn parse_outbound_http_connect_timeout(value: Option<String>) -> Result<Duration, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS,
+        DEFAULT_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS,
+    )
+    .map(Duration::from_secs)
+}
+
+pub fn parse_outbound_http_request_timeout(value: Option<String>) -> Result<Duration, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS,
+        DEFAULT_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS,
+    )
+    .map(Duration::from_secs)
+}
+
+pub fn parse_http_handler_timeout(
+    value: Option<String>,
+    outbound_http_request_timeout: Duration,
+) -> Result<Duration, ConfigError> {
+    let timeout = parse_positive_u64_config(
+        value,
+        ENV_HTTP_HANDLER_TIMEOUT_SECONDS,
+        DEFAULT_HTTP_HANDLER_TIMEOUT_SECONDS,
+    )
+    .map(Duration::from_secs)?;
+    let minimum = minimum_http_handler_timeout(outbound_http_request_timeout)?;
+
+    if timeout < minimum {
+        return Err(ConfigError::InvalidValue {
+            name: ENV_HTTP_HANDLER_TIMEOUT_SECONDS,
+            reason: format!(
+                "value must be at least {} seconds for the configured outbound request timeout",
+                minimum.as_secs()
+            ),
+        });
+    }
+
+    Ok(timeout)
+}
+
+pub fn parse_http_rate_limit_requests(value: Option<String>) -> Result<u64, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_HTTP_RATE_LIMIT_REQUESTS,
+        DEFAULT_HTTP_RATE_LIMIT_REQUESTS,
+    )
+}
+
+pub fn parse_http_rate_limit_window(value: Option<String>) -> Result<Duration, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_HTTP_RATE_LIMIT_WINDOW_SECONDS,
+        DEFAULT_HTTP_RATE_LIMIT_WINDOW_SECONDS,
+    )
+    .map(Duration::from_secs)
+}
+
+pub fn build_outbound_http_client(config: &AppConfig) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .connect_timeout(config.outbound_http_connect_timeout)
+        .timeout(config.outbound_http_request_timeout)
+        .build()
+}
+
 fn parse_positive_u64_config(
     value: Option<String>,
     name: &'static str,
@@ -562,6 +692,21 @@ fn parse_positive_u64_config(
     }
 
     Ok(parsed)
+}
+
+fn minimum_http_handler_timeout(
+    outbound_http_request_timeout: Duration,
+) -> Result<Duration, ConfigError> {
+    let seconds = outbound_http_request_timeout
+        .as_secs()
+        .checked_mul(3)
+        .and_then(|seconds| seconds.checked_add(15))
+        .ok_or_else(|| ConfigError::InvalidValue {
+            name: ENV_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS,
+            reason: "value is too large".to_owned(),
+        })?;
+
+    Ok(Duration::from_secs(seconds))
 }
 
 fn current_process_var(name: &str) -> Option<String> {
