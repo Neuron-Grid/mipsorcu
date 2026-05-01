@@ -447,6 +447,51 @@ fn spawn_capture_server(
     Ok((format!("http://{addr}"), receiver, thread))
 }
 
+fn spawn_capture_server_until_idle(
+    idle_timeout: Duration,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let mut deadline = next_idle_deadline(idle_timeout);
+
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = read_http_request(&mut stream)?;
+                    sender.send(request).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "captured request receiver was dropped",
+                        )
+                    })?;
+                    write_http_response(&mut stream, 200, "OK", r#"{"status":"ok"}"#)?;
+                    deadline = next_idle_deadline(idle_timeout);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn next_idle_deadline(idle_timeout: Duration) -> Instant {
+    Instant::now()
+        .checked_add(idle_timeout)
+        .unwrap_or_else(Instant::now)
+}
+
 fn spawn_hanging_jwks_server(
     response_delay: Duration,
 ) -> Result<HangingServerHandle, Box<dyn std::error::Error>> {
@@ -900,26 +945,25 @@ async fn ready_endpoint_does_not_create_fallback_file_for_probe() {
 async fn rate_limit_returns_429_with_request_id() {
     let mut state = test_app_state("http://127.0.0.1:1", temp_path("rate-limit"))
         .expect("test app state should be created");
-    state
-        .readiness_state
-        .record_supabase_probe_result_at(true, OffsetDateTime::now_utc());
     state.http_rate_limit_requests = 1;
     state.http_rate_limit_window = Duration::from_secs(60);
-    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+    let (app_url, app_task) = spawn_sleep_app(state, Duration::ZERO)
+        .await
+        .expect("test app should start");
     let client = reqwest::Client::new();
 
     let first = client
-        .get(format!("{app_url}/health"))
+        .get(format!("{app_url}/__test/sleep"))
         .send()
         .await
-        .expect("first health request should succeed");
-    assert_eq!(first.status(), reqwest::StatusCode::OK);
+        .expect("first request should succeed");
+    assert_eq!(first.status(), reqwest::StatusCode::NO_CONTENT);
 
     let second = client
-        .get(format!("{app_url}/health"))
+        .get(format!("{app_url}/__test/sleep"))
         .send()
         .await
-        .expect("second health request should succeed");
+        .expect("second request should succeed");
     assert_eq!(second.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
     let body: Value = second
         .json()
@@ -930,6 +974,31 @@ async fn rate_limit_returns_429_with_request_id() {
         .as_str()
         .expect("rate limit response should include request_id");
     assert!(uuid::Uuid::parse_str(request_id).is_ok());
+
+    app_task.abort();
+    let _ = app_task.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn health_and_ready_bypass_rate_limit() {
+    let mut state = test_app_state("http://127.0.0.1:1", temp_path("probe-rate-limit-bypass"))
+        .expect("test app state should be created");
+    state
+        .readiness_state
+        .record_supabase_probe_result_at(true, OffsetDateTime::now_utc());
+    state.http_rate_limit_requests = 1;
+    state.http_rate_limit_window = Duration::from_secs(60);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+    let client = reqwest::Client::new();
+
+    for path in ["/health", "/ready", "/health", "/ready"] {
+        let response = client
+            .get(format!("{app_url}{path}"))
+            .send()
+            .await
+            .expect("probe request should succeed");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
 
     app_task.abort();
     let _ = app_task.await;
@@ -1483,6 +1552,75 @@ async fn missing_authorization_records_auth_failure_audit() {
         .join()
         .expect("Supabase test server thread should join")
         .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rate_limited_unauthenticated_request_does_not_append_auth_failure_audit() {
+    let (supabase_url, receiver, server_thread) =
+        spawn_capture_server_until_idle(Duration::from_millis(500))
+            .expect("capture server should start");
+    let mut state = test_app_state(&supabase_url, temp_path("rate-limit-auth-failure"))
+        .expect("test app state should be created");
+    state.http_rate_limit_requests = 1;
+    state.http_rate_limit_window = Duration::from_secs(60);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{app_url}/v1/secrets"))
+        .json(&json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("first create request should succeed");
+    assert_eq!(first.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first auth failure audit request should be captured");
+    assert!(
+        audit_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_append_audit_event")
+    );
+    assert_auth_failure_audit_body(
+        audit_request
+            .body
+            .as_ref()
+            .expect("audit append body should be JSON"),
+        "authorization_header_missing",
+    );
+
+    let second = client
+        .post(format!("{app_url}/v1/secrets"))
+        .json(&json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "00aa11ff"
+        }))
+        .send()
+        .await
+        .expect("second create request should succeed");
+    assert_eq!(second.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = second
+        .json()
+        .await
+        .expect("rate limit response should be JSON");
+    assert_eq!(body["code"], Value::String("rate_limited".to_owned()));
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("capture server thread should join")
+        .expect("capture server should stop cleanly");
+    assert!(
+        receiver.recv_timeout(Duration::from_millis(100)).is_err(),
+        "rate-limited request must not append another auth_failure audit event"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -22,6 +22,8 @@ use super::errors::{ApiError, RequestAwareApiError};
 use super::state::AppState;
 
 const BEARER_PREFIX: &str = "Bearer ";
+const HEALTH_PATH: &str = "/health";
+const READY_PATH: &str = "/ready";
 
 #[derive(Debug, Clone)]
 pub struct RequestContext {
@@ -201,28 +203,31 @@ pub async fn enforce_runtime_resilience(
     next: Next,
 ) -> Response {
     let request_id = current_request_id(request.extensions());
+    let is_rate_limit_exempt = is_rate_limit_exempt_path(request.uri().path());
 
-    match runtime.rate_limiter.try_acquire() {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::warn!(
-                request_id = %request_id.as_canonical_string(),
-                error_code = "rate_limited",
-                "request rejected by process rate limit"
-            );
-            return ApiError::RateLimited
-                .with_request_id(&request_id)
-                .into_response();
-        }
-        Err(()) => {
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                error_code = "rate_limiter_unavailable",
-                "rate limiter state is unavailable"
-            );
-            return ApiError::InternalError("rate limiter unavailable".to_owned())
-                .with_request_id(&request_id)
-                .into_response();
+    if !is_rate_limit_exempt {
+        match runtime.rate_limiter.try_acquire() {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    request_id = %request_id.as_canonical_string(),
+                    error_code = "rate_limited",
+                    "request rejected by process rate limit"
+                );
+                return ApiError::RateLimited
+                    .with_request_id(&request_id)
+                    .into_response();
+            }
+            Err(()) => {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error_code = "rate_limiter_unavailable",
+                    "rate limiter state is unavailable"
+                );
+                return ApiError::InternalError("rate limiter unavailable".to_owned())
+                    .with_request_id(&request_id)
+                    .into_response();
+            }
         }
     }
 
@@ -239,6 +244,10 @@ pub async fn enforce_runtime_resilience(
                 .into_response()
         }
     }
+}
+
+fn is_rate_limit_exempt_path(path: &str) -> bool {
+    matches!(path, HEALTH_PATH | READY_PATH)
 }
 
 async fn record_auth_failure(state: &AppState, request_id: &RequestId, error_code: &'static str) {
