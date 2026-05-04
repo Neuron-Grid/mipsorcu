@@ -41,20 +41,26 @@ as $$
             end
         ) as metadata_keys(key)
         where jsonb_typeof(nodes.value) = 'object'
-            and lower(metadata_keys.key) in (
+            and lower(btrim(metadata_keys.key)) in (
                 -- FORBIDDEN_AUDIT_METADATA_KEYS_START
-                'plaintext',
-                'plain_text',
+                'authorization',
+                'ciphertext',
+                'data_key',
+                'decrypt_result',
                 'decrypted',
                 'decrypted_data',
-                'master_key',
-                'data_key',
+                'encrypted_data_key',
                 'jwt',
-                'service_role_key',
-                'secret_key',
+                'master_key',
                 'passphrase',
-                'ciphertext',
-                'encrypted_data_key'
+                'password',
+                'plain_text',
+                'plaintext',
+                'secret_key',
+                'secret_value',
+                'service_role',
+                'service_role_key',
+                'token'
                 -- FORBIDDEN_AUDIT_METADATA_KEYS_END
             )
     );

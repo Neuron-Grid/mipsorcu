@@ -180,11 +180,6 @@ select is(
                 ('public.secret_versions', 'insert'),
                 ('public.secret_versions', 'update'),
                 ('public.secret_versions', 'delete'),
-                ('public.secret_nonce_ledger', 'select'),
-                ('public.secret_nonce_ledger', 'insert'),
-                ('public.secret_nonce_ledger', 'update'),
-                ('public.secret_nonce_ledger', 'delete'),
-                ('public.secret_nonce_ledger', 'truncate'),
                 ('public.audit_events', 'select'),
                 ('public.audit_events', 'insert'),
                 ('public.audit_events', 'update'),
@@ -222,12 +217,7 @@ select is(
                 ('public.secrets', 'delete'),
                 ('public.secret_versions', 'insert'),
                 ('public.secret_versions', 'update'),
-                ('public.secret_versions', 'delete'),
-                ('public.secret_nonce_ledger', 'select'),
-                ('public.secret_nonce_ledger', 'insert'),
-                ('public.secret_nonce_ledger', 'update'),
-                ('public.secret_nonce_ledger', 'delete'),
-                ('public.secret_nonce_ledger', 'truncate')
+                ('public.secret_versions', 'delete')
             ) as table_privileges(table_name, privilege_name)
             where has_table_privilege(
                 'authenticated',
@@ -276,7 +266,6 @@ select is(
             and c.relname in (
                 'secrets',
                 'secret_versions',
-                'secret_nonce_ledger',
                 'audit_events'
             )
     ),
@@ -360,28 +349,6 @@ select is(
 
 select is(
     (
-        select exists (
-            select 1
-            from (values
-                ('select'),
-                ('insert'),
-                ('update'),
-                ('delete'),
-                ('truncate')
-            ) as table_privileges(privilege_name)
-            where has_table_privilege(
-                'service_role',
-                'public.secret_nonce_ledger',
-                table_privileges.privilege_name
-            )
-        )
-    ),
-    false,
-    'service_role has no direct table privileges on secret_nonce_ledger'
-);
-
-select is(
-    (
         with expected_rpc(proname) as (
             values
                 ('rpc_write_secret_version'),
@@ -455,17 +422,6 @@ select is(
 );
 
 reset role;
-
-select is(
-    (
-        select count(*)::integer
-        from public.secret_nonce_ledger snl
-        where snl.secret_id = '750e8400-e29b-41d4-a716-446655440000'
-            and snl.nonce_or_iv = decode(repeat('21', 24), 'hex')
-    ),
-    1,
-    'write RPC inserts nonce ledger rows through the SECURITY DEFINER boundary'
-);
 
 select is(
     test_helpers.try_create_future_public_function(),

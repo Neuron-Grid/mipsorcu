@@ -12,18 +12,24 @@ use super::fallback::{DeliveryStatus, current_occurred_at};
 const SOURCE_EVENT_AT_KEY: &str = "source_event_at";
 
 pub const FORBIDDEN_AUDIT_METADATA_KEYS: &[&str] = &[
-    "plaintext",
-    "plain_text",
+    "authorization",
+    "ciphertext",
+    "data_key",
+    "decrypt_result",
     "decrypted",
     "decrypted_data",
-    "master_key",
-    "data_key",
-    "jwt",
-    "service_role_key",
-    "secret_key",
-    "passphrase",
-    "ciphertext",
     "encrypted_data_key",
+    "jwt",
+    "master_key",
+    "passphrase",
+    "password",
+    "plain_text",
+    "plaintext",
+    "secret_key",
+    "secret_value",
+    "service_role",
+    "service_role_key",
+    "token",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -295,6 +301,28 @@ impl AuditEvent {
             return Err(AuditEventError::FailureOnlyActionSuccessNotAllowed {
                 action: parts.action,
             });
+        }
+        if parts.action == AuditAction::AuthFailure {
+            if parts.actor_user_id.is_some() {
+                return Err(AuditEventError::AuthFailureFieldMustBeNull {
+                    field: "actor_user_id",
+                });
+            }
+            if parts.actor_device_id.is_some() {
+                return Err(AuditEventError::AuthFailureFieldMustBeNull {
+                    field: "actor_device_id",
+                });
+            }
+            if parts.target_secret_id.is_some() {
+                return Err(AuditEventError::AuthFailureFieldMustBeNull {
+                    field: "target_secret_id",
+                });
+            }
+            if parts.key_version.is_some() {
+                return Err(AuditEventError::AuthFailureFieldMustBeNull {
+                    field: "key_version",
+                });
+            }
         }
 
         parts.metadata_json.require_source_event_at()?;

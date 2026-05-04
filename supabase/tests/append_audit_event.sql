@@ -424,9 +424,113 @@ select ok(
 );
 
 select is(
+    (
+        select count(*)::integer
+        from (values
+            ('authorization'),
+            ('ciphertext'),
+            ('data_key'),
+            ('decrypt_result'),
+            ('decrypted'),
+            ('decrypted_data'),
+            ('encrypted_data_key'),
+            ('jwt'),
+            ('master_key'),
+            ('passphrase'),
+            ('password'),
+            ('plain_text'),
+            ('plaintext'),
+            ('secret_key'),
+            ('secret_value'),
+            ('service_role'),
+            ('service_role_key'),
+            ('token')
+        ) as forbidden_keys(key)
+        where public.audit_metadata_has_forbidden_key(
+            jsonb_build_object(forbidden_keys.key, 'leak')
+        )
+    ),
+    18,
+    'audit metadata guard rejects every synchronized forbidden key'
+);
+
+select ok(
+    not public.audit_metadata_has_forbidden_key(
+        '{"error_code":"denied","token_hint":"safe","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'audit metadata guard allows safe metadata keys'
+);
+
+select is(
     test_helpers.try_append_audit_event(
-        '10000000-0000-4000-8000-000000000032',
-        '00000000-0000-4000-8000-000000000032',
+        '10000000-0000-4000-8000-000000000035',
+        '00000000-0000-4000-8000-000000000035',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'decrypt',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        1,
+        '{"secret_value":"leak","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects added secret_value metadata key'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000036',
+        '00000000-0000-4000-8000-000000000036',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'decrypt',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        1,
+        '{"nested":[{"password":"leak"}],"source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects added password metadata key in array object'
+);
+
+select ok(
+    position(
+        'audit_events_metadata_json_no_forbidden_keys' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000037',
+            '00000000-0000-4000-8000-000000000037',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'sbc-device-1',
+            'decrypt',
+            '550e8400-e29b-41d4-a716-446655440000',
+            'failure',
+            1,
+            '{"nested":{" AuThOrIzAtIoN ":"leak"},"source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects added authorization metadata key case-insensitively with trimming'
+);
+
+select ok(
+    position(
+        'audit_events_metadata_json_no_forbidden_keys' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000038',
+            '00000000-0000-4000-8000-000000000038',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'sbc-device-1',
+            'decrypt',
+            '550e8400-e29b-41d4-a716-446655440000',
+            'failure',
+            1,
+            '{"safe":[{"token":"leak"}],"source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects added token metadata key in array object'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000039',
+        '00000000-0000-4000-8000-000000000039',
         null,
         null,
         'auth_failure',
@@ -443,20 +547,38 @@ select is(
     (
         select count(*)::integer
         from public.audit_events ae
-        where ae.id = '10000000-0000-4000-8000-000000000032'
+        where ae.id = '10000000-0000-4000-8000-000000000039'
             and ae.action = 'auth_failure'
             and ae.result = 'failure'
             and ae.actor_user_id is null
+            and ae.actor_device_id is null
             and ae.target_secret_id is null
+            and ae.key_version is null
     ),
     1,
     'append audit RPC stores auth_failure failure audit event'
 );
 
 select is(
+    test_helpers.try_insert_audit_event(
+        '10000000-0000-4000-8000-000000000040',
+        '00000000-0000-4000-8000-000000000040',
+        null,
+        null,
+        'auth_failure',
+        null,
+        'failure',
+        null,
+        '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'ok',
+    'direct audit_events insert accepts auth_failure failure with null actor and target'
+);
+
+select is(
     test_helpers.try_append_audit_event(
-        '10000000-0000-4000-8000-000000000033',
-        '00000000-0000-4000-8000-000000000033',
+        '10000000-0000-4000-8000-000000000041',
+        '00000000-0000-4000-8000-000000000041',
         null,
         null,
         'auth_failure',
@@ -472,8 +594,8 @@ select is(
 select ok(
     position(
         'audit_events_auth_failure_failure_only' in test_helpers.try_insert_audit_event(
-            '10000000-0000-4000-8000-000000000034',
-            '00000000-0000-4000-8000-000000000034',
+            '10000000-0000-4000-8000-000000000042',
+            '00000000-0000-4000-8000-000000000042',
             null,
             null,
             'auth_failure',
@@ -484,6 +606,138 @@ select ok(
         )
     ) > 0,
     'direct audit_events insert rejects auth_failure success via table constraint'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000043',
+        '00000000-0000-4000-8000-000000000043',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        null,
+        'auth_failure',
+        null,
+        'failure',
+        null,
+        '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects auth_failure with actor_user_id'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000044',
+        '00000000-0000-4000-8000-000000000044',
+        null,
+        'sbc-device-1',
+        'auth_failure',
+        null,
+        'failure',
+        null,
+        '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects auth_failure with actor_device_id'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000045',
+        '00000000-0000-4000-8000-000000000045',
+        null,
+        null,
+        'auth_failure',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        null,
+        '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects auth_failure with target_secret_id'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000046',
+        '00000000-0000-4000-8000-000000000046',
+        null,
+        null,
+        'auth_failure',
+        null,
+        'failure',
+        1,
+        '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects auth_failure with key_version'
+);
+
+select ok(
+    position(
+        'audit_events_auth_failure_null_fields_check' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000047',
+            '00000000-0000-4000-8000-000000000047',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            null,
+            'auth_failure',
+            null,
+            'failure',
+            null,
+            '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects auth_failure with actor_user_id'
+);
+
+select ok(
+    position(
+        'audit_events_auth_failure_null_fields_check' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000048',
+            '00000000-0000-4000-8000-000000000048',
+            null,
+            'sbc-device-1',
+            'auth_failure',
+            null,
+            'failure',
+            null,
+            '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects auth_failure with actor_device_id'
+);
+
+select ok(
+    position(
+        'audit_events_auth_failure_null_fields_check' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000049',
+            '00000000-0000-4000-8000-000000000049',
+            null,
+            null,
+            'auth_failure',
+            '550e8400-e29b-41d4-a716-446655440000',
+            'failure',
+            null,
+            '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects auth_failure with target_secret_id'
+);
+
+select ok(
+    position(
+        'audit_events_auth_failure_null_fields_check' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000050',
+            '00000000-0000-4000-8000-000000000050',
+            null,
+            null,
+            'auth_failure',
+            null,
+            'failure',
+            1,
+            '{"error_code":"authorization_header_missing","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+        )
+    ) > 0,
+    'direct audit_events insert rejects auth_failure with key_version'
 );
 
 select * from finish();

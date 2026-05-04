@@ -142,6 +142,23 @@ fn sample_event() -> TestResult<AuditEvent> {
     sample_event_with_ids(AUDIT_EVENT_ID, REQUEST_ID)
 }
 
+fn auth_failure_parts() -> TestResult<AuditEventParts> {
+    Ok(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::AuthFailure,
+        target_secret_id: None,
+        result: AuditResult::Failure,
+        key_version: None,
+        metadata_json: AuditMetadata::new(json!({
+            "error_code": "authorization_header_missing",
+            "source_event_at": SOURCE_EVENT_AT
+        }))?,
+    })
+}
+
 fn read_json_lines(path: &PathBuf) -> TestResult<Vec<Value>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -291,7 +308,65 @@ fn audit_event_accepts_auth_failure_failure_with_null_actor_and_target() -> Test
     assert_eq!(event.action(), AuditAction::AuthFailure);
     assert_eq!(event.result(), AuditResult::Failure);
     assert!(event.actor_user_id().is_none());
+    assert!(event.actor_device_id().is_none());
     assert!(event.target_secret_id().is_none());
+    assert!(event.key_version().is_none());
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_rejects_auth_failure_non_null_actor_user_id() -> TestResult<()> {
+    let mut parts = auth_failure_parts()?;
+    parts.actor_user_id = Some(OwnerUserId::parse(OWNER_USER_ID)?);
+
+    assert!(matches!(
+        AuditEvent::new(parts),
+        Err(AuditEventError::AuthFailureFieldMustBeNull { field })
+            if field == "actor_user_id"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_rejects_auth_failure_non_null_actor_device_id() -> TestResult<()> {
+    let mut parts = auth_failure_parts()?;
+    parts.actor_device_id = Some(DeviceId::new(DEVICE_ID)?);
+
+    assert!(matches!(
+        AuditEvent::new(parts),
+        Err(AuditEventError::AuthFailureFieldMustBeNull { field })
+            if field == "actor_device_id"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_rejects_auth_failure_non_null_target_secret_id() -> TestResult<()> {
+    let mut parts = auth_failure_parts()?;
+    parts.target_secret_id = Some(SecretId::parse(TARGET_SECRET_ID)?);
+
+    assert!(matches!(
+        AuditEvent::new(parts),
+        Err(AuditEventError::AuthFailureFieldMustBeNull { field })
+            if field == "target_secret_id"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_rejects_auth_failure_non_null_key_version() -> TestResult<()> {
+    let mut parts = auth_failure_parts()?;
+    parts.key_version = Some(KeyVersion::new(1)?);
+
+    assert!(matches!(
+        AuditEvent::new(parts),
+        Err(AuditEventError::AuthFailureFieldMustBeNull { field })
+            if field == "key_version"
+    ));
 
     Ok(())
 }
@@ -335,6 +410,24 @@ fn metadata_rejects_non_object_and_forbidden_keys_recursively() {
         AuditMetadata::new(json!({ "plaintext": "do-not-store" })),
         Err(AuditEventError::ForbiddenMetadataKey { key }) if key == "plaintext"
     ));
+    for key in [
+        "authorization",
+        "password",
+        "token",
+        "secret_value",
+        "decrypt_result",
+        "service_role",
+    ] {
+        let mut object = serde_json::Map::new();
+        object.insert(key.to_owned(), Value::String("do-not-store".to_owned()));
+        assert!(
+            matches!(
+                AuditMetadata::new(Value::Object(object)),
+                Err(AuditEventError::ForbiddenMetadataKey { key: rejected }) if rejected == key
+            ),
+            "metadata key {key} should be rejected"
+        );
+    }
     assert!(matches!(
         AuditMetadata::new(json!({
             "safe": [
@@ -384,8 +477,31 @@ fn metadata_adds_attempted_secret_id_as_canonical_uuid() -> TestResult<()> {
 
 #[test]
 fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
-    assert!(FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"plain_text"));
-    assert!(FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"decrypted_data"));
+    for key in [
+        "authorization",
+        "ciphertext",
+        "data_key",
+        "decrypt_result",
+        "decrypted",
+        "decrypted_data",
+        "encrypted_data_key",
+        "jwt",
+        "master_key",
+        "passphrase",
+        "password",
+        "plain_text",
+        "plaintext",
+        "secret_key",
+        "secret_value",
+        "service_role",
+        "service_role_key",
+        "token",
+    ] {
+        assert!(
+            FORBIDDEN_AUDIT_METADATA_KEYS.contains(&key),
+            "{key} should be forbidden"
+        );
+    }
     assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"attempted_secret_id"));
     assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"source_event_at"));
     assert!(

@@ -16,6 +16,15 @@ alter table public.audit_events
     ),
     add constraint audit_events_auth_failure_failure_only check (
         action <> 'auth_failure' or result = 'failure'
+    ),
+    add constraint audit_events_auth_failure_null_fields_check check (
+        action <> 'auth_failure'
+        or (
+            actor_user_id is null
+            and actor_device_id is null
+            and target_secret_id is null
+            and key_version is null
+        )
     );
 
 create or replace function public.rpc_append_audit_event(
@@ -72,6 +81,17 @@ begin
     end if;
 
     if p_action = 'auth_failure' and p_result <> 'failure' then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if p_action = 'auth_failure'
+        and (
+            p_actor_user_id is not null
+            or p_actor_device_id is not null
+            or p_target_secret_id is not null
+            or p_key_version is not null
+        )
+    then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
@@ -144,3 +164,6 @@ $$;
 
 comment on constraint audit_events_auth_failure_failure_only on public.audit_events is
     'auth_failure audit events are emitted only for authentication failures and must never use result=success.';
+
+comment on constraint audit_events_auth_failure_null_fields_check on public.audit_events is
+    'auth_failure audit events must not derive actor, target, or key version fields from unverified credentials.';

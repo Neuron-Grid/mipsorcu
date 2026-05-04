@@ -244,22 +244,6 @@ begin
             raise;
     end;
 
-    begin
-        insert into public.secret_nonce_ledger (
-            secret_id,
-            nonce_or_iv,
-            first_secret_version_id
-        )
-        values (
-            p_secret_id,
-            p_nonce_or_iv,
-            v_secret_version_id
-        );
-    exception
-        when unique_violation then
-            raise exception 'nonce_reuse_detected' using errcode = '23505';
-    end;
-
     update public.secrets
     set current_version_id = v_secret_version_id
     where id = p_secret_id;

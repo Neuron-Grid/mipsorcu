@@ -119,7 +119,7 @@ comment on column public.secret_versions.algorithm is
 comment on column public.secret_versions.classification is
     'Classification snapshot for this encrypted version. Must match secrets.classification and aad_context.classification.';
 comment on column public.secret_versions.nonce_or_iv is
-    'XChaCha20-Poly1305 nonce. Must be 24 bytes and unique per retained secret version; secret_nonce_ledger prevents reuse after purge.';
+    'XChaCha20-Poly1305 nonce. Must be 24 bytes and unique per retained secret version; purged nonce history is not stored in the MVP and collision avoidance relies on CSPRNG generation.';
 comment on column public.secret_versions.aad_context is
     'Structured AAD v1 context with exactly six keys. Decrypt code must reconstruct canonical AAD on the SBC instead of serializing JSONB directly.';
 comment on column public.secret_versions.created_at is
@@ -130,22 +130,6 @@ alter table public.secrets
     foreign key (id, current_version_id)
     references public.secret_versions (secret_id, id)
     deferrable initially deferred;
-
-create table public.secret_nonce_ledger (
-    secret_id uuid not null references public.secrets (id) on delete restrict,
-    nonce_or_iv bytea not null,
-    first_secret_version_id uuid not null,
-    created_at timestamptz not null default now(),
-    primary key (secret_id, nonce_or_iv),
-    constraint secret_nonce_ledger_nonce_length check (
-        octet_length(nonce_or_iv) = 24
-    )
-);
-
-comment on table public.secret_nonce_ledger is
-    'Permanent nonce reuse prevention ledger. Rows are retained even when old secret_versions are purged.';
-comment on column public.secret_nonce_ledger.first_secret_version_id is
-    'First secret_versions.id observed for this nonce. Intentionally not an FK because secret_versions rows are physically purged.';
 
 create table public.audit_events (
     id uuid primary key default gen_random_uuid(),
@@ -204,22 +188,17 @@ create index audit_events_actor_user_id_idx on public.audit_events (actor_user_i
 
 alter table public.secrets enable row level security;
 alter table public.secret_versions enable row level security;
-alter table public.secret_nonce_ledger enable row level security;
 alter table public.audit_events enable row level security;
 
 alter table public.secrets force row level security;
 alter table public.secret_versions force row level security;
-alter table public.secret_nonce_ledger force row level security;
 alter table public.audit_events force row level security;
 
 revoke all on table public.secrets from anon, authenticated;
 revoke all on table public.secret_versions from anon, authenticated;
-revoke all on table public.secret_nonce_ledger from anon, authenticated;
 revoke all on table public.audit_events from anon, authenticated;
 revoke all privileges on table public.audit_events from service_role;
 revoke select, insert, update, delete, truncate on table public.audit_events from service_role;
-revoke all privileges on table public.secret_nonce_ledger from service_role;
-revoke select, insert, update, delete, truncate on table public.secret_nonce_ledger from service_role;
 
 grant select on table public.secrets to service_role;
 grant select on table public.secret_versions to service_role;

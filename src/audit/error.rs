@@ -10,6 +10,7 @@ pub enum AuditEventError {
     UnknownResult { value: String },
     WriteSuccessActionNotAllowed { action: AuditAction },
     FailureOnlyActionSuccessNotAllowed { action: AuditAction },
+    AuthFailureFieldMustBeNull { field: &'static str },
     MetadataMustBeObject,
     ForbiddenMetadataKey { key: String },
     InvalidSourceEventAt,
@@ -42,6 +43,9 @@ impl fmt::Display for AuditEventError {
                     "success audit for {} is not allowed",
                     action.as_str()
                 )
+            }
+            Self::AuthFailureFieldMustBeNull { field } => {
+                write!(formatter, "auth_failure audit field must be null: {field}")
             }
             Self::MetadataMustBeObject => {
                 write!(formatter, "audit metadata must be a JSON object")

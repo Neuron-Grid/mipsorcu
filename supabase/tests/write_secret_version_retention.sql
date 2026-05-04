@@ -171,64 +171,6 @@ select is(
 );
 
 select is(
-    (
-        select count(*)::integer
-        from public.secret_nonce_ledger snl
-        where snl.secret_id = '550e8400-e29b-41d4-a716-446655440000'
-    ),
-    5,
-    'nonce ledger retains every nonce even after one secret version is purged'
-);
-
-select is(
-    (
-        select count(*)::integer
-        from public.secret_nonce_ledger snl
-        where snl.secret_id = '550e8400-e29b-41d4-a716-446655440000'
-            and snl.nonce_or_iv = decode(repeat('01', 24), 'hex')
-    ),
-    1,
-    'nonce ledger keeps the purged first version nonce'
-);
-
-select is(
-    (
-        select exists (
-            select 1
-            from information_schema.columns c
-            where c.table_schema = 'public'
-                and c.table_name = 'secret_nonce_ledger'
-                and c.column_name in (
-                    'ciphertext',
-                    'encrypted_data_key',
-                    'plaintext',
-                    'plain_text',
-                    'data_key',
-                    'master_key'
-                )
-        )
-    ),
-    false,
-    'nonce ledger has no secret material columns'
-);
-
-select is(
-    (
-        select count(*)::integer
-        from pg_constraint c
-        join unnest(c.conkey) as constraint_columns(attnum) on true
-        join pg_attribute a
-            on a.attrelid = c.conrelid
-            and a.attnum = constraint_columns.attnum
-        where c.conrelid = 'public.secret_nonce_ledger'::regclass
-            and c.contype = 'f'
-            and a.attname = 'first_secret_version_id'
-    ),
-    0,
-    'nonce ledger first_secret_version_id intentionally has no secret_versions FK'
-);
-
-select is(
     test_helpers.try_write_secret_version_diagnostics(
         '00000000-0000-4000-8000-000000000030',
         'encrypt_rotate',
@@ -256,33 +198,6 @@ select is(
 );
 
 select is(
-    test_helpers.try_write_secret_version_diagnostics(
-        '00000000-0000-4000-8000-000000000031',
-        'encrypt_rotate',
-        '550e8400-e29b-41d4-a716-446655440000',
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        'sbc-device-1',
-        '2026-04-08T12:05:00Z',
-        6,
-        decode(repeat('a6', 32), 'hex'),
-        decode(repeat('bb', 73), 'hex'),
-        1,
-        'xchacha20-poly1305',
-        decode(repeat('01', 24), 'hex'),
-        test_helpers.aad_context(
-            '550e8400-e29b-41d4-a716-446655440000',
-            6,
-            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-            'confidential',
-            '2026-04-08T12:05:00Z'
-        )
-    ),
-    '23505:nonce_reuse_detected',
-    'existing secret write rejects purged nonce reuse with stable SQLSTATE'
-);
-
-select is(
     (
         select count(*)::integer
         from public.secret_versions sv
@@ -290,16 +205,6 @@ select is(
     ),
     4,
     'rejected nonce reuse leaves no partial secret version rows'
-);
-
-select is(
-    (
-        select count(*)::integer
-        from public.secret_nonce_ledger snl
-        where snl.secret_id = '550e8400-e29b-41d4-a716-446655440000'
-    ),
-    5,
-    'rejected nonce reuse leaves no partial nonce ledger rows'
 );
 
 select is(
