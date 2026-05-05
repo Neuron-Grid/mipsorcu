@@ -187,13 +187,11 @@ pub fn build_integrity_check_metadata(
         "trigger": trigger.as_str(),
     });
 
-    if let Some(error_code) = error_code {
-        if let Value::Object(object) = &mut value {
-            object.insert(
-                "error_code".to_owned(),
-                Value::String(error_code.to_owned()),
-            );
-        }
+    if let (Some(error_code), Value::Object(object)) = (error_code, &mut value) {
+        object.insert(
+            "error_code".to_owned(),
+            Value::String(error_code.to_owned()),
+        );
     }
 
     AuditMetadata::new(value)
