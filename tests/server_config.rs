@@ -9,9 +9,10 @@ use mipsorcu::server::config::{
     parse_audit_fallback_archive_auto_delete_enabled, parse_audit_fallback_archive_retention_days,
     parse_audit_fallback_rotate_size, parse_audit_resend_interval, parse_dotenv_contents,
     parse_health_readiness_poll_interval, parse_http_handler_timeout,
-    parse_http_rate_limit_requests, parse_http_rate_limit_window, parse_jwks_refresh_interval,
+    parse_http_rate_limit_requests, parse_http_rate_limit_window, parse_integrity_check_interval,
+    parse_integrity_check_startup_delay, parse_jwks_refresh_interval,
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
-    parse_restore_test_interval, parse_restore_test_sample_limit,
+    parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
 };
 use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing};
 
@@ -394,6 +395,37 @@ fn restore_test_interval_rejects_zero_empty_and_non_numeric_values() {
 }
 
 #[test]
+fn restore_test_startup_delay_defaults_to_five_minutes() {
+    let delay =
+        parse_restore_test_startup_delay(None).expect("default startup delay should be valid");
+
+    assert_eq!(delay, Duration::from_secs(300));
+}
+
+#[test]
+fn restore_test_startup_delay_accepts_zero_and_positive_seconds() {
+    let zero = parse_restore_test_startup_delay(Some("0".to_owned()))
+        .expect("zero startup delay should be valid");
+    let positive = parse_restore_test_startup_delay(Some("30".to_owned()))
+        .expect("positive startup delay should be valid");
+
+    assert_eq!(zero, Duration::from_secs(0));
+    assert_eq!(positive, Duration::from_secs(30));
+}
+
+#[test]
+fn restore_test_startup_delay_rejects_empty_and_non_numeric_values() {
+    assert!(matches!(
+        parse_restore_test_startup_delay(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_restore_test_startup_delay(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
 fn restore_test_sample_limit_defaults_to_three() {
     let limit =
         parse_restore_test_sample_limit(None).expect("default sample limit should be valid");
@@ -421,6 +453,68 @@ fn restore_test_sample_limit_rejects_zero_empty_and_non_numeric_values() {
     ));
     assert!(matches!(
         parse_restore_test_sample_limit(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn integrity_check_interval_defaults_to_twenty_four_hours() {
+    let interval = parse_integrity_check_interval(None).expect("default interval should be valid");
+
+    assert_eq!(interval, Duration::from_secs(24 * 60 * 60));
+}
+
+#[test]
+fn integrity_check_interval_accepts_positive_seconds() {
+    let interval = parse_integrity_check_interval(Some("3600".to_owned()))
+        .expect("positive interval should be valid");
+
+    assert_eq!(interval, Duration::from_secs(3600));
+}
+
+#[test]
+fn integrity_check_interval_rejects_zero_empty_and_non_numeric_values() {
+    assert!(matches!(
+        parse_integrity_check_interval(Some("0".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_integrity_check_interval(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_integrity_check_interval(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn integrity_check_startup_delay_defaults_to_sixty_five_minutes() {
+    let delay =
+        parse_integrity_check_startup_delay(None).expect("default startup delay should be valid");
+
+    assert_eq!(delay, Duration::from_secs(3900));
+}
+
+#[test]
+fn integrity_check_startup_delay_accepts_zero_and_positive_seconds() {
+    let zero = parse_integrity_check_startup_delay(Some("0".to_owned()))
+        .expect("zero startup delay should be valid");
+    let positive = parse_integrity_check_startup_delay(Some("3900".to_owned()))
+        .expect("positive startup delay should be valid");
+
+    assert_eq!(zero, Duration::from_secs(0));
+    assert_eq!(positive, Duration::from_secs(3900));
+}
+
+#[test]
+fn integrity_check_startup_delay_rejects_empty_and_non_numeric_values() {
+    assert!(matches!(
+        parse_integrity_check_startup_delay(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_integrity_check_startup_delay(Some("not-a-number".to_owned())),
         Err(ConfigError::InvalidValue { .. })
     ));
 }
@@ -623,6 +717,18 @@ fn load_config_from_sources_loads_runtime_resilience_env_values() {
         "MIPSORCU_HTTP_RATE_LIMIT_WINDOW_SECONDS".to_owned(),
         "10".to_owned(),
     );
+    dotenv.insert(
+        "MIPSORCU_RESTORE_TEST_STARTUP_DELAY_SECONDS".to_owned(),
+        "5".to_owned(),
+    );
+    dotenv.insert(
+        "MIPSORCU_INTEGRITY_CHECK_INTERVAL_SECONDS".to_owned(),
+        "86401".to_owned(),
+    );
+    dotenv.insert(
+        "MIPSORCU_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS".to_owned(),
+        "65".to_owned(),
+    );
     let process_env = HashMap::<String, String>::new();
     let get_process_var = |name: &str| process_env.get(name).cloned();
 
@@ -633,6 +739,12 @@ fn load_config_from_sources_loads_runtime_resilience_env_values() {
     assert_eq!(config.http_handler_timeout, Duration::from_secs(39));
     assert_eq!(config.http_rate_limit_requests, 9);
     assert_eq!(config.http_rate_limit_window, Duration::from_secs(10));
+    assert_eq!(config.restore_test_startup_delay, Duration::from_secs(5));
+    assert_eq!(config.integrity_check_interval, Duration::from_secs(86401));
+    assert_eq!(
+        config.integrity_check_startup_delay,
+        Duration::from_secs(65)
+    );
 }
 
 #[test]
@@ -669,7 +781,10 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         audit_fallback_archive_auto_delete_enabled: false,
         audit_fallback_archive_retention: Duration::from_secs(90 * 24 * 60 * 60),
         restore_test_interval: Duration::from_secs(24 * 60 * 60),
+        restore_test_startup_delay: Duration::from_secs(300),
         restore_test_sample_limit: 3,
+        integrity_check_interval: Duration::from_secs(24 * 60 * 60),
+        integrity_check_startup_delay: Duration::from_secs(3900),
     };
 
     let output = format!("{config:?}");
@@ -683,8 +798,14 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("audit_fallback_archive_retention_days"));
     assert!(output.contains("90"));
     assert!(output.contains("restore_test_interval_seconds"));
+    assert!(output.contains("restore_test_startup_delay_seconds"));
+    assert!(output.contains("300"));
     assert!(output.contains("restore_test_sample_limit"));
     assert!(output.contains("3"));
+    assert!(output.contains("integrity_check_interval_seconds"));
+    assert!(output.contains("86400"));
+    assert!(output.contains("integrity_check_startup_delay_seconds"));
+    assert!(output.contains("3900"));
     assert!(output.contains("jwks_url"));
     assert!(output.contains("jwks_refresh_interval_seconds"));
     assert!(output.contains("300"));

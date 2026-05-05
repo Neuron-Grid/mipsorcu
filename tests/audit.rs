@@ -10,8 +10,8 @@ use flate2::read::GzDecoder;
 use mipsorcu::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventError, AuditEventId,
     AuditEventParts, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditRecorder,
-    AuditResult, DeviceId, FORBIDDEN_AUDIT_METADATA_KEYS, KeyVersion, LocalAuditFallbackStore,
-    OwnerUserId, RequestId, RolloverOutcome, SecretId, SourceEventAt,
+    AuditResult, AuditTrigger, DeviceId, FORBIDDEN_AUDIT_METADATA_KEYS, KeyVersion,
+    LocalAuditFallbackStore, OwnerUserId, RequestId, RolloverOutcome, SecretId, SourceEventAt,
 };
 use serde_json::{Value, json};
 
@@ -457,6 +457,33 @@ fn metadata_rejects_non_object_and_forbidden_keys_recursively() {
         Err(AuditEventError::ForbiddenMetadataKey { key }) if key == "DeCrYpTeD_dAtA"
     ));
     assert!(AuditMetadata::new(json!({ "error_code": "denied" })).is_ok());
+}
+
+#[test]
+fn metadata_accepts_only_known_trigger_values() -> TestResult<()> {
+    for trigger in [
+        AuditTrigger::Startup,
+        AuditTrigger::Background,
+        AuditTrigger::Cli,
+    ] {
+        let metadata = AuditMetadata::empty().with_trigger(trigger)?;
+        assert_eq!(metadata.as_value()["trigger"], trigger.as_str());
+    }
+
+    assert!(AuditMetadata::new(json!({ "trigger": "startup" })).is_ok());
+    assert!(AuditMetadata::new(json!({ "trigger": "background" })).is_ok());
+    assert!(AuditMetadata::new(json!({ "trigger": "cli" })).is_ok());
+    assert!(matches!(
+        AuditMetadata::new(json!({ "trigger": "manual" })),
+        Err(AuditEventError::InvalidTrigger { value }) if value == "manual"
+    ));
+    assert!(matches!(
+        AuditMetadata::new(json!({ "trigger": 42 })),
+        Err(AuditEventError::InvalidTrigger { .. })
+    ));
+    assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"trigger"));
+
+    Ok(())
 }
 
 #[test]

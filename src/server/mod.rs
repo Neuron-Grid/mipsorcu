@@ -4,6 +4,7 @@ pub mod config;
 pub mod dto;
 pub mod errors;
 pub mod handlers;
+pub mod integrity_check;
 mod key_rotation;
 pub mod middleware;
 mod read_model;

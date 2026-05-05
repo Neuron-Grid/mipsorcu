@@ -5,13 +5,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::audit::{
-    ArchiveSweepOutcome, AuditRecordError, AuditRecorder, LocalAuditFallbackStore,
+    ArchiveSweepOutcome, AuditRecordError, AuditRecorder, AuditTrigger, LocalAuditFallbackStore,
     LocalAuditStoreError, ResendAuditSummary, RolloverOutcome,
 };
 use crate::auth::{JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, fetch_jwks};
-use crate::server::restore_test;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
+use crate::server::{integrity_check, restore_test};
 
 const AUDIT_ARCHIVE_SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -121,10 +121,15 @@ pub async fn run_supabase_readiness_poll_loop(
 pub async fn run_restore_test_loop(
     state: AppState,
     interval_duration: Duration,
+    startup_delay: Duration,
     sample_limit: u32,
     mut shutdown_receiver: watch::Receiver<bool>,
 ) {
-    restore_test::run_restore_test_once(&state, sample_limit).await;
+    if sleep_until_first_run(startup_delay, &mut shutdown_receiver, "restore test").await {
+        return;
+    }
+
+    restore_test::run_restore_test_once(&state, sample_limit, AuditTrigger::Startup).await;
 
     let mut interval = tokio::time::interval(interval_duration);
     interval.tick().await;
@@ -138,7 +143,37 @@ pub async fn run_restore_test_loop(
                 }
             }
             _ = interval.tick() => {
-                restore_test::run_restore_test_once(&state, sample_limit).await;
+                restore_test::run_restore_test_once(&state, sample_limit, AuditTrigger::Background).await;
+            }
+        }
+    }
+}
+
+pub async fn run_integrity_check_loop(
+    state: AppState,
+    interval_duration: Duration,
+    startup_delay: Duration,
+    mut shutdown_receiver: watch::Receiver<bool>,
+) {
+    if sleep_until_first_run(startup_delay, &mut shutdown_receiver, "integrity check").await {
+        return;
+    }
+
+    let _ = integrity_check::run_integrity_check_once(&state, AuditTrigger::Startup).await;
+
+    let mut interval = tokio::time::interval(interval_duration);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            result = shutdown_receiver.changed() => {
+                if result.is_err() || *shutdown_receiver.borrow() {
+                    tracing::info!("integrity check loop stopped");
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                let _ = integrity_check::run_integrity_check_once(&state, AuditTrigger::Background).await;
             }
         }
     }
@@ -254,6 +289,28 @@ async fn run_supabase_readiness_probe_once(
 ) {
     let reachable = supabase_client.probe_readiness().await;
     readiness_state.record_supabase_probe_result(reachable);
+}
+
+async fn sleep_until_first_run(
+    startup_delay: Duration,
+    shutdown_receiver: &mut watch::Receiver<bool>,
+    loop_name: &'static str,
+) -> bool {
+    if startup_delay.is_zero() {
+        return false;
+    }
+
+    tokio::select! {
+        result = shutdown_receiver.changed() => {
+            if result.is_err() || *shutdown_receiver.borrow() {
+                tracing::info!("{loop_name} loop stopped before first run");
+                true
+            } else {
+                false
+            }
+        }
+        _ = tokio::time::sleep(startup_delay) => false,
+    }
 }
 
 pub(crate) fn jwks_fetch_error_kind(error: &JwksFetchError) -> &'static str {

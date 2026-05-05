@@ -13,6 +13,7 @@ pub enum AuditEventError {
     AuthFailureFieldMustBeNull { field: &'static str },
     MetadataMustBeObject,
     ForbiddenMetadataKey { key: String },
+    InvalidTrigger { value: String },
     InvalidSourceEventAt,
     MissingSourceEventAt,
     SourceEventAtUnavailable,
@@ -52,6 +53,12 @@ impl fmt::Display for AuditEventError {
             }
             Self::ForbiddenMetadataKey { key } => {
                 write!(formatter, "audit metadata contains forbidden key: {key}")
+            }
+            Self::InvalidTrigger { value } => {
+                write!(
+                    formatter,
+                    "audit metadata trigger must be startup, background, or cli: {value}"
+                )
             }
             Self::InvalidSourceEventAt => {
                 write!(

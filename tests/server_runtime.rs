@@ -14,11 +14,14 @@ use mipsorcu::server::runtime::{
     run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
 use mipsorcu::server::state::{AppState, ReadinessState};
-use mipsorcu::server::supabase::{RestoreTestSampleRow, SupabaseAuditAppender, SupabaseClient};
+use mipsorcu::server::supabase::{
+    IntegrityCheckSummary, IntegrityCheckViolationSummary, RestoreTestSampleRow,
+    SupabaseAuditAppender, SupabaseClient,
+};
 use mipsorcu::{
-    AuditRecorder, Classification, CreatedAt, DeviceId, Jwk, Jwks, JwksCache, JwtVerifier,
-    JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore, MASTER_KEY_LENGTH, MasterKey,
-    MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
+    AuditRecorder, AuditTrigger, Classification, CreatedAt, DeviceId, Jwk, Jwks, JwksCache,
+    JwtVerifier, JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore, MASTER_KEY_LENGTH,
+    MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
     SecretDecryptError, SourceEventAt, prepare_new_secret_version,
 };
 use serde::Serialize;
@@ -45,6 +48,19 @@ fn valid_audit_fallback_line(audit_event_id: &str, delivery_status: &str) -> Str
     format!(
         r#"{{"audit_event_id":"{audit_event_id}","request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","actor_user_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479","actor_device_id":"sbc-device-1","action":"decrypt","target_secret_id":"550e8400-e29b-41d4-a716-446655440000","result":"failure","key_version":1,"metadata_json":{{"error_code":"decrypt_failed","source_event_at":"2026-04-08T12:00:00Z"}},"occurred_at":"2026-04-08T12:00:00Z","delivery_status":"{delivery_status}"}}"#
     )
+}
+
+fn integrity_summary_json(violation_count: u64) -> Value {
+    let mut summary = IntegrityCheckViolationSummary::zero();
+    summary.algorithm_invalid = violation_count;
+
+    json!({
+        "checked_secret_count": 2,
+        "checked_secret_version_count": 4,
+        "checked_audit_event_count": 6,
+        "violation_count": violation_count,
+        "violation_summary": summary,
+    })
 }
 
 fn archive_file_count(path: &Path) -> usize {
@@ -108,6 +124,51 @@ type TestServerHandle = (
     thread::JoinHandle<std::io::Result<()>>,
 );
 type HangingServerHandle = (String, thread::JoinHandle<std::io::Result<()>>);
+
+async fn recv_captured_request(
+    receiver: &mpsc::Receiver<CapturedRequest>,
+) -> Result<CapturedRequest, Box<dyn std::error::Error>> {
+    for _ in 0..10_000 {
+        match receiver.try_recv() {
+            Ok(request) => return Ok(request),
+            Err(mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request channel disconnected",
+                )
+                .into());
+            }
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "timed out waiting for captured request",
+    )
+    .into())
+}
+
+async fn assert_no_captured_request(
+    receiver: &mpsc::Receiver<CapturedRequest>,
+    message: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for _ in 0..100 {
+        match receiver.try_recv() {
+            Ok(_) => return Err(std::io::Error::other(message).into()),
+            Err(mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request channel disconnected",
+                )
+                .into());
+            }
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct TestClaims {
@@ -374,6 +435,86 @@ fn spawn_supabase_read_and_audit_server(
                     "Internal Server Error",
                     audit_body,
                 )?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_integrity_and_audit_server(
+    integrity_status: u16,
+    integrity_body: String,
+    audit_status: u16,
+    audit_body: &'static str,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let is_integrity_check = request.path == "/rest/v1/rpc/rpc_integrity_check";
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if is_integrity_check {
+                let reason = if integrity_status == 200 {
+                    "OK"
+                } else {
+                    "Internal Server Error"
+                };
+                write_http_response(&mut stream, integrity_status, reason, &integrity_body)?;
+            } else if audit_status == 200 {
+                write_http_response(&mut stream, 200, "OK", audit_body)?;
+            } else {
+                write_http_response(
+                    &mut stream,
+                    audit_status,
+                    "Internal Server Error",
+                    audit_body,
+                )?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_restore_integrity_audit_server()
+-> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let path = request.path.clone();
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if path == "/rest/v1/rpc/rpc_sample_restore_test" {
+                write_http_response(&mut stream, 200, "OK", "[]")?;
+            } else if path == "/rest/v1/rpc/rpc_integrity_check" {
+                let body = serde_json::to_string(&json!([integrity_summary_json(0)]))
+                    .map_err(std::io::Error::other)?;
+                write_http_response(&mut stream, 200, "OK", &body)?;
+            } else {
+                write_http_response(&mut stream, 200, "OK", r#""ok""#)?;
             }
         }
 
@@ -1045,6 +1186,7 @@ fn restore_test_metadata_records_no_sample_reason_without_forbidden_keys() {
             "phase": "verify",
             "sample_count": 0,
             "reason": "no_current_secret_versions",
+            "trigger": "cli",
         })
     );
 }
@@ -1060,8 +1202,279 @@ fn restore_test_metadata_records_failure_code_without_forbidden_keys() {
             "sample_count": 3,
             "error_code": "decrypt_failed",
             "failed_version": 2,
+            "trigger": "cli",
         })
     );
+}
+
+#[test]
+fn restore_test_metadata_records_trigger() {
+    let metadata = runtime_testing::restore_test_metadata_with_trigger(
+        1,
+        None,
+        None,
+        AuditTrigger::Background,
+    );
+
+    assert_eq!(metadata.as_value()["trigger"], "background");
+}
+
+#[test]
+fn integrity_check_metadata_records_aggregate_only_summary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut summary = IntegrityCheckSummary::zero();
+    summary.checked_secret_count = 2;
+    summary.checked_secret_version_count = 4;
+    summary.checked_audit_event_count = 6;
+    summary.violation_count = 1;
+    summary.violation_summary.algorithm_invalid = 1;
+
+    let metadata =
+        runtime_testing::integrity_check_metadata(&summary, AuditTrigger::Startup, None)?;
+    let serialized = serde_json::to_string(metadata.as_value())?;
+
+    assert_eq!(metadata.as_value()["check_name"], "mvp_integrity_check");
+    assert_eq!(metadata.as_value()["trigger"], "startup");
+    assert_eq!(metadata.as_value()["checked_secret_count"], 2);
+    assert_eq!(
+        metadata.as_value()["violation_summary"]["algorithm_invalid"],
+        1
+    );
+    assert!(!serialized.contains("secret_id"));
+    assert!(!serialized.contains("version_id"));
+    assert!(!serialized.contains("aad_context"));
+    assert!(!serialized.contains("jwt"));
+    assert!(!serialized.contains("service-role-key"));
+    assert!(!serialized.contains("publishable-key"));
+    assert!(!serialized.contains("\\x"));
+    assert!(!serialized.contains("550e8400-e29b-41d4-a716-446655440000"));
+    assert!(!serialized.contains("plaintext"));
+
+    Ok(())
+}
+
+#[test]
+fn integrity_check_metadata_records_failure_error_code() -> Result<(), Box<dyn std::error::Error>> {
+    let metadata = runtime_testing::integrity_check_metadata(
+        &IntegrityCheckSummary::zero(),
+        AuditTrigger::Cli,
+        Some("rpc_failed"),
+    )?;
+
+    assert_eq!(metadata.as_value()["trigger"], "cli");
+    assert_eq!(metadata.as_value()["error_code"], "rpc_failed");
+
+    Ok(())
+}
+
+#[test]
+fn integrity_check_cli_usage_documents_once_command() {
+    let usage = runtime_testing::integrity_check_usage();
+
+    assert!(usage.contains("mipsorcu integrity-check once"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn integrity_check_success_records_success_audit() -> Result<(), Box<dyn std::error::Error>> {
+    let body = serde_json::to_string(&json!([integrity_summary_json(0)]))?;
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_integrity_and_audit_server(200, body, 200, r#""ok""#)?;
+    let state = test_app_state(&supabase_url, temp_path("integrity-success"))?;
+
+    let outcome =
+        mipsorcu::server::integrity_check::run_integrity_check_once(&state, AuditTrigger::Cli)
+            .await?;
+    let integrity_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    server_thread
+        .join()
+        .expect("integrity server thread should not panic")?;
+
+    assert_eq!(outcome.audit_result, mipsorcu::AuditResult::Success);
+    assert_eq!(outcome.summary.violation_count, 0);
+    assert_eq!(integrity_request.method, "POST");
+    assert_eq!(integrity_request.path, "/rest/v1/rpc/rpc_integrity_check");
+    assert_eq!(integrity_request.body, Some(json!({})));
+    assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
+    let audit_body = audit_request
+        .body
+        .ok_or_else(|| std::io::Error::other("audit append body should be JSON"))?;
+    assert_eq!(audit_body["p_action"], "integrity_check");
+    assert_eq!(audit_body["p_result"], "success");
+    assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+    assert_eq!(audit_body["p_metadata_json"]["violation_count"], 0);
+    assert!(audit_body["p_metadata_json"]["source_event_at"].is_string());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn integrity_check_violation_records_failure_audit() -> Result<(), Box<dyn std::error::Error>>
+{
+    let body = serde_json::to_string(&json!([integrity_summary_json(1)]))?;
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_integrity_and_audit_server(200, body, 200, r#""ok""#)?;
+    let state = test_app_state(&supabase_url, temp_path("integrity-violation"))?;
+
+    let result = mipsorcu::server::integrity_check::run_integrity_check_once(
+        &state,
+        AuditTrigger::Background,
+    )
+    .await;
+    let _integrity_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    server_thread
+        .join()
+        .expect("integrity server thread should not panic")?;
+
+    assert!(matches!(
+        result,
+        Err(
+            mipsorcu::server::integrity_check::IntegrityCheckError::ViolationDetected {
+                violation_count: 1
+            }
+        )
+    ));
+    let audit_body = audit_request
+        .body
+        .ok_or_else(|| std::io::Error::other("audit append body should be JSON"))?;
+    assert_eq!(audit_body["p_action"], "integrity_check");
+    assert_eq!(audit_body["p_result"], "failure");
+    assert_eq!(audit_body["p_metadata_json"]["trigger"], "background");
+    assert_eq!(
+        audit_body["p_metadata_json"]["error_code"],
+        "integrity_violation_detected"
+    );
+    assert_eq!(
+        audit_body["p_metadata_json"]["violation_summary"]["algorithm_invalid"],
+        1
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn integrity_check_rpc_failure_falls_back_when_primary_audit_fails()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fallback_path = temp_path("integrity-rpc-fallback");
+    let (supabase_url, receiver, server_thread) = spawn_supabase_integrity_and_audit_server(
+        500,
+        r#"{"message":"internal"}"#.to_owned(),
+        503,
+        r#"{"message":"unavailable"}"#,
+    )?;
+    let state = test_app_state(&supabase_url, fallback_path.clone())?;
+
+    let result =
+        mipsorcu::server::integrity_check::run_integrity_check_once(&state, AuditTrigger::Cli)
+            .await;
+    let _integrity_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    server_thread
+        .join()
+        .expect("integrity server thread should not panic")?;
+
+    assert!(matches!(
+        result,
+        Err(mipsorcu::server::integrity_check::IntegrityCheckError::RpcFailed)
+    ));
+    assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
+    let fallback_contents = fs::read_to_string(fallback_path)?;
+    assert!(fallback_contents.contains(r#""action":"integrity_check""#));
+    assert!(fallback_contents.contains(r#""error_code":"rpc_failed""#));
+    assert!(fallback_contents.contains(r#""trigger":"cli""#));
+    assert!(!fallback_contents.contains("\\x"));
+    assert!(!fallback_contents.contains("550e8400-e29b-41d4-a716-446655440000"));
+    assert!(!fallback_contents.contains("plaintext"));
+    assert!(!fallback_contents.contains("service-role-key"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn background_restore_and_integrity_startup_offsets_are_phased()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (supabase_url, receiver, server_thread) = spawn_supabase_restore_integrity_audit_server()?;
+    let state = test_app_state(&supabase_url, temp_path("background-offsets"))?;
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let restore_handle = tokio::spawn(runtime_testing::run_restore_test_loop(
+        state.clone(),
+        Duration::from_secs(86_400),
+        Duration::from_secs(300),
+        3,
+        shutdown_sender.subscribe(),
+    ));
+    let integrity_handle = tokio::spawn(runtime_testing::run_integrity_check_loop(
+        state,
+        Duration::from_secs(86_400),
+        Duration::from_secs(3900),
+        shutdown_receiver,
+    ));
+
+    tokio::task::yield_now().await;
+    assert_no_captured_request(
+        &receiver,
+        "background jobs should not run before their startup delays",
+    )
+    .await?;
+
+    tokio::time::advance(Duration::from_secs(299)).await;
+    tokio::task::yield_now().await;
+    assert_no_captured_request(&receiver, "restore test should wait until +300s").await?;
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let restore_request = recv_captured_request(&receiver).await?;
+    let restore_audit_request = recv_captured_request(&receiver).await?;
+    assert_eq!(restore_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert_eq!(
+        restore_audit_request.path,
+        "/rest/v1/rpc/rpc_append_audit_event"
+    );
+    assert_eq!(
+        restore_audit_request
+            .body
+            .as_ref()
+            .and_then(|body| body["p_metadata_json"]["trigger"].as_str()),
+        Some("startup")
+    );
+    assert_no_captured_request(
+        &receiver,
+        "integrity check must not run at the restore test startup time",
+    )
+    .await?;
+
+    tokio::time::advance(Duration::from_secs(3599)).await;
+    tokio::task::yield_now().await;
+    assert_no_captured_request(&receiver, "integrity check should wait until +3900s").await?;
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let integrity_request = recv_captured_request(&receiver).await?;
+    let integrity_audit_request = recv_captured_request(&receiver).await?;
+    assert_eq!(integrity_request.path, "/rest/v1/rpc/rpc_integrity_check");
+    assert_eq!(
+        integrity_audit_request.path,
+        "/rest/v1/rpc/rpc_append_audit_event"
+    );
+    assert_eq!(
+        integrity_audit_request
+            .body
+            .as_ref()
+            .and_then(|body| body["p_metadata_json"]["trigger"].as_str()),
+        Some("startup")
+    );
+
+    shutdown_sender
+        .send(true)
+        .expect("shutdown signal should send");
+    restore_handle.await?;
+    integrity_handle.await?;
+    server_thread
+        .join()
+        .expect("background server thread should not panic")?;
+
+    Ok(())
 }
 
 #[test]

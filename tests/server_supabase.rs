@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
-use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient, SupabaseRpcError};
+use mipsorcu::server::supabase::{
+    IntegrityCheckViolationSummary, SupabaseAuditAppender, SupabaseClient, SupabaseRpcError,
+};
 use mipsorcu::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventId, AuditEventParts,
     AuditMetadata, AuditResult, DeviceId, KeyVersion, OwnerUserId, RawJwt, RequestId, SecretId,
@@ -175,6 +177,53 @@ async fn current_secret_version_read_uses_expected_columns_and_publishable_auth(
             .headers
             .values()
             .any(|value| value.contains("service-role-secret"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn integrity_check_uses_service_role_rpc_and_parses_summary() {
+    let response_body = serde_json::to_string(&json!([{
+        "checked_secret_count": 2,
+        "checked_secret_version_count": 4,
+        "checked_audit_event_count": 6,
+        "violation_count": 0,
+        "violation_summary": IntegrityCheckViolationSummary::zero(),
+    }]))
+    .expect("integrity response should serialize");
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+
+    let summary = client
+        .call_integrity_check()
+        .await
+        .expect("integrity check RPC should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert_eq!(summary.checked_secret_count, 2);
+    assert_eq!(summary.checked_secret_version_count, 4);
+    assert_eq!(summary.checked_audit_event_count, 6);
+    assert_eq!(summary.violation_count, 0);
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_integrity_check");
+    assert_eq!(
+        request.headers.get("authorization"),
+        Some(&"Bearer service-role-secret".to_owned())
+    );
+    assert_eq!(
+        request.headers.get("apikey"),
+        Some(&"service-role-secret".to_owned())
     );
 }
 

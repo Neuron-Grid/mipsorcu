@@ -163,6 +163,21 @@ impl SupabaseClient {
             .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))
     }
 
+    pub async fn call_integrity_check(&self) -> Result<IntegrityCheckSummary, SupabaseRpcError> {
+        let params = serde_json::json!({});
+        let response = self.post_rpc("rpc_integrity_check", &params).await?;
+        let rows: Vec<IntegrityCheckResponse> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .next()
+            .ok_or(SupabaseRpcError::EmptyResult)
+            .map(IntegrityCheckSummary::from)
+    }
+
     pub async fn call_key_rotation_status(
         &self,
         key_version: KeyVersion,
@@ -361,6 +376,93 @@ pub struct RestoreTestSampleRow {
     pub aad_context: Value,
     pub classification: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IntegrityCheckSummary {
+    pub checked_secret_count: u64,
+    pub checked_secret_version_count: u64,
+    pub checked_audit_event_count: u64,
+    pub violation_count: u64,
+    pub violation_summary: IntegrityCheckViolationSummary,
+}
+
+impl IntegrityCheckSummary {
+    pub fn zero() -> Self {
+        Self {
+            checked_secret_count: 0,
+            checked_secret_version_count: 0,
+            checked_audit_event_count: 0,
+            violation_count: 0,
+            violation_summary: IntegrityCheckViolationSummary::zero(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrityCheckViolationSummary {
+    pub current_version_invalid: u64,
+    pub version_invalid: u64,
+    pub retention_exceeded: u64,
+    pub ciphertext_empty: u64,
+    pub encrypted_data_key_empty: u64,
+    pub nonce_length_invalid: u64,
+    pub algorithm_invalid: u64,
+    pub nonce_duplicate: u64,
+    pub aad_keys_invalid: u64,
+    pub aad_row_mismatch: u64,
+    pub created_at_mismatch: u64,
+    pub audit_action_invalid: u64,
+    pub audit_result_invalid: u64,
+    pub audit_metadata_not_object: u64,
+    pub audit_metadata_forbidden_key: u64,
+    pub audit_source_event_at_invalid: u64,
+}
+
+impl IntegrityCheckViolationSummary {
+    pub fn zero() -> Self {
+        Self {
+            current_version_invalid: 0,
+            version_invalid: 0,
+            retention_exceeded: 0,
+            ciphertext_empty: 0,
+            encrypted_data_key_empty: 0,
+            nonce_length_invalid: 0,
+            algorithm_invalid: 0,
+            nonce_duplicate: 0,
+            aad_keys_invalid: 0,
+            aad_row_mismatch: 0,
+            created_at_mismatch: 0,
+            audit_action_invalid: 0,
+            audit_result_invalid: 0,
+            audit_metadata_not_object: 0,
+            audit_metadata_forbidden_key: 0,
+            audit_source_event_at_invalid: 0,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrityCheckResponse {
+    checked_secret_count: u64,
+    checked_secret_version_count: u64,
+    checked_audit_event_count: u64,
+    violation_count: u64,
+    violation_summary: IntegrityCheckViolationSummary,
+}
+
+impl From<IntegrityCheckResponse> for IntegrityCheckSummary {
+    fn from(response: IntegrityCheckResponse) -> Self {
+        Self {
+            checked_secret_count: response.checked_secret_count,
+            checked_secret_version_count: response.checked_secret_version_count,
+            checked_audit_event_count: response.checked_audit_event_count,
+            violation_count: response.violation_count,
+            violation_summary: response.violation_summary,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

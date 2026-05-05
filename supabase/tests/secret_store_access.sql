@@ -354,6 +354,7 @@ select is(
                 ('rpc_write_secret_version'),
                 ('rpc_append_audit_event'),
                 ('rpc_sample_restore_test'),
+                ('rpc_integrity_check'),
                 ('rpc_key_rotation_status'),
                 ('rpc_list_key_rotation_batch'),
                 ('rpc_apply_key_rotation_batch'),
@@ -378,7 +379,7 @@ select is(
                 'service_role'
             )
     ),
-    7,
+    8,
     'service-role RPCs are SECURITY DEFINER and owned by the schema/table owner, not runtime roles'
 );
 
@@ -631,6 +632,33 @@ select ok(
         'execute'
     ),
     'service_role can execute append audit RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'anon',
+        'public.rpc_integrity_check()',
+        'execute'
+    ),
+    'anon cannot execute integrity check RPC'
+);
+
+select ok(
+    not has_function_privilege(
+        'authenticated',
+        'public.rpc_integrity_check()',
+        'execute'
+    ),
+    'authenticated cannot execute integrity check RPC'
+);
+
+select ok(
+    has_function_privilege(
+        'service_role',
+        'public.rpc_integrity_check()',
+        'execute'
+    ),
+    'service_role can execute integrity check RPC'
 );
 
 select ok(

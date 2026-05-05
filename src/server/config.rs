@@ -18,7 +18,10 @@ const DEFAULT_AUDIT_FALLBACK_ROTATE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS: u64 = 90;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const DEFAULT_RESTORE_TEST_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const DEFAULT_RESTORE_TEST_STARTUP_DELAY_SECONDS: u64 = 300;
 const DEFAULT_RESTORE_TEST_SAMPLE_LIMIT: u32 = 3;
+const DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const DEFAULT_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS: u64 = 3900;
 const DEFAULT_JWKS_REFRESH_INTERVAL_SECONDS: u64 = 60 * 60;
 const DEFAULT_HEALTH_READINESS_POLL_INTERVAL_SECONDS: u64 = 30;
 const DEFAULT_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 5;
@@ -49,7 +52,11 @@ const ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED: &str =
 const ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS: &str =
     "MIPSORCU_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS";
 const ENV_RESTORE_TEST_INTERVAL_SECONDS: &str = "MIPSORCU_RESTORE_TEST_INTERVAL_SECONDS";
+const ENV_RESTORE_TEST_STARTUP_DELAY_SECONDS: &str = "MIPSORCU_RESTORE_TEST_STARTUP_DELAY_SECONDS";
 const ENV_RESTORE_TEST_SAMPLE_LIMIT: &str = "MIPSORCU_RESTORE_TEST_SAMPLE_LIMIT";
+const ENV_INTEGRITY_CHECK_INTERVAL_SECONDS: &str = "MIPSORCU_INTEGRITY_CHECK_INTERVAL_SECONDS";
+const ENV_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS: &str =
+    "MIPSORCU_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS";
 const ENV_JWKS_REFRESH_INTERVAL_SECONDS: &str = "MIPSORCU_JWKS_REFRESH_INTERVAL_SECONDS";
 const ENV_HEALTH_READINESS_POLL_INTERVAL_SECONDS: &str =
     "MIPSORCU_HEALTH_READINESS_POLL_INTERVAL_SECONDS";
@@ -88,7 +95,10 @@ pub struct AppConfig {
     pub audit_fallback_archive_auto_delete_enabled: bool,
     pub audit_fallback_archive_retention: Duration,
     pub restore_test_interval: Duration,
+    pub restore_test_startup_delay: Duration,
     pub restore_test_sample_limit: u32,
+    pub integrity_check_interval: Duration,
+    pub integrity_check_startup_delay: Duration,
 }
 
 impl fmt::Debug for AppConfig {
@@ -157,7 +167,19 @@ impl fmt::Debug for AppConfig {
                 "restore_test_interval_seconds",
                 &self.restore_test_interval.as_secs(),
             )
+            .field(
+                "restore_test_startup_delay_seconds",
+                &self.restore_test_startup_delay.as_secs(),
+            )
             .field("restore_test_sample_limit", &self.restore_test_sample_limit)
+            .field(
+                "integrity_check_interval_seconds",
+                &self.integrity_check_interval.as_secs(),
+            )
+            .field(
+                "integrity_check_startup_delay_seconds",
+                &self.integrity_check_startup_delay.as_secs(),
+            )
             .finish()
     }
 }
@@ -303,8 +325,23 @@ where
         dotenv,
         get_process_var,
     ))?;
+    let restore_test_startup_delay = parse_restore_test_startup_delay(optional_var(
+        ENV_RESTORE_TEST_STARTUP_DELAY_SECONDS,
+        dotenv,
+        get_process_var,
+    ))?;
     let restore_test_sample_limit = parse_restore_test_sample_limit(optional_var(
         ENV_RESTORE_TEST_SAMPLE_LIMIT,
+        dotenv,
+        get_process_var,
+    ))?;
+    let integrity_check_interval = parse_integrity_check_interval(optional_var(
+        ENV_INTEGRITY_CHECK_INTERVAL_SECONDS,
+        dotenv,
+        get_process_var,
+    ))?;
+    let integrity_check_startup_delay = parse_integrity_check_startup_delay(optional_var(
+        ENV_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS,
         dotenv,
         get_process_var,
     ))?;
@@ -333,7 +370,10 @@ where
         audit_fallback_archive_auto_delete_enabled,
         audit_fallback_archive_retention,
         restore_test_interval,
+        restore_test_startup_delay,
         restore_test_sample_limit,
+        integrity_check_interval,
+        integrity_check_startup_delay,
     })
 }
 
@@ -559,6 +599,15 @@ pub fn parse_restore_test_interval(value: Option<String>) -> Result<Duration, Co
     .map(Duration::from_secs)
 }
 
+pub fn parse_restore_test_startup_delay(value: Option<String>) -> Result<Duration, ConfigError> {
+    parse_non_negative_u64_config(
+        value,
+        ENV_RESTORE_TEST_STARTUP_DELAY_SECONDS,
+        DEFAULT_RESTORE_TEST_STARTUP_DELAY_SECONDS,
+    )
+    .map(Duration::from_secs)
+}
+
 pub fn parse_restore_test_sample_limit(value: Option<String>) -> Result<u32, ConfigError> {
     let Some(value) = value else {
         return Ok(DEFAULT_RESTORE_TEST_SAMPLE_LIMIT);
@@ -579,6 +628,24 @@ pub fn parse_restore_test_sample_limit(value: Option<String>) -> Result<u32, Con
     }
 
     Ok(parsed)
+}
+
+pub fn parse_integrity_check_interval(value: Option<String>) -> Result<Duration, ConfigError> {
+    parse_positive_u64_config(
+        value,
+        ENV_INTEGRITY_CHECK_INTERVAL_SECONDS,
+        DEFAULT_INTEGRITY_CHECK_INTERVAL_SECONDS,
+    )
+    .map(Duration::from_secs)
+}
+
+pub fn parse_integrity_check_startup_delay(value: Option<String>) -> Result<Duration, ConfigError> {
+    parse_non_negative_u64_config(
+        value,
+        ENV_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS,
+        DEFAULT_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS,
+    )
+    .map(Duration::from_secs)
 }
 
 pub fn parse_jwks_refresh_interval(value: Option<String>) -> Result<Duration, ConfigError> {
@@ -692,6 +759,23 @@ fn parse_positive_u64_config(
     }
 
     Ok(parsed)
+}
+
+fn parse_non_negative_u64_config(
+    value: Option<String>,
+    name: &'static str,
+    default_value: u64,
+) -> Result<u64, ConfigError> {
+    let Some(value) = value else {
+        return Ok(default_value);
+    };
+
+    value
+        .parse::<u64>()
+        .map_err(|error| ConfigError::InvalidValue {
+            name,
+            reason: error.to_string(),
+        })
 }
 
 fn minimum_http_handler_timeout(

@@ -8,7 +8,7 @@ use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::{JwksCache, JwtVerifier, JwtVerifierConfig, fetch_jwks};
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
-use crate::server::{background, config, key_rotation, restore_test, router};
+use crate::server::{background, config, integrity_check, key_rotation, restore_test, router};
 
 pub use crate::server::background::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
@@ -33,8 +33,20 @@ pub async fn run_entrypoint() {
                 std::process::exit(2);
             }
         }
+        Some((command, command_args)) if command == "integrity-check" => {
+            init_tracing();
+            let config = config::load_config().unwrap_or_else(|error| {
+                tracing::error!(error = %error, "configuration loading failed");
+                std::process::exit(1);
+            });
+
+            if let Err(error) = integrity_check::run_cli(config, command_args).await {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
         Some(_) => {
-            eprintln!("{}", key_rotation::usage());
+            eprintln!("{}", usage());
             std::process::exit(2);
         }
     }
@@ -142,7 +154,14 @@ async fn run_server_with_config(config: config::AppConfig) {
     tokio::spawn(background::run_restore_test_loop(
         state.clone(),
         config.restore_test_interval,
+        config.restore_test_startup_delay,
         config.restore_test_sample_limit,
+        shutdown_sender.subscribe(),
+    ));
+    tokio::spawn(background::run_integrity_check_loop(
+        state.clone(),
+        config.integrity_check_interval,
+        config.integrity_check_startup_delay,
         shutdown_sender.subscribe(),
     ));
 
@@ -150,7 +169,11 @@ async fn run_server_with_config(config: config::AppConfig) {
 }
 
 pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
-    restore_test::run_restore_test_once(state, sample_limit).await;
+    restore_test::run_restore_test_once(state, sample_limit, crate::audit::AuditTrigger::Cli).await;
+}
+
+fn usage() -> String {
+    [key_rotation::usage(), integrity_check::usage()].join("\n")
 }
 
 async fn serve_app(
@@ -265,7 +288,36 @@ pub mod testing {
             sample_count,
             error_code,
             failed_version,
+            crate::audit::AuditTrigger::Cli,
         )
+    }
+
+    pub fn restore_test_metadata_with_trigger(
+        sample_count: u64,
+        error_code: Option<&'static str>,
+        failed_version: Option<u32>,
+        trigger: crate::audit::AuditTrigger,
+    ) -> AuditMetadata {
+        crate::server::restore_test::testing::restore_test_metadata(
+            sample_count,
+            error_code,
+            failed_version,
+            trigger,
+        )
+    }
+
+    pub fn integrity_check_metadata(
+        summary: &crate::server::supabase::IntegrityCheckSummary,
+        trigger: crate::audit::AuditTrigger,
+        error_code: Option<&'static str>,
+    ) -> Result<AuditMetadata, crate::audit::AuditEventError> {
+        crate::server::integrity_check::testing::build_integrity_check_metadata(
+            summary, trigger, error_code,
+        )
+    }
+
+    pub fn integrity_check_usage() -> String {
+        crate::server::integrity_check::testing::usage()
     }
 
     pub fn build_app(state: AppState) -> Router {
@@ -300,6 +352,38 @@ pub mod testing {
             http_client,
             jwks_url,
             interval_duration,
+            shutdown_receiver,
+        )
+        .await;
+    }
+
+    pub async fn run_restore_test_loop(
+        state: AppState,
+        interval_duration: Duration,
+        startup_delay: Duration,
+        sample_limit: u32,
+        shutdown_receiver: watch::Receiver<bool>,
+    ) {
+        crate::server::background::run_restore_test_loop(
+            state,
+            interval_duration,
+            startup_delay,
+            sample_limit,
+            shutdown_receiver,
+        )
+        .await;
+    }
+
+    pub async fn run_integrity_check_loop(
+        state: AppState,
+        interval_duration: Duration,
+        startup_delay: Duration,
+        shutdown_receiver: watch::Receiver<bool>,
+    ) {
+        crate::server::background::run_integrity_check_loop(
+            state,
+            interval_duration,
+            startup_delay,
             shutdown_receiver,
         )
         .await;

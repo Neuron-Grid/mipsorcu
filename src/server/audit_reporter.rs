@@ -385,6 +385,138 @@ pub async fn record_restore_test_audit(
     }
 }
 
+pub struct IntegrityCheckAudit {
+    pub result: AuditResult,
+    pub metadata: AuditMetadata,
+    pub error_code: Option<&'static str>,
+}
+
+pub async fn record_integrity_check_audit(
+    state: &AppState,
+    request_id: &RequestId,
+    audit: IntegrityCheckAudit,
+) -> Result<AuditRecordOutcome, AuditRecordError> {
+    let IntegrityCheckAudit {
+        result,
+        metadata,
+        error_code,
+    } = audit;
+    let audit_event_id = match AuditEventId::generate() {
+        Ok(audit_event_id) => audit_event_id,
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "integrity_check",
+                result = "failure",
+                error_code = "audit_event_id_generation_failed",
+                "integrity check audit setup failed"
+            );
+            return Err(AuditRecordError::EventConstructionFailed(error));
+        }
+    };
+    let metadata_json = match metadata.with_current_source_event_at() {
+        Ok(metadata_json) => metadata_json,
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "integrity_check",
+                result = "failure",
+                error_code = "audit_metadata_build_failed",
+                "integrity check audit metadata setup failed"
+            );
+            return Err(AuditRecordError::EventConstructionFailed(error));
+        }
+    };
+    let event = match AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: request_id.clone(),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::IntegrityCheck,
+        target_secret_id: None,
+        result,
+        key_version: None,
+        metadata_json,
+    }) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "integrity_check",
+                result = "failure",
+                error_code = "audit_event_build_failed",
+                "integrity check audit setup failed"
+            );
+            return Err(AuditRecordError::EventConstructionFailed(error));
+        }
+    };
+
+    let recorder = state.audit_recorder.clone();
+    match recorder.record(&event).await {
+        Ok(AuditRecordOutcome::PrimarySucceeded) => {
+            tracing::debug!(
+                request_id = %request_id.as_canonical_string(),
+                action = "integrity_check",
+                audit_record_outcome = "primary_succeeded",
+                "integrity check audit recorded"
+            );
+            Ok(AuditRecordOutcome::PrimarySucceeded)
+        }
+        Ok(AuditRecordOutcome::FallbackSucceeded) => {
+            tracing::warn!(
+                request_id = %request_id.as_canonical_string(),
+                action = "integrity_check",
+                audit_record_outcome = "fallback_succeeded",
+                "integrity check audit recorded to local fallback"
+            );
+            Ok(AuditRecordOutcome::FallbackSucceeded)
+        }
+        Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "integrity_check",
+                result = "failure",
+                error_code = error_code.unwrap_or("audit_record_failed"),
+                audit_record_outcome = "both_failed",
+                "integrity check audit recording failed"
+            );
+            Err(error)
+        }
+        Err(error @ AuditRecordError::IdempotencyConflict) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "integrity_check",
+                result = "failure",
+                error_code = "audit_idempotency_conflict",
+                audit_record_outcome = "idempotency_conflict",
+                "integrity check audit recording failed"
+            );
+            Err(error)
+        }
+        Err(
+            error @ (AuditRecordError::ResendReadFailed(_)
+            | AuditRecordError::ResendMarkSentFailed(_)
+            | AuditRecordError::EventConstructionFailed(_)),
+        ) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                action = "integrity_check",
+                result = "failure",
+                error_code = error_code.unwrap_or("audit_record_failed"),
+                audit_record_outcome = "unexpected_resend_error",
+                "integrity check audit recording failed"
+            );
+            Err(error)
+        }
+    }
+}
+
 pub fn build_failure_audit_event(
     audit_event_id: AuditEventId,
     request_id: &RequestId,

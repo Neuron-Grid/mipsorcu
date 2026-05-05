@@ -13,7 +13,7 @@ pub use aad::AadV1;
 pub use audit::{
     ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent, AuditEventAppender,
     AuditEventError, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
-    AuditRecordOutcome, AuditRecorder, AuditResult, FORBIDDEN_AUDIT_METADATA_KEYS,
+    AuditRecordOutcome, AuditRecorder, AuditResult, AuditTrigger, FORBIDDEN_AUDIT_METADATA_KEYS,
     LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary, RolloverArchive,
     RolloverOutcome, SweptArchive,
 };
