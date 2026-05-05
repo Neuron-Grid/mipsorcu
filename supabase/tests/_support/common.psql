@@ -567,3 +567,191 @@ exception
         return sqlerrm;
 end;
 $$;
+
+create function test_helpers.try_append_ledger_entry(
+    p_ledger_entry_id uuid,
+    p_sequence_no bigint,
+    p_entry_type text,
+    p_source_event_at text,
+    p_request_id uuid,
+    p_source_event_id uuid,
+    p_target_secret_id uuid,
+    p_target_secret_version_id uuid,
+    p_actor_user_id uuid,
+    p_actor_device_id text,
+    p_result text,
+    p_error_code text,
+    p_payload jsonb,
+    p_canonicalization_version integer,
+    p_previous_entry_hash bytea,
+    p_entry_hash bytea,
+    p_hash_algorithm text,
+    p_signature bytea,
+    p_signature_algorithm text,
+    p_signature_key_version integer
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_append_ledger_entry(
+        p_ledger_entry_id,
+        p_sequence_no,
+        p_entry_type,
+        p_source_event_at,
+        p_request_id,
+        p_source_event_id,
+        p_target_secret_id,
+        p_target_secret_version_id,
+        p_actor_user_id,
+        p_actor_device_id,
+        p_result,
+        p_error_code,
+        p_payload,
+        p_canonicalization_version,
+        p_previous_entry_hash,
+        p_entry_hash,
+        p_hash_algorithm,
+        p_signature,
+        p_signature_algorithm,
+        p_signature_key_version
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_append_ledger_entry_diagnostics(
+    p_ledger_entry_id uuid,
+    p_sequence_no bigint,
+    p_entry_type text,
+    p_source_event_at text,
+    p_request_id uuid,
+    p_source_event_id uuid,
+    p_target_secret_id uuid,
+    p_target_secret_version_id uuid,
+    p_actor_user_id uuid,
+    p_actor_device_id text,
+    p_result text,
+    p_error_code text,
+    p_payload jsonb,
+    p_canonicalization_version integer,
+    p_previous_entry_hash bytea,
+    p_entry_hash bytea,
+    p_hash_algorithm text,
+    p_signature bytea,
+    p_signature_algorithm text,
+    p_signature_key_version integer
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_append_ledger_entry(
+        p_ledger_entry_id,
+        p_sequence_no,
+        p_entry_type,
+        p_source_event_at,
+        p_request_id,
+        p_source_event_id,
+        p_target_secret_id,
+        p_target_secret_version_id,
+        p_actor_user_id,
+        p_actor_device_id,
+        p_result,
+        p_error_code,
+        p_payload,
+        p_canonicalization_version,
+        p_previous_entry_hash,
+        p_entry_hash,
+        p_hash_algorithm,
+        p_signature,
+        p_signature_algorithm,
+        p_signature_key_version
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlstate || ':' || sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_update_ledger_entry(p_ledger_entry_id uuid)
+returns text
+language plpgsql
+as $$
+begin
+    update public.ledger_entries
+    set result = result
+    where id = p_ledger_entry_id;
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_delete_ledger_entry(p_ledger_entry_id uuid)
+returns text
+language plpgsql
+as $$
+begin
+    delete from public.ledger_entries
+    where id = p_ledger_entry_id;
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_truncate_ledger_entries()
+returns text
+language plpgsql
+as $$
+begin
+    truncate table public.ledger_entries;
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_delete_ledger_chain_state()
+returns text
+language plpgsql
+as $$
+begin
+    delete from public.ledger_chain_state
+    where chain_id = 'global';
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_truncate_ledger_chain_state()
+returns text
+language plpgsql
+as $$
+begin
+    truncate table public.ledger_chain_state;
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;

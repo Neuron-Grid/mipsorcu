@@ -32,3 +32,5 @@ Cargo.lock
 .history
 .ionide
 .env
+supabase/.temp/cli-latest
+supabase/.branches
