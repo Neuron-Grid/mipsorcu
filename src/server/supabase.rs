@@ -8,6 +8,9 @@ use serde_json::Value;
 
 use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender, RequestId};
 use crate::auth::RawJwt;
+use crate::ledger::{
+    LedgerChainHead, LedgerEntryId, LedgerHash, LedgerSequenceNo, SignedLedgerEntry,
+};
 use crate::{KeyVersion, SecretId, SecretVersion};
 
 const CURRENT_SECRET_VERSION_READ_COLUMNS: &str = "\
@@ -15,6 +18,17 @@ id,secret_id,version,ciphertext,encrypted_data_key,key_version,\
 algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,\
 created_at,secrets!inner(current_version_id,owner_user_id,classification)";
 const AUDIT_EVENT_ID_CONFLICT_MARKER: &str = "audit_event_id_conflict";
+const LEDGER_ENTRY_ID_CONFLICT_MARKER: &str = "ledger_entry_id_conflict";
+const LEDGER_ENTRY_HASH_CONFLICT_MARKER: &str = "ledger_entry_hash_conflict";
+const LEDGER_SEQUENCE_MISMATCH_MARKER: &str = "ledger_sequence_mismatch";
+const LEDGER_PREVIOUS_HASH_MISMATCH_MARKER: &str = "ledger_previous_hash_mismatch";
+const LEDGER_CHAIN_STATE_MISSING_MARKER: &str = "ledger_chain_state_missing";
+const LEDGER_INVALID_RPC_INPUT_MARKER: &str = "invalid_rpc_input";
+const LEDGER_PAYLOAD_SCHEMA_MARKERS: &[&str] = &[
+    "ledger_payload_schema_violation",
+    "ledger_entries_payload_valid",
+    "ledger_payload_is_valid",
+];
 
 pub enum SupabaseRpcError {
     Network(reqwest::Error),
@@ -120,6 +134,24 @@ impl SupabaseClient {
         let params = AppendAuditEventParams::from_event(event);
         let response = self.post_rpc("rpc_append_audit_event", &params).await?;
         ensure_success(response).await.map(|_| ())
+    }
+
+    pub async fn call_append_ledger_entry(
+        &self,
+        entry: &SignedLedgerEntry,
+    ) -> Result<AppendLedgerEntryOutcome, SupabaseRpcError> {
+        let params = AppendLedgerEntryParams::from_signed_entry(entry);
+        let response = self.post_rpc("rpc_append_ledger_entry", &params).await?;
+        let rows: Vec<AppendLedgerEntryResponse> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .next()
+            .ok_or(SupabaseRpcError::EmptyResult)
+            .and_then(AppendLedgerEntryOutcome::try_from)
     }
 
     pub async fn fetch_current_secret_version_for_user(
@@ -524,6 +556,201 @@ impl From<KeyRotationCompleteResponse> for KeyRotationCompleteOutcome {
 }
 
 #[derive(Serialize)]
+struct AppendLedgerEntryParams {
+    p_ledger_entry_id: String,
+    p_sequence_no: u64,
+    p_entry_type: String,
+    p_source_event_at: String,
+    p_request_id: String,
+    p_source_event_id: Option<String>,
+    p_target_secret_id: Option<String>,
+    p_target_secret_version_id: Option<String>,
+    p_actor_user_id: Option<String>,
+    p_actor_device_id: Option<String>,
+    p_result: String,
+    p_error_code: Option<String>,
+    p_payload: Value,
+    p_canonicalization_version: u8,
+    p_previous_entry_hash: String,
+    p_entry_hash: String,
+    p_hash_algorithm: String,
+    p_signature: String,
+    p_signature_algorithm: String,
+    p_signature_key_version: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppendLedgerEntryResponse {
+    ledger_entry_id: String,
+    sequence_no: i64,
+    entry_hash: String,
+    chain_last_sequence_no: i64,
+    chain_last_entry_hash: String,
+    replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendLedgerEntryOutcome {
+    ledger_entry_id: LedgerEntryId,
+    sequence_no: LedgerSequenceNo,
+    entry_hash: LedgerHash,
+    chain_head: LedgerChainHead,
+    replayed: bool,
+}
+
+impl AppendLedgerEntryOutcome {
+    pub fn ledger_entry_id(&self) -> &LedgerEntryId {
+        &self.ledger_entry_id
+    }
+
+    pub fn sequence_no(&self) -> LedgerSequenceNo {
+        self.sequence_no
+    }
+
+    pub fn entry_hash(&self) -> LedgerHash {
+        self.entry_hash
+    }
+
+    pub fn chain_head(&self) -> LedgerChainHead {
+        self.chain_head
+    }
+
+    pub fn replayed(&self) -> bool {
+        self.replayed
+    }
+}
+
+impl TryFrom<AppendLedgerEntryResponse> for AppendLedgerEntryOutcome {
+    type Error = SupabaseRpcError;
+
+    fn try_from(response: AppendLedgerEntryResponse) -> Result<Self, Self::Error> {
+        let ledger_entry_id = LedgerEntryId::parse(&response.ledger_entry_id).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "ledger RPC returned invalid ledger_entry_id".to_owned(),
+            )
+        })?;
+        let sequence_no = LedgerSequenceNo::from_i64(response.sequence_no).map_err(|_| {
+            SupabaseRpcError::InvalidResponse("ledger RPC returned invalid sequence_no".to_owned())
+        })?;
+        let entry_hash = LedgerHash::from_bytea_hex(&response.entry_hash).map_err(|_| {
+            SupabaseRpcError::InvalidResponse("ledger RPC returned invalid entry_hash".to_owned())
+        })?;
+        let chain_last_entry_hash = LedgerHash::from_bytea_hex(&response.chain_last_entry_hash)
+            .map_err(|_| {
+                SupabaseRpcError::InvalidResponse(
+                    "ledger RPC returned invalid chain_last_entry_hash".to_owned(),
+                )
+            })?;
+        let chain_head =
+            LedgerChainHead::from_i64(response.chain_last_sequence_no, chain_last_entry_hash)
+                .map_err(|_| {
+                    SupabaseRpcError::InvalidResponse(
+                        "ledger RPC returned invalid chain_last_sequence_no".to_owned(),
+                    )
+                })?;
+
+        Ok(Self {
+            ledger_entry_id,
+            sequence_no,
+            entry_hash,
+            chain_head,
+            replayed: response.replayed,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerAppendRpcFailure {
+    EntryIdConflict,
+    EntryHashConflict,
+    SequenceMismatch,
+    PreviousHashMismatch,
+    PayloadSchemaViolation,
+    ChainStateMissing,
+    InvalidRpcInput,
+    AppendFailed,
+}
+
+impl LedgerAppendRpcFailure {
+    pub fn as_error_code(self) -> &'static str {
+        match self {
+            Self::EntryIdConflict => "ledger_entry_id_conflict",
+            Self::EntryHashConflict => "ledger_entry_hash_conflict",
+            Self::SequenceMismatch => "ledger_sequence_mismatch",
+            Self::PreviousHashMismatch => "ledger_previous_hash_mismatch",
+            Self::PayloadSchemaViolation => "ledger_payload_schema_violation",
+            Self::ChainStateMissing => "ledger_chain_state_mismatch",
+            Self::InvalidRpcInput | Self::AppendFailed => "ledger_append_failed",
+        }
+    }
+}
+
+pub fn classify_append_ledger_error(error: &SupabaseRpcError) -> LedgerAppendRpcFailure {
+    let SupabaseRpcError::NonSuccessStatus { body, .. } = error else {
+        return LedgerAppendRpcFailure::AppendFailed;
+    };
+
+    if response_contains_marker(body, LEDGER_ENTRY_ID_CONFLICT_MARKER) {
+        LedgerAppendRpcFailure::EntryIdConflict
+    } else if response_contains_marker(body, LEDGER_ENTRY_HASH_CONFLICT_MARKER) {
+        LedgerAppendRpcFailure::EntryHashConflict
+    } else if response_contains_marker(body, LEDGER_SEQUENCE_MISMATCH_MARKER) {
+        LedgerAppendRpcFailure::SequenceMismatch
+    } else if response_contains_marker(body, LEDGER_PREVIOUS_HASH_MISMATCH_MARKER) {
+        LedgerAppendRpcFailure::PreviousHashMismatch
+    } else if LEDGER_PAYLOAD_SCHEMA_MARKERS
+        .iter()
+        .any(|marker| response_contains_marker(body, marker))
+    {
+        LedgerAppendRpcFailure::PayloadSchemaViolation
+    } else if response_contains_marker(body, LEDGER_CHAIN_STATE_MISSING_MARKER) {
+        LedgerAppendRpcFailure::ChainStateMissing
+    } else if response_contains_marker(body, LEDGER_INVALID_RPC_INPUT_MARKER) {
+        LedgerAppendRpcFailure::InvalidRpcInput
+    } else {
+        LedgerAppendRpcFailure::AppendFailed
+    }
+}
+
+impl AppendLedgerEntryParams {
+    fn from_signed_entry(entry: &SignedLedgerEntry) -> Self {
+        Self {
+            p_ledger_entry_id: entry.ledger_entry_id().as_canonical_string(),
+            p_sequence_no: entry.sequence_no().get(),
+            p_entry_type: entry.entry_type().as_str().to_owned(),
+            p_source_event_at: entry.source_event_at().as_str().to_owned(),
+            p_request_id: entry.request_id().as_canonical_string(),
+            p_source_event_id: entry
+                .source_event_id()
+                .map(|event_id| event_id.as_canonical_string()),
+            p_target_secret_id: entry
+                .target_secret_id()
+                .map(|secret_id| secret_id.as_canonical_string()),
+            p_target_secret_version_id: entry
+                .target_secret_version_id()
+                .map(|version_id| version_id.as_canonical_string()),
+            p_actor_user_id: entry
+                .actor_user_id()
+                .map(|user_id| user_id.as_canonical_string()),
+            p_actor_device_id: entry
+                .actor_device_id()
+                .map(|device_id| device_id.as_str().to_owned()),
+            p_result: entry.result().as_str().to_owned(),
+            p_error_code: entry.error_code().map(str::to_owned),
+            p_payload: entry.payload().as_value(),
+            p_canonicalization_version: crate::ledger::LEDGER_CANONICALIZATION_VERSION_V1,
+            p_previous_entry_hash: entry.previous_entry_hash().to_bytea_hex(),
+            p_entry_hash: entry.entry_hash().to_bytea_hex(),
+            p_hash_algorithm: crate::ledger::LEDGER_HASH_ALGORITHM_SHA256.to_owned(),
+            p_signature: entry.signature().to_bytea_hex(),
+            p_signature_algorithm: crate::ledger::LEDGER_SIGNATURE_ALGORITHM_ED25519.to_owned(),
+            p_signature_key_version: entry.signature_key_version().get(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 pub struct WriteSecretVersionParams {
     pub p_request_id: String,
     pub p_action: String,
@@ -716,14 +943,18 @@ fn classify_append_audit_error(error: SupabaseRpcError) -> AuditAppendError {
 }
 
 fn response_contains_audit_event_id_conflict(body: &str) -> bool {
+    response_contains_marker(body, AUDIT_EVENT_ID_CONFLICT_MARKER)
+}
+
+fn response_contains_marker(body: &str, marker: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return false;
+        return body.contains(marker);
     };
 
     ["message", "details", "hint"].into_iter().any(|field| {
         value
             .get(field)
             .and_then(Value::as_str)
-            .is_some_and(|text| text.contains(AUDIT_EVENT_ID_CONFLICT_MARKER))
+            .is_some_and(|text| text.contains(marker))
     })
 }

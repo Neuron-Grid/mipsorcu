@@ -6,19 +6,24 @@ use std::sync::mpsc;
 use std::thread;
 
 use mipsorcu::server::supabase::{
-    IntegrityCheckViolationSummary, SupabaseAuditAppender, SupabaseClient, SupabaseRpcError,
+    IntegrityCheckViolationSummary, LedgerAppendRpcFailure, SupabaseAuditAppender, SupabaseClient,
+    SupabaseRpcError, classify_append_ledger_error,
 };
 use mipsorcu::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventId, AuditEventParts,
-    AuditMetadata, AuditResult, DeviceId, KeyVersion, OwnerUserId, RawJwt, RequestId, SecretId,
+    AuditMetadata, AuditResult, DeviceId, KeyVersion, LedgerChainHead, LedgerEntryDraft,
+    LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType, LedgerHash, LedgerPayload, LedgerResult,
+    LedgerSequenceNo, LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
+    OwnerUserId, RawJwt, RequestId, SecretId, SourceEventAt,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[derive(Debug)]
 struct CapturedRequest {
     method: String,
     path: String,
     headers: HashMap<String, String>,
+    body: String,
 }
 
 type ProbeServer = (
@@ -228,6 +233,108 @@ async fn integrity_check_uses_service_role_rpc_and_parses_summary() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn append_ledger_entry_uses_service_role_rpc_and_sql_parameter_names() {
+    let entry = sample_signed_ledger_entry().expect("ledger entry should build");
+    let response_body = serde_json::to_string(&json!([{
+        "ledger_entry_id": entry.ledger_entry_id().as_canonical_string(),
+        "sequence_no": entry.sequence_no().get(),
+        "entry_hash": entry.entry_hash().to_bytea_hex(),
+        "chain_last_sequence_no": entry.sequence_no().get(),
+        "chain_last_entry_hash": entry.entry_hash().to_bytea_hex(),
+        "replayed": false
+    }]))
+    .expect("ledger response should serialize");
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+
+    let outcome = client
+        .call_append_ledger_entry(&entry)
+        .await
+        .expect("ledger append RPC should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+    let body: Value = serde_json::from_str(&request.body).expect("request body should be JSON");
+
+    assert_eq!(outcome.ledger_entry_id(), entry.ledger_entry_id());
+    assert_eq!(outcome.sequence_no(), entry.sequence_no());
+    assert_eq!(outcome.entry_hash(), entry.entry_hash());
+    assert_eq!(
+        outcome.chain_head(),
+        LedgerChainHead::new(entry.sequence_no().get(), entry.entry_hash())
+            .expect("chain head should be valid")
+    );
+    assert!(!outcome.replayed());
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_append_ledger_entry");
+    assert_eq!(
+        request.headers.get("authorization"),
+        Some(&"Bearer service-role-secret".to_owned())
+    );
+    assert_eq!(
+        request.headers.get("apikey"),
+        Some(&"service-role-secret".to_owned())
+    );
+
+    assert_eq!(
+        body["p_ledger_entry_id"],
+        entry.ledger_entry_id().as_canonical_string()
+    );
+    assert_eq!(body["p_sequence_no"], entry.sequence_no().get());
+    assert_eq!(body["p_entry_type"], "secret_created");
+    assert_eq!(body["p_source_event_at"], SOURCE_EVENT_AT);
+    assert_eq!(body["p_request_id"], REQUEST_ID);
+    assert!(body["p_source_event_id"].is_null());
+    assert_eq!(body["p_target_secret_id"], TARGET_SECRET_ID);
+    assert_eq!(
+        body["p_target_secret_version_id"],
+        "11111111-2222-4333-8444-555555555555"
+    );
+    assert_eq!(body["p_actor_user_id"], OWNER_USER_ID);
+    assert_eq!(body["p_actor_device_id"], DEVICE_ID);
+    assert_eq!(body["p_result"], "success");
+    assert!(body["p_error_code"].is_null());
+    assert_eq!(body["p_payload"]["algorithm"], "xchacha20-poly1305");
+    assert_eq!(body["p_canonicalization_version"], 1);
+    assert_eq!(
+        body["p_previous_entry_hash"],
+        LedgerHash::genesis().to_bytea_hex()
+    );
+    assert_eq!(body["p_entry_hash"], entry.entry_hash().to_bytea_hex());
+    assert_eq!(body["p_hash_algorithm"], "sha-256");
+    assert_eq!(body["p_signature"], entry.signature().to_bytea_hex());
+    assert_eq!(body["p_signature_algorithm"], "ed25519");
+    assert_eq!(body["p_signature_key_version"], 1);
+}
+
+#[test]
+fn ledger_append_error_classification_uses_body_without_exposing_it() {
+    let body = r#"{"message":"ledger_sequence_mismatch with upstream details"}"#.to_owned();
+    let error = SupabaseRpcError::NonSuccessStatus { status: 409, body };
+
+    assert_eq!(
+        classify_append_ledger_error(&error),
+        LedgerAppendRpcFailure::SequenceMismatch
+    );
+    assert_eq!(
+        classify_append_ledger_error(&error).as_error_code(),
+        "ledger_sequence_mismatch"
+    );
+    assert!(!format!("{error:?}").contains("with upstream details"));
+    assert!(!error.to_string().contains("with upstream details"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn readiness_probe_retries_with_publishable_key_after_unauthorized_head() {
     let (base_url, receiver, server_thread) =
         spawn_probe_server(vec![401, 200]).expect("probe server should start");
@@ -376,6 +483,41 @@ fn sample_audit_event() -> AuditEvent {
     .expect("audit event must be valid")
 }
 
+fn sample_signed_ledger_entry() -> Result<mipsorcu::SignedLedgerEntry, Box<dyn std::error::Error>> {
+    let payload = LedgerPayload::new(
+        LedgerEntryType::SecretCreated,
+        json!({
+            "algorithm": "xchacha20-poly1305",
+            "classification": "confidential",
+            "key_version": 1,
+            "version": 1
+        }),
+    )?;
+    let draft = LedgerEntryDraft::new(LedgerEntryDraftParts {
+        ledger_entry_id: LedgerEntryId::parse("22222222-2222-4222-8222-222222222222")?,
+        sequence_no: LedgerSequenceNo::new(1)?,
+        entry_type: LedgerEntryType::SecretCreated,
+        source_event_at: SourceEventAt::parse(SOURCE_EVENT_AT)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        source_event_id: None,
+        target_secret_id: Some(SecretId::parse(TARGET_SECRET_ID)?),
+        target_secret_version_id: Some(LedgerTargetSecretVersionId::parse(
+            "11111111-2222-4333-8444-555555555555",
+        )?),
+        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+        result: LedgerResult::Success,
+        error_code: None,
+        payload,
+        previous_entry_hash: LedgerHash::genesis(),
+        signature_key_version: LedgerSignatureKeyVersion::new(1)?,
+    })?;
+    let signing_key =
+        LedgerSigningKey::from_secret_key_bytes(LedgerSignatureKeyVersion::new(1)?, &[9u8; 32])?;
+
+    Ok(draft.sign(&signing_key)?)
+}
+
 fn spawn_probe_server(statuses: Vec<u16>) -> Result<ProbeServer, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
@@ -438,11 +580,27 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest>
             Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()))
         })
         .collect::<HashMap<_, _>>();
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    let mut body = buffer.get(body_start..).unwrap_or_default().to_vec();
+
+    while body.len() < content_length {
+        let bytes_read = stream.read(&mut chunk)?;
+        if bytes_read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..bytes_read]);
+    }
+    body.truncate(content_length);
 
     Ok(CapturedRequest {
         method,
         path,
         headers,
+        body: String::from_utf8_lossy(&body).into_owned(),
     })
 }
 

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod authorization;
 pub mod crypto;
 pub mod error;
+pub mod ledger;
 pub mod read;
 pub mod server;
 pub mod types;
@@ -32,6 +33,16 @@ pub use crypto::{
 pub use error::{
     AadError, AuthorizationError, CryptoError, DecryptIntegrityError, InputError,
     JwtVerificationError, KeyringError, SecretDecryptError, SecretWriteError,
+};
+pub use ledger::{
+    FORBIDDEN_LEDGER_PAYLOAD_KEYS, LEDGER_CANONICAL_SCHEMA_V1, LEDGER_CANONICALIZATION_VERSION_V1,
+    LEDGER_ED25519_PUBLIC_KEY_LENGTH, LEDGER_ED25519_SECRET_KEY_LENGTH,
+    LEDGER_HASH_ALGORITHM_SHA256, LEDGER_HASH_LENGTH, LEDGER_PAYLOAD_MAX_CANONICAL_BYTES,
+    LEDGER_SIGNATURE_ALGORITHM_ED25519, LEDGER_SIGNATURE_LENGTH, LedgerCanonicalPayload,
+    LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType,
+    LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo, LedgerSignature,
+    LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
+    LedgerVerificationKey, SignedLedgerEntry, SignedLedgerEntryParts, verify_ledger_chain,
 };
 pub use read::{
     DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts,
