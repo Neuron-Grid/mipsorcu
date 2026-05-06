@@ -1,11 +1,11 @@
 use mipsorcu::{
-    DeviceId, LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts, LedgerEntryId,
-    LedgerEntryType, LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo,
-    LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
+    DeviceId, LEDGER_HASH_LENGTH, LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts,
+    LedgerEntryId, LedgerEntryType, LedgerError, LedgerHash, LedgerPayload, LedgerResult,
+    LedgerSequenceNo, LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
     LedgerVerificationKey, OwnerUserId, RequestId, SecretId, SignedLedgerEntry,
     SignedLedgerEntryParts, SourceEventAt, verify_ledger_chain,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -24,6 +24,82 @@ fn ledger_canonical_payload_matches_fixed_vector_and_is_stable() -> TestResult {
         entry.canonical_payload().as_bytes(),
         CANONICAL_VECTOR.as_bytes()
     );
+
+    Ok(())
+}
+
+#[test]
+fn ledger_canonical_payload_excludes_noncanonical_storage_fields() -> TestResult {
+    let entry = sample_signed_entry(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?;
+    let document: Value = serde_json::from_slice(entry.canonical_payload().as_bytes())?;
+    let object = document
+        .as_object()
+        .ok_or(LedgerError::PayloadMustBeObject)?;
+
+    for excluded_field in ["id", "entry_hash", "signature", "created_at"] {
+        assert!(!object.contains_key(excluded_field));
+    }
+
+    assert_eq!(
+        object.get("source_event_at").and_then(Value::as_str),
+        Some("2026-04-08T12:00:00Z")
+    );
+    assert_eq!(object.get("source_event_id"), Some(&Value::Null));
+    assert_eq!(
+        object.get("previous_entry_hash").and_then(Value::as_str),
+        Some("0000000000000000000000000000000000000000000000000000000000000000")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ledger_canonical_payload_preserves_json_null_for_absent_optional_fields() -> TestResult {
+    let draft = LedgerEntryDraft::new(LedgerEntryDraftParts {
+        ledger_entry_id: LedgerEntryId::parse("22222222-2222-4222-8222-222222222222")?,
+        sequence_no: LedgerSequenceNo::new(1)?,
+        entry_type: LedgerEntryType::IntegrityCheckCompleted,
+        source_event_at: SourceEventAt::parse("2026-04-08T12:00:00Z").map_err(|_| {
+            LedgerError::InvalidPayloadField {
+                key: "source_event_at".to_owned(),
+                expected: "a canonical UTC RFC3339 timestamp",
+            }
+        })?,
+        request_id: RequestId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").map_err(|_| {
+            LedgerError::InvalidUuid {
+                field: "request_id",
+            }
+        })?,
+        source_event_id: None,
+        target_secret_id: None,
+        target_secret_version_id: None,
+        actor_user_id: None,
+        actor_device_id: None,
+        result: LedgerResult::Success,
+        error_code: None,
+        payload: LedgerPayload::empty(LedgerEntryType::IntegrityCheckCompleted)?,
+        previous_entry_hash: LedgerHash::genesis(),
+        signature_key_version: LedgerSignatureKeyVersion::new(1)?,
+    })?;
+
+    let canonical_payload = draft.canonical_payload()?;
+    let document: Value = serde_json::from_slice(canonical_payload.as_bytes())?;
+    let object = document
+        .as_object()
+        .ok_or(LedgerError::PayloadMustBeObject)?;
+
+    for nullable_field in [
+        "source_event_id",
+        "target_secret_id",
+        "target_secret_version_id",
+        "actor_user_id",
+        "actor_device_id",
+        "error_code",
+    ] {
+        assert_eq!(object.get(nullable_field), Some(&Value::Null));
+    }
+
+    assert_eq!(object.get("payload"), Some(&json!({})));
 
     Ok(())
 }
@@ -67,6 +143,39 @@ fn ledger_payload_key_order_does_not_change_hash() -> TestResult {
     let reordered = sample_signed_entry(sample_payload_reordered()?, LedgerSequenceNo::new(1)?)?;
 
     assert_eq!(ordered.entry_hash(), reordered.entry_hash());
+
+    Ok(())
+}
+
+#[test]
+fn ledger_previous_entry_hash_participates_in_canonical_hash() -> TestResult {
+    let base_draft = sample_entry_draft(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?;
+    let base_canonical = base_draft.canonical_payload()?;
+    let base_hash = LedgerHash::from_canonical_payload(&base_canonical);
+    let changed_previous_hash =
+        LedgerHash::from_hex("1111111111111111111111111111111111111111111111111111111111111111")?;
+    let changed_draft = sample_entry_draft_with_previous_hash(
+        sample_payload_ordered()?,
+        LedgerSequenceNo::new(1)?,
+        changed_previous_hash,
+    )?;
+    let changed_canonical = changed_draft.canonical_payload()?;
+    let changed_hash = LedgerHash::from_canonical_payload(&changed_canonical);
+
+    assert_ne!(base_canonical.as_bytes(), changed_canonical.as_bytes());
+    assert_ne!(base_hash, changed_hash);
+
+    Ok(())
+}
+
+#[test]
+fn ledger_hash_is_sha256_fixed_32_bytes() -> TestResult {
+    let entry = sample_signed_entry(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?;
+    let recomputed_hash = LedgerHash::from_canonical_payload(entry.canonical_payload());
+
+    assert_eq!(recomputed_hash, entry.entry_hash());
+    assert_eq!(recomputed_hash.as_bytes().len(), LEDGER_HASH_LENGTH);
+    assert_eq!(recomputed_hash.as_bytes().len(), 32);
 
     Ok(())
 }
@@ -369,6 +478,14 @@ fn sample_entry_draft(
     payload: LedgerPayload,
     sequence_no: LedgerSequenceNo,
 ) -> Result<LedgerEntryDraft, LedgerError> {
+    sample_entry_draft_with_previous_hash(payload, sequence_no, LedgerHash::genesis())
+}
+
+fn sample_entry_draft_with_previous_hash(
+    payload: LedgerPayload,
+    sequence_no: LedgerSequenceNo,
+    previous_entry_hash: LedgerHash,
+) -> Result<LedgerEntryDraft, LedgerError> {
     LedgerEntryDraft::new(LedgerEntryDraftParts {
         ledger_entry_id: LedgerEntryId::parse("22222222-2222-4222-8222-222222222222")?,
         sequence_no,
@@ -408,7 +525,7 @@ fn sample_entry_draft(
         result: LedgerResult::Success,
         error_code: None,
         payload,
-        previous_entry_hash: LedgerHash::genesis(),
+        previous_entry_hash,
         signature_key_version: LedgerSignatureKeyVersion::new(1)?,
     })
 }
