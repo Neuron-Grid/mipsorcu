@@ -14,7 +14,7 @@ const CANONICAL_VECTOR_HASH: &str =
     "8d63bba7d0c4b972f0134df8ffad728330897312bb556ddbea27ff708294a93b";
 
 #[test]
-fn canonical_payload_matches_fixed_vector_and_is_stable() -> TestResult {
+fn ledger_canonical_payload_matches_fixed_vector_and_is_stable() -> TestResult {
     let entry = sample_signed_entry(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?;
     let canonical = std::str::from_utf8(entry.canonical_payload().as_bytes())?;
 
@@ -29,7 +29,7 @@ fn canonical_payload_matches_fixed_vector_and_is_stable() -> TestResult {
 }
 
 #[test]
-fn same_meaning_uuid_and_payload_order_produce_same_canonical_payload() -> TestResult {
+fn ledger_same_meaning_uuid_and_payload_order_produce_same_canonical_payload() -> TestResult {
     let entry = sample_signed_entry(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?;
     let variant = LedgerEntryDraft::new(LedgerEntryDraftParts {
         ledger_entry_id: LedgerEntryId::parse("22222222-2222-4222-8222-222222222222")?,
@@ -62,7 +62,7 @@ fn same_meaning_uuid_and_payload_order_produce_same_canonical_payload() -> TestR
 }
 
 #[test]
-fn payload_key_order_does_not_change_hash() -> TestResult {
+fn ledger_payload_key_order_does_not_change_hash() -> TestResult {
     let ordered = sample_signed_entry(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?;
     let reordered = sample_signed_entry(sample_payload_reordered()?, LedgerSequenceNo::new(1)?)?;
 
@@ -72,20 +72,46 @@ fn payload_key_order_does_not_change_hash() -> TestResult {
 }
 
 #[test]
-fn payload_rejects_unknown_forbidden_and_nested_values() -> TestResult {
-    let unknown = LedgerPayload::new(
+fn ledger_payload_rejects_non_object() {
+    let result = LedgerPayload::new(LedgerEntryType::SecretCreated, json!("not-an-object"));
+
+    assert!(matches!(result, Err(LedgerError::PayloadMustBeObject)));
+}
+
+#[test]
+fn ledger_payload_rejects_unknown_key() {
+    let result = LedgerPayload::new(
         LedgerEntryType::SecretCreated,
         json!({
             "algorithm": "xchacha20-poly1305",
             "unexpected": 1
         }),
     );
-    assert!(matches!(
-        unknown,
-        Err(LedgerError::UnknownPayloadKey { .. })
-    ));
+    assert!(matches!(result, Err(LedgerError::UnknownPayloadKey { .. })));
+}
 
-    let forbidden = LedgerPayload::new(
+#[test]
+fn ledger_payload_rejects_top_level_forbidden_key() {
+    let result = LedgerPayload::new(
+        LedgerEntryType::SecretCreated,
+        json!({
+            "algorithm": "xchacha20-poly1305",
+            "classification": "confidential",
+            "key_version": 1,
+            "version": 1,
+            " TOKEN ": "redacted"
+        }),
+    );
+
+    assert!(matches!(
+        result,
+        Err(LedgerError::ForbiddenPayloadKey { .. })
+    ));
+}
+
+#[test]
+fn ledger_payload_rejects_nested_forbidden_key() {
+    let result = LedgerPayload::new(
         LedgerEntryType::SecretCreated,
         json!({
             "algorithm": "xchacha20-poly1305",
@@ -95,12 +121,37 @@ fn payload_rejects_unknown_forbidden_and_nested_values() -> TestResult {
             "safe": { " jwt ": "redacted" }
         }),
     );
+
     assert!(matches!(
-        forbidden,
+        result,
         Err(LedgerError::ForbiddenPayloadKey { .. })
     ));
+}
 
-    let nested = LedgerPayload::new(
+#[test]
+fn ledger_payload_rejects_forbidden_key_inside_array_object() {
+    let result = LedgerPayload::new(
+        LedgerEntryType::SecretCreated,
+        json!({
+            "algorithm": "xchacha20-poly1305",
+            "classification": "confidential",
+            "key_version": 1,
+            "version": 1,
+            "safe": [
+                { "Master_Key": "redacted" }
+            ]
+        }),
+    );
+
+    assert!(matches!(
+        result,
+        Err(LedgerError::ForbiddenPayloadKey { .. })
+    ));
+}
+
+#[test]
+fn ledger_payload_rejects_non_scalar_allowed_value() {
+    let result = LedgerPayload::new(
         LedgerEntryType::SecretCreated,
         json!({
             "algorithm": { "value": "xchacha20-poly1305" },
@@ -109,16 +160,41 @@ fn payload_rejects_unknown_forbidden_and_nested_values() -> TestResult {
             "version": 1
         }),
     );
+
     assert!(matches!(
-        nested,
+        result,
         Err(LedgerError::PayloadValueMustBeScalar { .. })
     ));
+}
+
+#[test]
+fn ledger_payload_accepts_allowed_keys_only() -> TestResult {
+    let payload = LedgerPayload::new(
+        LedgerEntryType::SecretCreated,
+        json!({
+            "algorithm": "xchacha20-poly1305",
+            "classification": "confidential",
+            "key_version": 1,
+            "version": 1
+        }),
+    )?;
+
+    assert_eq!(payload.entry_type(), LedgerEntryType::SecretCreated);
+    assert_eq!(
+        payload.as_value(),
+        json!({
+            "algorithm": "xchacha20-poly1305",
+            "classification": "confidential",
+            "key_version": 1,
+            "version": 1
+        })
+    );
 
     Ok(())
 }
 
 #[test]
-fn signature_verifies_and_chain_verification_accepts_valid_entry() -> TestResult {
+fn ledger_signature_verifies_and_chain_verification_accepts_valid_entry() -> TestResult {
     let signing_key = sample_signing_key(1)?;
     let verification_key = signing_key.verification_key();
     let entry = sample_entry_draft(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?
@@ -134,7 +210,7 @@ fn signature_verifies_and_chain_verification_accepts_valid_entry() -> TestResult
 }
 
 #[test]
-fn payload_tampering_makes_signature_verification_fail() -> TestResult {
+fn ledger_payload_tampering_makes_signature_verification_fail() -> TestResult {
     let signing_key = sample_signing_key(1)?;
     let verification_key = signing_key.verification_key();
     let entry = sample_entry_draft(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?
@@ -179,7 +255,7 @@ fn payload_tampering_makes_signature_verification_fail() -> TestResult {
 }
 
 #[test]
-fn previous_hash_tampering_and_sequence_gap_are_detected() -> TestResult {
+fn ledger_previous_hash_tampering_and_sequence_gap_are_detected() -> TestResult {
     let signing_key = sample_signing_key(1)?;
     let verification_key = signing_key.verification_key();
     let entry = sample_entry_draft(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?
@@ -234,7 +310,7 @@ fn previous_hash_tampering_and_sequence_gap_are_detected() -> TestResult {
 }
 
 #[test]
-fn signature_key_version_mismatch_and_unknown_key_are_rejected() -> TestResult {
+fn ledger_signature_key_version_mismatch_and_unknown_key_are_rejected() -> TestResult {
     let signing_key = sample_signing_key(1)?;
     let public_key_bytes = signing_key.verification_key().as_bytes();
     let mismatched_key = LedgerVerificationKey::from_public_key_bytes(
@@ -260,15 +336,22 @@ fn signature_key_version_mismatch_and_unknown_key_are_rejected() -> TestResult {
 }
 
 #[test]
-fn debug_output_redacts_payload_and_signing_key_material() -> TestResult {
+fn ledger_payload_debug_redacts_contents() -> TestResult {
     let payload = sample_payload_ordered()?;
-    let signing_key = sample_signing_key(1)?;
     let payload_debug = format!("{payload:?}");
-    let key_debug = format!("{signing_key:?}");
 
     assert!(payload_debug.contains("<redacted>"));
     assert!(!payload_debug.contains("confidential"));
     assert!(!payload_debug.contains("xchacha20-poly1305"));
+
+    Ok(())
+}
+
+#[test]
+fn ledger_signing_key_debug_redacts_key_material() -> TestResult {
+    let signing_key = sample_signing_key(1)?;
+    let key_debug = format!("{signing_key:?}");
+
     assert!(key_debug.contains("<redacted>"));
     assert!(!key_debug.contains("090909"));
 
