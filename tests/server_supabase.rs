@@ -68,6 +68,23 @@ fn supabase_error_debug_does_not_expose_response_body() {
     assert!(!rendered.contains("secret internal upstream details"));
 }
 
+#[test]
+fn supabase_client_debug_redacts_api_keys() {
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        "http://127.0.0.1:54321",
+        "service-role-secret",
+        "publishable-key-secret",
+    );
+
+    let rendered = format!("{client:?}");
+
+    assert!(rendered.contains("SupabaseClient"));
+    assert!(rendered.contains("<redacted>"));
+    assert!(!rendered.contains("service-role-secret"));
+    assert!(!rendered.contains("publishable-key-secret"));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn audit_appender_maps_conflict_response_to_idempotency_conflict() {
     let (base_url, receiver, server_thread) =
@@ -310,9 +327,12 @@ async fn append_ledger_entry_uses_service_role_rpc_and_sql_parameter_names() {
         body["p_previous_entry_hash"],
         LedgerHash::genesis().to_bytea_hex()
     );
+    assert_bytea_hex(&body["p_previous_entry_hash"], 64);
     assert_eq!(body["p_entry_hash"], entry.entry_hash().to_bytea_hex());
+    assert_bytea_hex(&body["p_entry_hash"], 64);
     assert_eq!(body["p_hash_algorithm"], "sha-256");
     assert_eq!(body["p_signature"], entry.signature().to_bytea_hex());
+    assert_bytea_hex(&body["p_signature"], 128);
     assert_eq!(body["p_signature_algorithm"], "ed25519");
     assert_eq!(body["p_signature_key_version"], 1);
 }
@@ -516,6 +536,19 @@ fn sample_signed_ledger_entry() -> Result<mipsorcu::SignedLedgerEntry, Box<dyn s
         LedgerSigningKey::from_secret_key_bytes(LedgerSignatureKeyVersion::new(1)?, &[9u8; 32])?;
 
     Ok(draft.sign(&signing_key)?)
+}
+
+fn assert_bytea_hex(value: &Value, expected_hex_chars: usize) {
+    let text = value.as_str().expect("bytea param should be a string");
+    let hex = text
+        .strip_prefix("\\x")
+        .expect("bytea param should use postgres hex text prefix");
+
+    assert_eq!(hex.len(), expected_hex_chars);
+    assert!(
+        hex.chars()
+            .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character))
+    );
 }
 
 fn spawn_probe_server(statuses: Vec<u16>) -> Result<ProbeServer, Box<dyn std::error::Error>> {
