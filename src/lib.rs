@@ -42,7 +42,8 @@ pub use ledger::{
     LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType,
     LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo, LedgerSignature,
     LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
-    LedgerVerificationKey, SignedLedgerEntry, SignedLedgerEntryParts, verify_ledger_chain,
+    LedgerVerificationKey, LedgerVerifyingKey, SignedLedgerEntry, SignedLedgerEntryParts,
+    verify_ledger_chain,
 };
 pub use read::{
     DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts,

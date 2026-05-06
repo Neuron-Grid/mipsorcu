@@ -2,7 +2,7 @@ use mipsorcu::{
     DeviceId, LEDGER_HASH_LENGTH, LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts,
     LedgerEntryId, LedgerEntryType, LedgerError, LedgerHash, LedgerPayload, LedgerResult,
     LedgerSequenceNo, LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
-    LedgerVerificationKey, OwnerUserId, RequestId, SecretId, SignedLedgerEntry,
+    LedgerVerifyingKey, OwnerUserId, RequestId, SecretId, SignedLedgerEntry,
     SignedLedgerEntryParts, SourceEventAt, verify_ledger_chain,
 };
 use serde_json::{Value, json};
@@ -364,6 +364,48 @@ fn ledger_payload_tampering_makes_signature_verification_fail() -> TestResult {
 }
 
 #[test]
+fn ledger_previous_hash_tampering_makes_signature_verification_fail() -> TestResult {
+    let signing_key = sample_signing_key(1)?;
+    let verification_key = signing_key.verification_key();
+    let entry = sample_entry_draft(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?
+        .sign(&signing_key)?;
+    let tampered_previous_hash =
+        LedgerHash::from_hex("1111111111111111111111111111111111111111111111111111111111111111")?;
+    let tampered_draft = sample_entry_draft_with_previous_hash(
+        entry.payload().clone(),
+        entry.sequence_no(),
+        tampered_previous_hash,
+    )?;
+    let tampered_canonical = tampered_draft.canonical_payload()?;
+    let tampered = SignedLedgerEntry::from_stored_parts(SignedLedgerEntryParts {
+        ledger_entry_id: entry.ledger_entry_id().clone(),
+        sequence_no: entry.sequence_no(),
+        entry_type: entry.entry_type(),
+        source_event_at: entry.source_event_at().clone(),
+        request_id: entry.request_id().clone(),
+        source_event_id: entry.source_event_id().cloned(),
+        target_secret_id: entry.target_secret_id().cloned(),
+        target_secret_version_id: entry.target_secret_version_id().cloned(),
+        actor_user_id: entry.actor_user_id().cloned(),
+        actor_device_id: entry.actor_device_id().cloned(),
+        result: entry.result(),
+        error_code: entry.error_code().map(str::to_owned),
+        payload: entry.payload().clone(),
+        previous_entry_hash: tampered_previous_hash,
+        entry_hash: LedgerHash::from_canonical_payload(&tampered_canonical),
+        signature: entry.signature(),
+        signature_key_version: entry.signature_key_version(),
+    })?;
+
+    assert!(matches!(
+        tampered.verify_signature(&verification_key),
+        Err(LedgerError::SignatureInvalid)
+    ));
+
+    Ok(())
+}
+
+#[test]
 fn ledger_previous_hash_tampering_and_sequence_gap_are_detected() -> TestResult {
     let signing_key = sample_signing_key(1)?;
     let verification_key = signing_key.verification_key();
@@ -422,7 +464,7 @@ fn ledger_previous_hash_tampering_and_sequence_gap_are_detected() -> TestResult 
 fn ledger_signature_key_version_mismatch_and_unknown_key_are_rejected() -> TestResult {
     let signing_key = sample_signing_key(1)?;
     let public_key_bytes = signing_key.verification_key().as_bytes();
-    let mismatched_key = LedgerVerificationKey::from_public_key_bytes(
+    let mismatched_key = LedgerVerifyingKey::from_public_key_bytes(
         LedgerSignatureKeyVersion::new(2)?,
         &public_key_bytes,
     )?;
@@ -438,6 +480,62 @@ fn ledger_signature_key_version_mismatch_and_unknown_key_are_rejected() -> TestR
     ));
     assert!(matches!(
         verify_ledger_chain(&[entry], LedgerChainHead::genesis(), &[]),
+        Err(LedgerError::UnknownSignatureKey { key_version: 1 })
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn ledger_signature_verification_fails_with_different_public_key() -> TestResult {
+    let signing_key = sample_signing_key(1)?;
+    let different_signing_key = sample_signing_key_with_seed(1, &[7u8; 32])?;
+    let different_verification_key = different_signing_key.verification_key();
+    let entry = sample_entry_draft(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?
+        .sign(&signing_key)?;
+
+    assert!(matches!(
+        entry.verify_signature(&different_verification_key),
+        Err(LedgerError::SignatureInvalid)
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn ledger_key_rotation_keeps_old_signatures_verifiable_with_old_public_key() -> TestResult {
+    let old_signing_key = sample_signing_key_with_seed(1, &[9u8; 32])?;
+    let new_signing_key = sample_signing_key_with_seed(2, &[7u8; 32])?;
+    let old_entry = sample_entry_draft_with_signature_key_version(
+        sample_payload_ordered()?,
+        LedgerSequenceNo::new(1)?,
+        LedgerHash::genesis(),
+        LedgerSignatureKeyVersion::new(1)?,
+    )?
+    .sign(&old_signing_key)?;
+    let new_entry = sample_entry_draft_with_signature_key_version(
+        sample_payload_ordered()?,
+        LedgerSequenceNo::new(2)?,
+        old_entry.entry_hash(),
+        LedgerSignatureKeyVersion::new(2)?,
+    )?
+    .sign(&new_signing_key)?;
+    let old_verification_key = old_signing_key.verification_key();
+    let new_verification_key = new_signing_key.verification_key();
+
+    let head = verify_ledger_chain(
+        &[old_entry.clone(), new_entry],
+        LedgerChainHead::genesis(),
+        &[old_verification_key, new_verification_key.clone()],
+    )?;
+
+    assert_eq!(head.last_sequence_no(), 2);
+    assert!(matches!(
+        verify_ledger_chain(
+            &[old_entry],
+            LedgerChainHead::genesis(),
+            &[new_verification_key]
+        ),
         Err(LedgerError::UnknownSignatureKey { key_version: 1 })
     ));
 
@@ -486,6 +584,20 @@ fn sample_entry_draft_with_previous_hash(
     sequence_no: LedgerSequenceNo,
     previous_entry_hash: LedgerHash,
 ) -> Result<LedgerEntryDraft, LedgerError> {
+    sample_entry_draft_with_signature_key_version(
+        payload,
+        sequence_no,
+        previous_entry_hash,
+        LedgerSignatureKeyVersion::new(1)?,
+    )
+}
+
+fn sample_entry_draft_with_signature_key_version(
+    payload: LedgerPayload,
+    sequence_no: LedgerSequenceNo,
+    previous_entry_hash: LedgerHash,
+    signature_key_version: LedgerSignatureKeyVersion,
+) -> Result<LedgerEntryDraft, LedgerError> {
     LedgerEntryDraft::new(LedgerEntryDraftParts {
         ledger_entry_id: LedgerEntryId::parse("22222222-2222-4222-8222-222222222222")?,
         sequence_no,
@@ -526,7 +638,7 @@ fn sample_entry_draft_with_previous_hash(
         error_code: None,
         payload,
         previous_entry_hash,
-        signature_key_version: LedgerSignatureKeyVersion::new(1)?,
+        signature_key_version,
     })
 }
 
@@ -555,5 +667,12 @@ fn sample_payload_reordered() -> Result<LedgerPayload, LedgerError> {
 }
 
 fn sample_signing_key(version: u32) -> Result<LedgerSigningKey, LedgerError> {
-    LedgerSigningKey::from_secret_key_bytes(LedgerSignatureKeyVersion::new(version)?, &[9u8; 32])
+    sample_signing_key_with_seed(version, &[9u8; 32])
+}
+
+fn sample_signing_key_with_seed(
+    version: u32,
+    seed: &[u8],
+) -> Result<LedgerSigningKey, LedgerError> {
+    LedgerSigningKey::from_secret_key_bytes(LedgerSignatureKeyVersion::new(version)?, seed)
 }

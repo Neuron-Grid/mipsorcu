@@ -677,8 +677,8 @@ impl LedgerSigningKey {
         self.key_version
     }
 
-    pub fn verification_key(&self) -> LedgerVerificationKey {
-        LedgerVerificationKey {
+    pub fn verification_key(&self) -> LedgerVerifyingKey {
+        LedgerVerifyingKey {
             key_version: self.key_version,
             verifying_key: self.signing_key.verifying_key(),
         }
@@ -712,12 +712,12 @@ impl fmt::Debug for LedgerSigningKey {
 }
 
 #[derive(Clone)]
-pub struct LedgerVerificationKey {
+pub struct LedgerVerifyingKey {
     key_version: LedgerSignatureKeyVersion,
     verifying_key: VerifyingKey,
 }
 
-impl LedgerVerificationKey {
+impl LedgerVerifyingKey {
     pub fn from_public_key_bytes(
         key_version: LedgerSignatureKeyVersion,
         public_key: &[u8],
@@ -767,14 +767,16 @@ impl LedgerVerificationKey {
     }
 }
 
-impl fmt::Debug for LedgerVerificationKey {
+impl fmt::Debug for LedgerVerifyingKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LedgerVerificationKey")
+            .debug_struct("LedgerVerifyingKey")
             .field("key_version", &self.key_version)
             .finish()
     }
 }
+
+pub type LedgerVerificationKey = LedgerVerifyingKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LedgerChainHead {
@@ -1121,7 +1123,7 @@ impl SignedLedgerEntry {
         LedgerHash::from_canonical_payload(&self.canonical_payload)
     }
 
-    pub fn verify_signature(&self, key: &LedgerVerificationKey) -> Result<(), LedgerError> {
+    pub fn verify_signature(&self, key: &LedgerVerifyingKey) -> Result<(), LedgerError> {
         key.verify_payload(
             self.signature_key_version,
             &self.canonical_payload,
@@ -1179,7 +1181,7 @@ pub struct SignedLedgerEntryParts {
 pub fn verify_ledger_chain(
     entries: &[SignedLedgerEntry],
     initial_head: LedgerChainHead,
-    verification_keys: &[LedgerVerificationKey],
+    verification_keys: &[LedgerVerifyingKey],
 ) -> Result<LedgerChainHead, LedgerError> {
     let mut previous_sequence_no = initial_head.last_sequence_no();
     let mut previous_hash = initial_head.last_entry_hash();
@@ -1576,9 +1578,9 @@ fn validate_actor_device_id(actor_device_id: Option<&DeviceId>) -> Result<(), Le
 }
 
 fn find_verification_key(
-    verification_keys: &[LedgerVerificationKey],
+    verification_keys: &[LedgerVerifyingKey],
     key_version: LedgerSignatureKeyVersion,
-) -> Result<&LedgerVerificationKey, LedgerError> {
+) -> Result<&LedgerVerifyingKey, LedgerError> {
     verification_keys
         .iter()
         .find(|key| key.key_version() == key_version)
