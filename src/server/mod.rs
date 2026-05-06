@@ -6,6 +6,7 @@ pub mod errors;
 pub mod handlers;
 pub mod integrity_check;
 mod key_rotation;
+pub mod ledger_appender;
 pub mod middleware;
 mod read_model;
 mod restore_test;

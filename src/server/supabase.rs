@@ -17,6 +17,7 @@ const CURRENT_SECRET_VERSION_READ_COLUMNS: &str = "\
 id,secret_id,version,ciphertext,encrypted_data_key,key_version,\
 algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,\
 created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+const LEDGER_CHAIN_STATE_READ_COLUMNS: &str = "last_sequence_no,last_entry_hash";
 const AUDIT_EVENT_ID_CONFLICT_MARKER: &str = "audit_event_id_conflict";
 const LEDGER_ENTRY_ID_CONFLICT_MARKER: &str = "ledger_entry_id_conflict";
 const LEDGER_ENTRY_HASH_CONFLICT_MARKER: &str = "ledger_entry_hash_conflict";
@@ -152,6 +153,32 @@ impl SupabaseClient {
             .next()
             .ok_or(SupabaseRpcError::EmptyResult)
             .and_then(AppendLedgerEntryOutcome::try_from)
+    }
+
+    pub async fn fetch_ledger_chain_head(&self) -> Result<LedgerChainHead, SupabaseRpcError> {
+        let url = format!(
+            "{}/rest/v1/ledger_chain_state?select={LEDGER_CHAIN_STATE_READ_COLUMNS}&chain_id=eq.global&limit=1",
+            self.base_url
+        );
+        let response = self
+            .http_client
+            .get(&url)
+            .header("apikey", &self.service_role_key)
+            .bearer_auth(&self.service_role_key)
+            .send()
+            .await
+            .map_err(SupabaseRpcError::Network)?;
+
+        let rows: Vec<LedgerChainStateResponse> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .next()
+            .ok_or(SupabaseRpcError::EmptyResult)
+            .and_then(LedgerChainHead::try_from)
     }
 
     pub async fn fetch_current_secret_version_for_user(
@@ -590,6 +617,13 @@ struct AppendLedgerEntryResponse {
     replayed: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerChainStateResponse {
+    last_sequence_no: i64,
+    last_entry_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendLedgerEntryOutcome {
     ledger_entry_id: LedgerEntryId,
@@ -656,6 +690,25 @@ impl TryFrom<AppendLedgerEntryResponse> for AppendLedgerEntryOutcome {
             entry_hash,
             chain_head,
             replayed: response.replayed,
+        })
+    }
+}
+
+impl TryFrom<LedgerChainStateResponse> for LedgerChainHead {
+    type Error = SupabaseRpcError;
+
+    fn try_from(response: LedgerChainStateResponse) -> Result<Self, Self::Error> {
+        let last_entry_hash =
+            LedgerHash::from_bytea_hex(&response.last_entry_hash).map_err(|_| {
+                SupabaseRpcError::InvalidResponse(
+                    "ledger chain state returned invalid last_entry_hash".to_owned(),
+                )
+            })?;
+
+        LedgerChainHead::from_i64(response.last_sequence_no, last_entry_hash).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "ledger chain state returned invalid last_sequence_no".to_owned(),
+            )
         })
     }
 }
