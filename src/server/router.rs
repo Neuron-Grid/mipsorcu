@@ -1,8 +1,5 @@
 use axum::Router;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use std::time::Duration;
 use tower_http::LatencyUnit;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::{
@@ -66,23 +63,4 @@ pub(crate) fn apply_standard_layers(router: Router<AppState>, state: AppState) -
                 ),
         )
         .with_state(state)
-}
-
-#[doc(hidden)]
-pub fn build_sleep_app_for_testing(state: AppState, sleep_duration: Duration) -> Router {
-    let router = Router::<AppState>::new()
-        .route(
-            "/__test/sleep",
-            get(move || async move {
-                tokio::time::sleep(sleep_duration).await;
-                StatusCode::NO_CONTENT
-            }),
-        )
-        .fallback(|| async {
-            handlers::not_found(middleware::RequestContext::new(crate::RequestId::nil()))
-                .await
-                .into_response()
-        });
-
-    apply_standard_layers(router, state)
 }

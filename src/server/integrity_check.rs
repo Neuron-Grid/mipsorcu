@@ -294,8 +294,3 @@ fn audit_record_outcome_label(outcome: AuditRecordOutcome) -> &'static str {
         AuditRecordOutcome::FallbackSucceeded => "fallback_succeeded",
     }
 }
-
-#[doc(hidden)]
-pub mod testing {
-    pub use super::{build_integrity_check_metadata, usage};
-}

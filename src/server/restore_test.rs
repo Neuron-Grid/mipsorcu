@@ -244,22 +244,6 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
     );
 }
 
-pub fn build_restore_test_decrypt_input(
-    row: RestoreTestSampleRow,
-) -> Result<crate::DecryptCurrentSecretVersionInput, ApiError> {
-    let parsed = read_model::parse_restore_test_sample(row)?;
-    Ok(build_restore_test_decrypt_input_from_prepared(parsed))
-}
-
-pub fn restore_test_metadata(
-    sample_count: u64,
-    error_code: Option<&'static str>,
-    failed_version: Option<u32>,
-    trigger: AuditTrigger,
-) -> AuditMetadata {
-    restore_test_metadata_value(sample_count, error_code, failed_version, trigger, None)
-}
-
 fn restore_test_metadata_with_duration(
     sample_count: u64,
     error_code: Option<&'static str>,
@@ -357,9 +341,4 @@ fn build_restore_test_decrypt_input_from_prepared(
     let claims = VerifiedJwtClaims::for_restore_test_only(prepared.owner_user_id().clone());
 
     prepared.into_decrypt_input(claims)
-}
-
-#[doc(hidden)]
-pub mod testing {
-    pub use super::{build_restore_test_decrypt_input, restore_test_metadata};
 }

@@ -56,7 +56,7 @@ pub async fn refresh_jwks_cache_once(
     cache.replace(jwks).map_err(JwksFetchError::InvalidJwks)
 }
 
-pub async fn run_jwks_refresh_loop(
+pub(crate) async fn run_jwks_refresh_loop(
     cache: JwksCache,
     http_client: reqwest::Client,
     jwks_url: String,
@@ -92,7 +92,7 @@ pub async fn run_jwks_refresh_loop(
     }
 }
 
-pub async fn run_supabase_readiness_poll_loop(
+pub(crate) async fn run_supabase_readiness_poll_loop(
     readiness_state: ReadinessState,
     supabase_client: Arc<SupabaseClient>,
     interval_duration: Duration,
@@ -118,7 +118,7 @@ pub async fn run_supabase_readiness_poll_loop(
     }
 }
 
-pub async fn run_restore_test_loop(
+pub(crate) async fn run_restore_test_loop(
     state: AppState,
     interval_duration: Duration,
     startup_delay: Duration,
@@ -149,7 +149,7 @@ pub async fn run_restore_test_loop(
     }
 }
 
-pub async fn run_integrity_check_loop(
+pub(crate) async fn run_integrity_check_loop(
     state: AppState,
     interval_duration: Duration,
     startup_delay: Duration,
@@ -179,7 +179,7 @@ pub async fn run_integrity_check_loop(
     }
 }
 
-pub async fn run_audit_resend_loop(
+pub(crate) async fn run_audit_resend_loop(
     audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
     fallback_store: LocalAuditFallbackStore,
     interval_duration: Duration,
@@ -491,15 +491,5 @@ fn local_audit_store_error_kind(error: &LocalAuditStoreError) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::resend_audit_error_kind;
-    use crate::audit::AuditRecordError;
-
-    #[test]
-    fn resend_audit_error_kind_reports_idempotency_conflict() {
-        assert_eq!(
-            resend_audit_error_kind(&AuditRecordError::IdempotencyConflict),
-            "idempotency_conflict"
-        );
-    }
-}
+#[path = "../../tests_internal/server_background.rs"]
+mod tests;

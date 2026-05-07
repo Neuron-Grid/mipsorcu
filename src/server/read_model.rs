@@ -86,18 +86,6 @@ impl PreparedDecryptRow {
         self.key_version
     }
 
-    pub fn encrypted_data_key(&self) -> &EncryptedDataKey {
-        &self.encrypted_data_key
-    }
-
-    pub fn nonce_or_iv(&self) -> &Nonce {
-        &self.nonce_or_iv
-    }
-
-    pub fn ciphertext(&self) -> &Ciphertext {
-        &self.ciphertext
-    }
-
     pub fn into_current_secret_version_state(self) -> CurrentSecretVersionState {
         CurrentSecretVersionState::new(
             self.secret_id,
@@ -345,26 +333,4 @@ fn parse_key_version(value: i32, invalid_message: &'static str) -> Result<KeyVer
         .ok()
         .and_then(|parsed| KeyVersion::new(parsed).ok())
         .ok_or_else(|| ApiError::DbIntegrityViolation(invalid_message.to_owned()))
-}
-
-#[doc(hidden)]
-pub(crate) mod testing {
-    use crate::server::errors::ApiError;
-    use crate::server::supabase::SecretVersionReadRow;
-
-    use super::PreparedDecryptRow;
-
-    pub fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {
-        super::parse_decrypt_row(row)
-    }
-
-    pub fn select_single_current_secret_version_row(
-        rows: Vec<SecretVersionReadRow>,
-    ) -> Result<SecretVersionReadRow, ApiError> {
-        super::select_single_current_secret_version_row(rows)
-    }
-
-    pub fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {
-        super::decode_bytea(value)
-    }
 }

@@ -8,11 +8,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mipsorcu::server::ledger_appender::LedgerAppender;
-use mipsorcu::server::runtime::testing as runtime_testing;
 use mipsorcu::server::runtime::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
-    audit_fallback_size_alert, initialize_jwt_verifier_from_jwks_url, refresh_jwks_cache_once,
-    run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
+    audit_fallback_size_alert, build_app, initialize_jwt_verifier_from_jwks_url,
+    refresh_jwks_cache_once, run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
 use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{
@@ -24,12 +23,11 @@ use mipsorcu::{
     JwtVerifier, JwtVerifierConfig, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
     LedgerSignatureKeyVersion, LedgerSigningKey, LocalAuditFallbackStore, MASTER_KEY_LENGTH,
     MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
-    SecretDecryptError, SourceEventAt, prepare_new_secret_version,
+    SourceEventAt, prepare_new_secret_version,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
-use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 fn temp_path(test_name: &str) -> PathBuf {
@@ -126,51 +124,7 @@ type TestServerHandle = (
     thread::JoinHandle<std::io::Result<()>>,
 );
 type HangingServerHandle = (String, thread::JoinHandle<std::io::Result<()>>);
-
-async fn recv_captured_request(
-    receiver: &mpsc::Receiver<CapturedRequest>,
-) -> Result<CapturedRequest, Box<dyn std::error::Error>> {
-    for _ in 0..10_000 {
-        match receiver.try_recv() {
-            Ok(request) => return Ok(request),
-            Err(mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "captured request channel disconnected",
-                )
-                .into());
-            }
-        }
-    }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        "timed out waiting for captured request",
-    )
-    .into())
-}
-
-async fn assert_no_captured_request(
-    receiver: &mpsc::Receiver<CapturedRequest>,
-    message: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for _ in 0..100 {
-        match receiver.try_recv() {
-            Ok(_) => return Err(std::io::Error::other(message).into()),
-            Err(mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "captured request channel disconnected",
-                )
-                .into());
-            }
-        }
-    }
-
-    Ok(())
-}
+type DecryptRowMutation = fn(&mut Value);
 
 #[derive(Debug, Clone, Serialize)]
 struct TestClaims {
@@ -309,6 +263,86 @@ fn decrypt_row_json(plaintext: &[u8]) -> Result<(String, Value), Box<dyn std::er
     ))
 }
 
+fn set_first_decrypt_row_field(rows: &mut Value, field: &str, value: Value) {
+    if let Some(row) = rows.as_array_mut().and_then(|array| array.first_mut()) {
+        row[field] = value;
+    }
+}
+
+fn set_first_decrypt_row_secret_field(rows: &mut Value, field: &str, value: Value) {
+    if let Some(row) = rows.as_array_mut().and_then(|array| array.first_mut()) {
+        row["secrets"][field] = value;
+    }
+}
+
+fn make_decrypt_row_bad_nonce(rows: &mut Value) {
+    set_first_decrypt_row_field(rows, "nonce_or_iv", Value::String("\\x00".to_owned()));
+}
+
+fn make_decrypt_row_empty_ciphertext(rows: &mut Value) {
+    set_first_decrypt_row_field(rows, "ciphertext", Value::String("\\x".to_owned()));
+}
+
+fn make_decrypt_row_ciphertext_without_bytea_prefix(rows: &mut Value) {
+    set_first_decrypt_row_field(rows, "ciphertext", Value::String("00".to_owned()));
+}
+
+fn make_decrypt_row_ciphertext_invalid_hex(rows: &mut Value) {
+    set_first_decrypt_row_field(rows, "ciphertext", Value::String("\\xzz".to_owned()));
+}
+
+fn make_decrypt_row_bad_encrypted_data_key(rows: &mut Value) {
+    set_first_decrypt_row_field(
+        rows,
+        "encrypted_data_key",
+        Value::String("\\x01".to_owned()),
+    );
+}
+
+fn make_decrypt_row_bad_algorithm(rows: &mut Value) {
+    set_first_decrypt_row_field(
+        rows,
+        "algorithm",
+        Value::String("chacha20-poly1305".to_owned()),
+    );
+}
+
+fn make_decrypt_row_owner_mismatch(rows: &mut Value) {
+    set_first_decrypt_row_field(
+        rows,
+        "created_by_user_id",
+        Value::String("f47ac10b-58cc-4372-a567-0e02b2c3d480".to_owned()),
+    );
+}
+
+fn make_decrypt_row_classification_mismatch(rows: &mut Value) {
+    set_first_decrypt_row_field(
+        rows,
+        "classification",
+        Value::String("restricted".to_owned()),
+    );
+}
+
+fn make_decrypt_row_non_current(rows: &mut Value) {
+    set_first_decrypt_row_secret_field(
+        rows,
+        "current_version_id",
+        Value::String("750e8400-e29b-41d4-a716-446655440000".to_owned()),
+    );
+}
+
+fn make_decrypt_rows_multiple_current(rows: &mut Value) {
+    if let Some(array) = rows.as_array_mut()
+        && let Some(row) = array.first().cloned()
+    {
+        array.push(row);
+    }
+}
+
+fn make_decrypt_rows_empty(rows: &mut Value) {
+    *rows = Value::Array(Vec::new());
+}
+
 fn test_jwt_verifier() -> Result<JwtVerifier, Box<dyn std::error::Error>> {
     Ok(JwtVerifier::new(
         JwtVerifierConfig::new(JWT_ISSUER, JWT_AUDIENCE)?,
@@ -389,7 +423,7 @@ async fn spawn_app(
 ) -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let app = runtime_testing::build_app(state);
+    let app = build_app(state);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app)
             .await
@@ -399,13 +433,13 @@ async fn spawn_app(
     Ok((format!("http://{addr}"), handle))
 }
 
-async fn spawn_sleep_app(
+async fn spawn_runtime_resilience_test_app(
     state: AppState,
     sleep_duration: Duration,
 ) -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let app = runtime_testing::build_sleep_app(state, sleep_duration);
+    let app = build_runtime_resilience_test_app(state, sleep_duration);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app)
             .await
@@ -413,6 +447,33 @@ async fn spawn_sleep_app(
     });
 
     Ok((format!("http://{addr}"), handle))
+}
+
+fn build_runtime_resilience_test_app(state: AppState, sleep_duration: Duration) -> axum::Router {
+    let runtime_resilience = mipsorcu::server::middleware::RuntimeResilience::new(
+        state.http_handler_timeout,
+        state.http_rate_limit_requests,
+        state.http_rate_limit_window,
+    );
+
+    // This test app intentionally applies only runtime resilience and request context.
+    // Production standard layers are covered through build_app-based endpoint tests.
+    axum::Router::<AppState>::new()
+        .route(
+            "/__test/sleep",
+            axum::routing::get(move || async move {
+                tokio::time::sleep(sleep_duration).await;
+                axum::http::StatusCode::NO_CONTENT
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            runtime_resilience,
+            mipsorcu::server::middleware::enforce_runtime_resilience,
+        ))
+        .layer(axum::middleware::from_fn(
+            mipsorcu::server::middleware::attach_request_context,
+        ))
+        .with_state(state)
 }
 
 fn spawn_supabase_read_and_audit_server(
@@ -455,6 +516,37 @@ fn spawn_supabase_read_and_audit_server(
                     "Internal Server Error",
                     audit_body,
                 )?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_read_failure_audit_server(
+    secret_versions_body: String,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let is_secret_read = request.path.starts_with("/rest/v1/secret_versions");
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if is_secret_read {
+                write_http_response(&mut stream, 200, "OK", &secret_versions_body)?;
+            } else {
+                write_http_response(&mut stream, 200, "OK", r#""ok""#)?;
             }
         }
 
@@ -590,17 +682,39 @@ fn spawn_supabase_integrity_and_audit_server(
     Ok((format!("http://{addr}"), receiver, thread))
 }
 
-fn spawn_supabase_restore_integrity_audit_server()
--> Result<TestServerHandle, Box<dyn std::error::Error>> {
+fn restore_test_row_json(row: &RestoreTestSampleRow) -> Value {
+    json!({
+        "id": &row.id,
+        "secret_id": &row.secret_id,
+        "version": row.version,
+        "ciphertext": &row.ciphertext,
+        "encrypted_data_key": &row.encrypted_data_key,
+        "key_version": row.key_version,
+        "nonce_or_iv": &row.nonce_or_iv,
+        "aad_context": &row.aad_context,
+        "classification": &row.classification,
+        "created_at": &row.created_at,
+    })
+}
+
+fn spawn_supabase_restore_test_audit_server(
+    sample_status: u16,
+    sample_body: String,
+    audit_status: u16,
+    audit_body: &'static str,
+    request_count: usize,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for _ in 0..6 {
+        for _ in 0..request_count {
             let (mut stream, _) = listener.accept()?;
             let request = read_http_request(&mut stream)?;
             let path = request.path.clone();
-            let response_body = if path == "/rest/v1/rpc/rpc_append_audit_event_with_ledger" {
+            let response_body = if path == "/rest/v1/rpc/rpc_append_audit_event_with_ledger"
+                && audit_status == 200
+            {
                 Some(ledger_append_success_body(&request)?)
             } else {
                 None
@@ -613,16 +727,24 @@ fn spawn_supabase_restore_integrity_audit_server()
             })?;
 
             if path == "/rest/v1/rpc/rpc_sample_restore_test" {
-                write_http_response(&mut stream, 200, "OK", "[]")?;
-            } else if path == "/rest/v1/rpc/rpc_integrity_check" {
-                let body = serde_json::to_string(&json!([integrity_summary_json(0)]))
-                    .map_err(std::io::Error::other)?;
-                write_http_response(&mut stream, 200, "OK", &body)?;
+                let reason = if sample_status == 200 {
+                    "OK"
+                } else {
+                    "Internal Server Error"
+                };
+                write_http_response(&mut stream, sample_status, reason, &sample_body)?;
             } else if path.starts_with("/rest/v1/ledger_chain_state") {
                 write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
-            } else {
+            } else if audit_status == 200 {
                 let body = response_body.as_deref().unwrap_or(r#""ok""#);
                 write_http_response(&mut stream, 200, "OK", body)?;
+            } else {
+                write_http_response(
+                    &mut stream,
+                    audit_status,
+                    "Internal Server Error",
+                    audit_body,
+                )?;
             }
         }
 
@@ -1196,7 +1318,7 @@ async fn rate_limit_returns_429_with_request_id() {
         .expect("test app state should be created");
     state.http_rate_limit_requests = 1;
     state.http_rate_limit_window = Duration::from_secs(60);
-    let (app_url, app_task) = spawn_sleep_app(state, Duration::ZERO)
+    let (app_url, app_task) = spawn_runtime_resilience_test_app(state, Duration::ZERO)
         .await
         .expect("test app should start");
     let client = reqwest::Client::new();
@@ -1254,11 +1376,11 @@ async fn health_and_ready_bypass_rate_limit() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn handler_timeout_returns_503_with_request_id() {
+async fn runtime_resilience_timeout_returns_503_with_request_id() {
     let mut state = test_app_state("http://127.0.0.1:1", temp_path("handler-timeout"))
         .expect("test app state should be created");
     state.http_handler_timeout = Duration::from_millis(20);
-    let (app_url, app_task) = spawn_sleep_app(state, Duration::from_millis(100))
+    let (app_url, app_task) = spawn_runtime_resilience_test_app(state, Duration::from_millis(100))
         .await
         .expect("test sleep app should start");
 
@@ -1284,50 +1406,6 @@ async fn handler_timeout_returns_503_with_request_id() {
 }
 
 #[test]
-fn restore_test_metadata_records_no_sample_reason_without_forbidden_keys() {
-    let metadata =
-        runtime_testing::restore_test_metadata(0, Some("no_current_secret_versions"), None);
-
-    assert_eq!(
-        metadata.as_value(),
-        &json!({
-            "phase": "verify",
-            "sample_count": 0,
-            "reason": "no_current_secret_versions",
-            "trigger": "cli",
-        })
-    );
-}
-
-#[test]
-fn restore_test_metadata_records_failure_code_without_forbidden_keys() {
-    let metadata = runtime_testing::restore_test_metadata(3, Some("decrypt_failed"), Some(2));
-
-    assert_eq!(
-        metadata.as_value(),
-        &json!({
-            "phase": "verify",
-            "sample_count": 3,
-            "error_code": "decrypt_failed",
-            "failed_version": 2,
-            "trigger": "cli",
-        })
-    );
-}
-
-#[test]
-fn restore_test_metadata_records_trigger() {
-    let metadata = runtime_testing::restore_test_metadata_with_trigger(
-        1,
-        None,
-        None,
-        AuditTrigger::Background,
-    );
-
-    assert_eq!(metadata.as_value()["trigger"], "background");
-}
-
-#[test]
 fn integrity_check_metadata_records_aggregate_only_summary()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut summary = IntegrityCheckSummary::zero();
@@ -1337,8 +1415,11 @@ fn integrity_check_metadata_records_aggregate_only_summary()
     summary.violation_count = 1;
     summary.violation_summary.algorithm_invalid = 1;
 
-    let metadata =
-        runtime_testing::integrity_check_metadata(&summary, AuditTrigger::Startup, None)?;
+    let metadata = mipsorcu::server::integrity_check::build_integrity_check_metadata(
+        &summary,
+        AuditTrigger::Startup,
+        None,
+    )?;
     let serialized = serde_json::to_string(metadata.as_value())?;
 
     assert_eq!(metadata.as_value()["check_name"], "mvp_integrity_check");
@@ -1363,7 +1444,7 @@ fn integrity_check_metadata_records_aggregate_only_summary()
 
 #[test]
 fn integrity_check_metadata_records_failure_error_code() -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = runtime_testing::integrity_check_metadata(
+    let metadata = mipsorcu::server::integrity_check::build_integrity_check_metadata(
         &IntegrityCheckSummary::zero(),
         AuditTrigger::Cli,
         Some("rpc_failed"),
@@ -1377,7 +1458,7 @@ fn integrity_check_metadata_records_failure_error_code() -> Result<(), Box<dyn s
 
 #[test]
 fn integrity_check_cli_usage_documents_once_command() {
-    let usage = runtime_testing::integrity_check_usage();
+    let usage = mipsorcu::server::integrity_check::usage();
 
     assert!(usage.contains("mipsorcu integrity-check once"));
 }
@@ -1520,133 +1601,100 @@ async fn integrity_check_rpc_failure_falls_back_when_primary_audit_fails()
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn background_restore_and_integrity_startup_offsets_are_phased()
+#[tokio::test(flavor = "current_thread")]
+async fn restore_test_records_no_sample_reason_without_forbidden_keys()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (supabase_url, receiver, server_thread) = spawn_supabase_restore_integrity_audit_server()?;
-    let state = test_app_state(&supabase_url, temp_path("background-offsets"))?;
-    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-    let restore_handle = tokio::spawn(runtime_testing::run_restore_test_loop(
-        state.clone(),
-        Duration::from_secs(86_400),
-        Duration::from_secs(300),
-        3,
-        shutdown_sender.subscribe(),
-    ));
-    let integrity_handle = tokio::spawn(runtime_testing::run_integrity_check_loop(
-        state,
-        Duration::from_secs(86_400),
-        Duration::from_secs(3900),
-        shutdown_receiver,
-    ));
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_restore_test_audit_server(200, "[]".to_owned(), 200, r#""ok""#, 3)?;
+    let state = test_app_state(&supabase_url, temp_path("restore-no-sample"))?;
 
-    tokio::task::yield_now().await;
-    assert_no_captured_request(
-        &receiver,
-        "background jobs should not run before their startup delays",
-    )
-    .await?;
-
-    tokio::time::advance(Duration::from_secs(299)).await;
-    tokio::task::yield_now().await;
-    assert_no_captured_request(&receiver, "restore test should wait until +300s").await?;
-
-    tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::task::yield_now().await;
-    let restore_request = recv_captured_request(&receiver).await?;
-    let restore_chain_request = recv_captured_request(&receiver).await?;
-    let restore_audit_request = recv_captured_request(&receiver).await?;
-    assert_eq!(restore_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
-    assert!(
-        restore_chain_request
-            .path
-            .starts_with("/rest/v1/ledger_chain_state")
-    );
-    assert_eq!(
-        restore_audit_request.path,
-        "/rest/v1/rpc/rpc_append_audit_event_with_ledger"
-    );
-    assert_eq!(
-        restore_audit_request
-            .body
-            .as_ref()
-            .and_then(|body| body["p_entry_type"].as_str()),
-        Some("restore_test_completed")
-    );
-    assert_eq!(
-        restore_audit_request
-            .body
-            .as_ref()
-            .and_then(|body| body["p_metadata_json"]["trigger"].as_str()),
-        Some("startup")
-    );
-    assert_no_captured_request(
-        &receiver,
-        "integrity check must not run at the restore test startup time",
-    )
-    .await?;
-
-    tokio::time::advance(Duration::from_secs(3599)).await;
-    tokio::task::yield_now().await;
-    assert_no_captured_request(&receiver, "integrity check should wait until +3900s").await?;
-
-    tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::task::yield_now().await;
-    let integrity_request = recv_captured_request(&receiver).await?;
-    let integrity_chain_request = recv_captured_request(&receiver).await?;
-    let integrity_audit_request = recv_captured_request(&receiver).await?;
-    assert_eq!(integrity_request.path, "/rest/v1/rpc/rpc_integrity_check");
-    assert!(
-        integrity_chain_request
-            .path
-            .starts_with("/rest/v1/ledger_chain_state")
-    );
-    assert_eq!(
-        integrity_audit_request.path,
-        "/rest/v1/rpc/rpc_append_audit_event_with_ledger"
-    );
-    assert_eq!(
-        integrity_audit_request
-            .body
-            .as_ref()
-            .and_then(|body| body["p_entry_type"].as_str()),
-        Some("integrity_check_completed")
-    );
-    assert_eq!(
-        integrity_audit_request
-            .body
-            .as_ref()
-            .and_then(|body| body["p_metadata_json"]["trigger"].as_str()),
-        Some("startup")
-    );
-
-    shutdown_sender
-        .send(true)
-        .expect("shutdown signal should send");
-    restore_handle.await?;
-    integrity_handle.await?;
+    mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let chain_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
     server_thread
         .join()
-        .expect("background server thread should not panic")?;
+        .expect("restore test server thread should not panic")?;
+
+    assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
+    assert_eq!(
+        audit_request.path,
+        "/rest/v1/rpc/rpc_append_audit_event_with_ledger"
+    );
+    let audit_body = audit_request
+        .body
+        .ok_or_else(|| std::io::Error::other("restore audit body should be JSON"))?;
+    assert_eq!(audit_body["p_action"], "restore_test");
+    assert_eq!(audit_body["p_entry_type"], "restore_test_completed");
+    assert_eq!(audit_body["p_result"], "success");
+    assert_eq!(
+        audit_body["p_metadata_json"]["reason"],
+        "no_current_secret_versions"
+    );
+    assert_eq!(audit_body["p_metadata_json"]["sample_count"], 0);
+    assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+    let metadata_and_payload = serde_json::to_string(&json!({
+        "metadata_json": audit_body["p_metadata_json"].clone(),
+        "payload": audit_body["p_payload"].clone(),
+    }))?;
+    assert!(!metadata_and_payload.contains("\\x"));
+    assert!(!metadata_and_payload.contains("plaintext"));
+    assert!(!metadata_and_payload.contains("service-role-key"));
 
     Ok(())
 }
 
-#[test]
-fn restore_test_input_round_trips_existing_encrypted_sample()
+#[tokio::test(flavor = "current_thread")]
+async fn restore_test_round_trips_existing_encrypted_sample_via_runtime()
 -> Result<(), Box<dyn std::error::Error>> {
-    let plaintext = b"restore test sample".to_vec();
-    let (master_key, row) = prepared_restore_test_row(plaintext.clone())?;
-    let input = runtime_testing::build_restore_test_decrypt_input(row)?;
+    let (_, row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
+    let sample_body = serde_json::to_string(&json!([restore_test_row_json(&row)]))?;
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_restore_test_audit_server(200, sample_body, 200, r#""ok""#, 3)?;
+    let state = test_app_state(&supabase_url, temp_path("restore-valid-sample"))?;
 
-    let decrypted = mipsorcu::decrypt_current_secret_version(&master_key, input)?;
+    mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let chain_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    server_thread
+        .join()
+        .expect("restore test server thread should not panic")?;
 
-    assert_eq!(decrypted.as_bytes(), plaintext.as_slice());
+    assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
+    let audit_body = audit_request
+        .body
+        .ok_or_else(|| std::io::Error::other("restore audit body should be JSON"))?;
+    assert_eq!(audit_body["p_action"], "restore_test");
+    assert_eq!(audit_body["p_entry_type"], "restore_test_completed");
+    assert_eq!(audit_body["p_result"], "success");
+    assert_eq!(audit_body["p_metadata_json"]["sample_count"], 1);
+    assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+    assert!(audit_body["p_metadata_json"].get("error_code").is_none());
+    let metadata_and_payload = serde_json::to_string(&json!({
+        "metadata_json": audit_body["p_metadata_json"].clone(),
+        "payload": audit_body["p_payload"].clone(),
+    }))?;
+    assert!(!metadata_and_payload.contains("restore test sample"));
+    assert!(!metadata_and_payload.contains("plaintext"));
+    assert!(!metadata_and_payload.contains("\\x"));
+
     Ok(())
 }
 
-#[test]
-fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test(flavor = "current_thread")]
+async fn restore_test_rejects_aad_tampering_via_runtime() -> Result<(), Box<dyn std::error::Error>>
+{
     let (_, mut row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
     row.aad_context = json!({
         "aad_version": 1,
@@ -1656,19 +1704,38 @@ fn restore_test_input_rejects_aad_tampering() -> Result<(), Box<dyn std::error::
         "classification": "tampered",
         "created_at": row.created_at.clone(),
     });
-    let result = runtime_testing::build_restore_test_decrypt_input(row);
+    let sample_body = serde_json::to_string(&json!([restore_test_row_json(&row)]))?;
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_restore_test_audit_server(200, sample_body, 200, r#""ok""#, 2)?;
+    let state = test_app_state(&supabase_url, temp_path("restore-aad-tamper"))?;
 
-    assert!(matches!(
-        result,
-        Err(mipsorcu::server::errors::ApiError::DbIntegrityViolation(message))
-            if message == "restore test aad_context does not match row"
-    ));
+    mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    server_thread
+        .join()
+        .expect("restore test server thread should not panic")?;
+
+    assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
+    let audit_body = audit_request
+        .body
+        .ok_or_else(|| std::io::Error::other("restore failure audit body should be JSON"))?;
+    assert_eq!(audit_body["p_action"], "restore_test");
+    assert_eq!(audit_body["p_result"], "failure");
+    assert_eq!(
+        audit_body["p_metadata_json"]["error_code"],
+        "row_validation_failed"
+    );
+    assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+
     Ok(())
 }
 
-#[test]
-fn restore_test_input_rejects_ciphertext_tampering() -> Result<(), Box<dyn std::error::Error>> {
-    let (master_key, mut row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
+#[tokio::test(flavor = "current_thread")]
+async fn restore_test_rejects_ciphertext_tampering_via_runtime()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_, mut row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
     let mut ciphertext = hex::decode(
         row.ciphertext
             .strip_prefix("\\x")
@@ -1679,49 +1746,32 @@ fn restore_test_input_rejects_ciphertext_tampering() -> Result<(), Box<dyn std::
         .ok_or(mipsorcu::CryptoError::DecryptionFailed)?;
     *first ^= 1;
     row.ciphertext = format!("\\x{}", hex::encode(ciphertext));
-    let input = runtime_testing::build_restore_test_decrypt_input(row)?;
+    let sample_body = serde_json::to_string(&json!([restore_test_row_json(&row)]))?;
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_restore_test_audit_server(200, sample_body, 200, r#""ok""#, 2)?;
+    let state = test_app_state(&supabase_url, temp_path("restore-ciphertext-tamper"))?;
 
-    let result = mipsorcu::decrypt_current_secret_version(&master_key, input);
+    mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    server_thread
+        .join()
+        .expect("restore test server thread should not panic")?;
 
-    assert!(matches!(
-        result,
-        Err(SecretDecryptError::Crypto(
-            mipsorcu::CryptoError::DecryptionFailed
-        ))
-    ));
+    assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
+    let audit_body = audit_request
+        .body
+        .ok_or_else(|| std::io::Error::other("restore failure audit body should be JSON"))?;
+    assert_eq!(audit_body["p_action"], "restore_test");
+    assert_eq!(audit_body["p_result"], "failure");
+    assert_eq!(
+        audit_body["p_metadata_json"]["error_code"],
+        "decrypt_failed"
+    );
+    assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+
     Ok(())
-}
-
-#[tokio::test]
-async fn jwks_refresh_loop_stops_on_shutdown_signal() {
-    let jwks = Jwks::new(vec![mipsorcu::Jwk::new(
-        "RSA",
-        "test-key",
-        Some("RS256".to_owned()),
-        Some("sig".to_owned()),
-        "abc",
-        "AQAB",
-    )])
-    .expect("test JWKS should be valid");
-    let cache = JwksCache::new(jwks);
-    let client = reqwest::Client::new();
-    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-    let task = tokio::spawn(runtime_testing::run_jwks_refresh_loop(
-        cache,
-        client,
-        "http://127.0.0.1:1/jwks".to_owned(),
-        Duration::from_secs(60),
-        shutdown_receiver,
-    ));
-
-    shutdown_sender
-        .send(true)
-        .expect("shutdown signal should send");
-
-    tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("JWKS refresh loop should stop promptly")
-        .expect("JWKS refresh loop task should not panic");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1882,6 +1932,109 @@ async fn decrypt_endpoint_fails_closed_when_primary_and_fallback_audit_both_fail
         .join()
         .expect("Supabase test server thread should join")
         .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn decrypt_endpoint_rejects_invalid_read_model_rows_without_plaintext()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cases: [(&str, DecryptRowMutation); 11] = [
+        ("bad-nonce", make_decrypt_row_bad_nonce),
+        ("empty-ciphertext", make_decrypt_row_empty_ciphertext),
+        (
+            "ciphertext-without-bytea-prefix",
+            make_decrypt_row_ciphertext_without_bytea_prefix,
+        ),
+        (
+            "ciphertext-invalid-hex",
+            make_decrypt_row_ciphertext_invalid_hex,
+        ),
+        (
+            "bad-encrypted-data-key",
+            make_decrypt_row_bad_encrypted_data_key,
+        ),
+        ("bad-algorithm", make_decrypt_row_bad_algorithm),
+        ("owner-mismatch", make_decrypt_row_owner_mismatch),
+        (
+            "classification-mismatch",
+            make_decrypt_row_classification_mismatch,
+        ),
+        ("non-current", make_decrypt_row_non_current),
+        ("multiple-current", make_decrypt_rows_multiple_current),
+        ("empty-row", make_decrypt_rows_empty),
+    ];
+
+    for (case_name, mutate) in cases {
+        let (secret_id, mut row_json) = decrypt_row_json(b"invalid read model row")?;
+        mutate(&mut row_json);
+        let (supabase_url, receiver, server_thread) =
+            spawn_supabase_read_failure_audit_server(row_json.to_string())?;
+        let state = test_app_state(&supabase_url, temp_path(case_name))?;
+        let token = valid_token()?;
+        let (app_url, app_task) = spawn_app(state).await?;
+
+        let response = reqwest::Client::new()
+            .post(format!("{app_url}/v1/secrets/{secret_id}/decrypt"))
+            .bearer_auth(&token)
+            .send()
+            .await?;
+
+        assert!(
+            !response.status().is_success(),
+            "{case_name} should be rejected"
+        );
+        let json: Value = response.json().await?;
+        assert!(
+            json.get("plaintext_hex").is_none(),
+            "{case_name} must not expose plaintext"
+        );
+        let response_body = serde_json::to_string(&json)?;
+        for forbidden in [
+            "plaintext_hex",
+            "ciphertext",
+            "encrypted_data_key",
+            "service_role_key",
+            "service-role-key",
+        ] {
+            assert!(
+                !response_body.contains(forbidden),
+                "{case_name} response leaked {forbidden}"
+            );
+        }
+
+        let read_request = receiver.recv_timeout(Duration::from_secs(2))?;
+        let audit_request = receiver.recv_timeout(Duration::from_secs(2))?;
+        assert_eq!(read_request.method, "GET");
+        assert!(read_request.path.starts_with("/rest/v1/secret_versions"));
+        assert_eq!(audit_request.method, "POST");
+        assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
+        let audit_body = audit_request
+            .body
+            .ok_or_else(|| std::io::Error::other("failure audit body should be JSON"))?;
+        assert_eq!(audit_body["p_action"], "decrypt");
+        assert_eq!(audit_body["p_result"], "failure");
+        assert!(audit_body["p_metadata_json"]["source_event_at"].is_string());
+        let audit_metadata = serde_json::to_string(&audit_body["p_metadata_json"])?;
+        for forbidden in [
+            "plaintext_hex",
+            "ciphertext",
+            "encrypted_data_key",
+            "service_role_key",
+            "service-role-key",
+        ] {
+            assert!(
+                !audit_metadata.contains(forbidden),
+                "{case_name} audit metadata leaked {forbidden}"
+            );
+        }
+
+        app_task.abort();
+        let _ = app_task.await;
+        server_thread
+            .join()
+            .map_err(|_| std::io::Error::other("read failure server thread panicked"))??;
+    }
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2412,6 +2565,86 @@ async fn create_endpoint_rejects_invalid_json_with_request_id() {
 
     app_task.abort();
     let _ = app_task.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn create_and_rotate_endpoints_reject_invalid_request_fields()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = test_app_state("http://127.0.0.1:1", temp_path("invalid-request-fields"))?;
+    let token = valid_token()?;
+    let (app_url, app_task) = spawn_app(state).await?;
+    let client = reqwest::Client::new();
+
+    for body in [
+        json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "not hex"
+        }),
+        json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "abc"
+        }),
+        json!({
+            "classification": CLASSIFICATION,
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "AA"
+        }),
+        json!({
+            "classification": CLASSIFICATION,
+            "device_id": "   ",
+            "plaintext_hex": "00"
+        }),
+    ] {
+        let response = client
+            .post(format!("{app_url}/v1/secrets"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let json: Value = response.json().await?;
+        assert_eq!(json["code"], Value::String("bad_request".to_owned()));
+        assert!(json.get("plaintext_hex").is_none());
+    }
+
+    for body in [
+        json!({
+            "device_id": "   ",
+            "plaintext_hex": "00"
+        }),
+        json!({
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "AA"
+        }),
+        json!({
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "not hex"
+        }),
+        json!({
+            "device_id": DEVICE_ID,
+            "plaintext_hex": "abc"
+        }),
+    ] {
+        let response = client
+            .post(format!(
+                "{app_url}/v1/secrets/550e8400-e29b-41d4-a716-446655440000/versions"
+            ))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let json: Value = response.json().await?;
+        assert_eq!(json["code"], Value::String("bad_request".to_owned()));
+        assert!(json.get("plaintext_hex").is_none());
+    }
+
+    app_task.abort();
+    let _ = app_task.await;
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
