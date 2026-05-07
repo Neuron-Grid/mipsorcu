@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::audit::{AuditEventId, RequestId};
 use crate::ledger::{
     LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType,
-    LedgerError, LedgerPayload, LedgerResult, LedgerSigningKey, LedgerTargetSecretVersionId,
+    LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo, LedgerSigningKey,
+    LedgerTargetSecretVersionId, SignedLedgerEntry,
 };
 use crate::server::supabase::{
     AppendLedgerEntryOutcome, LedgerAppendRpcFailure, SupabaseClient, SupabaseRpcError,
@@ -98,6 +99,49 @@ impl LedgerAppender {
         })
     }
 
+    pub async fn sign_entries(
+        &self,
+        drafts: &[LedgerAppendDraft],
+    ) -> Result<Vec<SignedLedgerEntry>, LedgerAppendError> {
+        let chain_head = self.fetch_chain_head(1).await?;
+        self.sign_entries_from_head(drafts, chain_head)
+    }
+
+    pub fn sign_entries_from_head(
+        &self,
+        drafts: &[LedgerAppendDraft],
+        chain_head: LedgerChainHead,
+    ) -> Result<Vec<SignedLedgerEntry>, LedgerAppendError> {
+        let mut previous_sequence_no = chain_head.last_sequence_no();
+        let mut previous_hash = chain_head.last_entry_hash();
+        let mut signed_entries = Vec::with_capacity(drafts.len());
+
+        for draft in drafts {
+            let next_sequence_no =
+                previous_sequence_no
+                    .checked_add(1)
+                    .ok_or(LedgerAppendError::InvalidEntry {
+                        code: "ledger_sequence_overflow",
+                    })?;
+            let sequence_no = LedgerSequenceNo::new(next_sequence_no).map_err(|_| {
+                LedgerAppendError::InvalidEntry {
+                    code: "ledger_entry_build_failed",
+                }
+            })?;
+            let signed_entry = draft
+                .sign_with_sequence(sequence_no, previous_hash, &self.signing_key)
+                .map_err(|_| LedgerAppendError::InvalidEntry {
+                    code: "ledger_entry_build_failed",
+                })?;
+
+            previous_sequence_no = signed_entry.sequence_no().get();
+            previous_hash = signed_entry.entry_hash();
+            signed_entries.push(signed_entry);
+        }
+
+        Ok(signed_entries)
+    }
+
     async fn fetch_chain_head(&self, attempts: u32) -> Result<LedgerChainHead, LedgerAppendError> {
         self.client
             .fetch_ledger_chain_head()
@@ -175,9 +219,22 @@ impl LedgerAppendDraft {
         chain_head: LedgerChainHead,
         signing_key: &LedgerSigningKey,
     ) -> Result<crate::SignedLedgerEntry, LedgerError> {
+        self.sign_with_sequence(
+            chain_head.next_sequence_no()?,
+            chain_head.last_entry_hash(),
+            signing_key,
+        )
+    }
+
+    fn sign_with_sequence(
+        &self,
+        sequence_no: LedgerSequenceNo,
+        previous_entry_hash: LedgerHash,
+        signing_key: &LedgerSigningKey,
+    ) -> Result<crate::SignedLedgerEntry, LedgerError> {
         let draft = LedgerEntryDraft::new(LedgerEntryDraftParts {
             ledger_entry_id: self.ledger_entry_id.clone(),
-            sequence_no: chain_head.next_sequence_no()?,
+            sequence_no,
             entry_type: self.entry_type,
             source_event_at: self.source_event_at.clone(),
             request_id: self.request_id.clone(),
@@ -189,7 +246,7 @@ impl LedgerAppendDraft {
             result: self.result,
             error_code: self.error_code.clone(),
             payload: self.payload.clone(),
-            previous_entry_hash: chain_head.last_entry_hash(),
+            previous_entry_hash,
             signature_key_version: signing_key.key_version(),
         })?;
 

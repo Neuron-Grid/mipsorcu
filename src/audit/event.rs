@@ -284,6 +284,10 @@ impl AuditMetadata {
         &self.0
     }
 
+    pub fn source_event_at_required(&self) -> Result<SourceEventAt, AuditEventError> {
+        self.require_source_event_at()
+    }
+
     fn source_event_at(&self) -> Result<Option<SourceEventAt>, AuditEventError> {
         let object = self
             .0
@@ -419,6 +423,10 @@ impl AuditEvent {
 
     pub fn metadata_json(&self) -> &AuditMetadata {
         &self.metadata_json
+    }
+
+    pub fn source_event_at(&self) -> Result<SourceEventAt, AuditEventError> {
+        self.metadata_json.require_source_event_at()
     }
 
     pub(super) fn to_fallback_json(

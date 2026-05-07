@@ -129,6 +129,10 @@ async fn run_server_with_config(config: config::AppConfig) {
     );
     let app_fallback_store = fallback_store.clone();
     let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store.clone()));
+    let ledger_appender = Arc::new(crate::server::ledger_appender::LedgerAppender::new(
+        supabase_client.clone(),
+        config.ledger_signing_key.clone(),
+    ));
     tokio::spawn(background::run_audit_resend_loop(
         audit_recorder.clone(),
         fallback_store,
@@ -144,6 +148,7 @@ async fn run_server_with_config(config: config::AppConfig) {
         jwt_verifier,
         supabase_client,
         audit_recorder,
+        ledger_appender,
         audit_fallback_store: app_fallback_store,
         readiness_state,
         health_readiness_poll_interval: config.health_readiness_poll_interval,

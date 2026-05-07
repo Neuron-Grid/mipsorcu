@@ -217,6 +217,7 @@ impl From<AuditEventError> for LocalAuditStoreError {
 #[derive(Debug)]
 pub enum AuditRecordError {
     EventConstructionFailed(AuditEventError),
+    LedgerAppendFailed,
     PrimaryAndFallbackFailed {
         append_error: AuditAppendError,
         store_error: LocalAuditStoreError,
@@ -231,6 +232,9 @@ impl fmt::Display for AuditRecordError {
         match self {
             Self::EventConstructionFailed(error) => {
                 write!(formatter, "audit event construction failed: {error}")
+            }
+            Self::LedgerAppendFailed => {
+                write!(formatter, "audit and ledger append failed")
             }
             Self::PrimaryAndFallbackFailed {
                 append_error,

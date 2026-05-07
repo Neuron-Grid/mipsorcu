@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use mipsorcu::server::ledger_appender::LedgerAppender;
 use mipsorcu::server::runtime::testing as runtime_testing;
 use mipsorcu::server::runtime::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
@@ -20,7 +21,8 @@ use mipsorcu::server::supabase::{
 };
 use mipsorcu::{
     AuditRecorder, AuditTrigger, Classification, CreatedAt, DeviceId, Jwk, Jwks, JwksCache,
-    JwtVerifier, JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore, MASTER_KEY_LENGTH,
+    JwtVerifier, JwtVerifierConfig, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
+    LedgerSignatureKeyVersion, LedgerSigningKey, LocalAuditFallbackStore, MASTER_KEY_LENGTH,
     MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
     SecretDecryptError, SourceEventAt, prepare_new_secret_version,
 };
@@ -355,6 +357,14 @@ fn test_app_state(
         audit_appender,
         audit_fallback_store.clone(),
     ));
+    let ledger_signing_key = LedgerSigningKey::from_secret_key_bytes(
+        LedgerSignatureKeyVersion::new(1)?,
+        &[9u8; LEDGER_ED25519_SECRET_KEY_LENGTH],
+    )?;
+    let ledger_appender = Arc::new(LedgerAppender::new(
+        supabase_client.clone(),
+        ledger_signing_key,
+    ));
 
     Ok(AppState {
         master_key_ring: Arc::new(MasterKeyRing::single(
@@ -364,6 +374,7 @@ fn test_app_state(
         jwt_verifier: Arc::new(test_jwt_verifier()?),
         supabase_client,
         audit_recorder,
+        ledger_appender,
         audit_fallback_store,
         readiness_state: ReadinessState::new(),
         health_readiness_poll_interval: Duration::from_secs(30),
@@ -413,10 +424,16 @@ fn spawn_supabase_read_and_audit_server(
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (mut stream, _) = listener.accept()?;
             let request = read_http_request(&mut stream)?;
             let is_secret_read = request.path.starts_with("/rest/v1/secret_versions");
+            let is_ledger_chain_head = request.path.starts_with("/rest/v1/ledger_chain_state");
+            let response_body = if audit_status == 200 && !is_secret_read && !is_ledger_chain_head {
+                Some(ledger_append_success_body(&request)?)
+            } else {
+                None
+            };
             sender.send(request).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -426,8 +443,11 @@ fn spawn_supabase_read_and_audit_server(
 
             if is_secret_read {
                 write_http_response(&mut stream, 200, "OK", &secret_versions_body)?;
+            } else if is_ledger_chain_head {
+                write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
             } else if audit_status == 200 {
-                write_http_response(&mut stream, 200, "OK", audit_body)?;
+                let body = response_body.as_deref().unwrap_or(audit_body);
+                write_http_response(&mut stream, 200, "OK", body)?;
             } else {
                 write_http_response(
                     &mut stream,
@@ -444,6 +464,75 @@ fn spawn_supabase_read_and_audit_server(
     Ok((format!("http://{addr}"), receiver, thread))
 }
 
+fn spawn_supabase_rotate_server(
+    secret_versions_body: String,
+    write_status: u16,
+    write_body: &'static str,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let is_secret_read = request.path.starts_with("/rest/v1/secret_versions");
+            let is_ledger_chain_head = request.path.starts_with("/rest/v1/ledger_chain_state");
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if is_secret_read {
+                write_http_response(&mut stream, 200, "OK", &secret_versions_body)?;
+            } else if is_ledger_chain_head {
+                write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
+            } else if write_status == 200 {
+                write_http_response(&mut stream, 200, "OK", write_body)?;
+            } else {
+                write_http_response(
+                    &mut stream,
+                    write_status,
+                    "Internal Server Error",
+                    write_body,
+                )?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn ledger_chain_head_body() -> String {
+    json!([{
+        "last_sequence_no": 0,
+        "last_entry_hash": "\\x0000000000000000000000000000000000000000000000000000000000000000",
+    }])
+    .to_string()
+}
+
+fn ledger_append_success_body(request: &CapturedRequest) -> std::io::Result<String> {
+    let body = request.body.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ledger append request body is missing",
+        )
+    })?;
+    Ok(json!([{
+        "ledger_entry_id": body["p_ledger_entry_id"].clone(),
+        "sequence_no": body["p_sequence_no"].clone(),
+        "entry_hash": body["p_entry_hash"].clone(),
+        "chain_last_sequence_no": body["p_sequence_no"].clone(),
+        "chain_last_entry_hash": body["p_entry_hash"].clone(),
+        "replayed": false,
+    }])
+    .to_string())
+}
+
 fn spawn_supabase_integrity_and_audit_server(
     integrity_status: u16,
     integrity_body: String,
@@ -453,11 +542,19 @@ fn spawn_supabase_integrity_and_audit_server(
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
+    let request_count = if integrity_status == 200 { 3 } else { 2 };
     let thread = thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..request_count {
             let (mut stream, _) = listener.accept()?;
             let request = read_http_request(&mut stream)?;
             let is_integrity_check = request.path == "/rest/v1/rpc/rpc_integrity_check";
+            let is_ledger_chain_head = request.path.starts_with("/rest/v1/ledger_chain_state");
+            let response_body =
+                if audit_status == 200 && !is_integrity_check && !is_ledger_chain_head {
+                    Some(ledger_append_success_body(&request)?)
+                } else {
+                    None
+                };
             sender.send(request).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -472,8 +569,11 @@ fn spawn_supabase_integrity_and_audit_server(
                     "Internal Server Error"
                 };
                 write_http_response(&mut stream, integrity_status, reason, &integrity_body)?;
+            } else if is_ledger_chain_head {
+                write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
             } else if audit_status == 200 {
-                write_http_response(&mut stream, 200, "OK", audit_body)?;
+                let body = response_body.as_deref().unwrap_or(audit_body);
+                write_http_response(&mut stream, 200, "OK", body)?;
             } else {
                 write_http_response(
                     &mut stream,
@@ -496,10 +596,15 @@ fn spawn_supabase_restore_integrity_audit_server()
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for _ in 0..4 {
+        for _ in 0..6 {
             let (mut stream, _) = listener.accept()?;
             let request = read_http_request(&mut stream)?;
             let path = request.path.clone();
+            let response_body = if path == "/rest/v1/rpc/rpc_append_audit_event_with_ledger" {
+                Some(ledger_append_success_body(&request)?)
+            } else {
+                None
+            };
             sender.send(request).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -513,8 +618,11 @@ fn spawn_supabase_restore_integrity_audit_server()
                 let body = serde_json::to_string(&json!([integrity_summary_json(0)]))
                     .map_err(std::io::Error::other)?;
                 write_http_response(&mut stream, 200, "OK", &body)?;
+            } else if path.starts_with("/rest/v1/ledger_chain_state") {
+                write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
             } else {
-                write_http_response(&mut stream, 200, "OK", r#""ok""#)?;
+                let body = response_body.as_deref().unwrap_or(r#""ok""#);
+                write_http_response(&mut stream, 200, "OK", body)?;
             }
         }
 
@@ -1285,6 +1393,7 @@ async fn integrity_check_success_records_success_audit() -> Result<(), Box<dyn s
         mipsorcu::server::integrity_check::run_integrity_check_once(&state, AuditTrigger::Cli)
             .await?;
     let integrity_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let chain_request = receiver.recv_timeout(Duration::from_secs(1))?;
     let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
     server_thread
         .join()
@@ -1295,14 +1404,26 @@ async fn integrity_check_success_records_success_audit() -> Result<(), Box<dyn s
     assert_eq!(integrity_request.method, "POST");
     assert_eq!(integrity_request.path, "/rest/v1/rpc/rpc_integrity_check");
     assert_eq!(integrity_request.body, Some(json!({})));
-    assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
+    assert_eq!(chain_request.method, "GET");
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
+    assert_eq!(
+        audit_request.path,
+        "/rest/v1/rpc/rpc_append_audit_event_with_ledger"
+    );
     let audit_body = audit_request
         .body
         .ok_or_else(|| std::io::Error::other("audit append body should be JSON"))?;
     assert_eq!(audit_body["p_action"], "integrity_check");
+    assert_eq!(audit_body["p_entry_type"], "integrity_check_completed");
     assert_eq!(audit_body["p_result"], "success");
     assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
     assert_eq!(audit_body["p_metadata_json"]["violation_count"], 0);
+    assert_eq!(audit_body["p_payload"]["violation_count"], 0);
+    assert!(audit_body["p_payload"]["duration_ms"].is_number());
     assert!(audit_body["p_metadata_json"]["source_event_at"].is_string());
 
     Ok(())
@@ -1322,6 +1443,7 @@ async fn integrity_check_violation_records_failure_audit() -> Result<(), Box<dyn
     )
     .await;
     let _integrity_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let chain_request = receiver.recv_timeout(Duration::from_secs(1))?;
     let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
     server_thread
         .join()
@@ -1335,10 +1457,16 @@ async fn integrity_check_violation_records_failure_audit() -> Result<(), Box<dyn
             }
         )
     ));
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
     let audit_body = audit_request
         .body
         .ok_or_else(|| std::io::Error::other("audit append body should be JSON"))?;
     assert_eq!(audit_body["p_action"], "integrity_check");
+    assert_eq!(audit_body["p_entry_type"], "integrity_check_completed");
     assert_eq!(audit_body["p_result"], "failure");
     assert_eq!(audit_body["p_metadata_json"]["trigger"], "background");
     assert_eq!(
@@ -1349,6 +1477,7 @@ async fn integrity_check_violation_records_failure_audit() -> Result<(), Box<dyn
         audit_body["p_metadata_json"]["violation_summary"]["algorithm_invalid"],
         1
     );
+    assert_eq!(audit_body["p_payload"]["violation_count"], 1);
 
     Ok(())
 }
@@ -1425,11 +1554,24 @@ async fn background_restore_and_integrity_startup_offsets_are_phased()
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
     let restore_request = recv_captured_request(&receiver).await?;
+    let restore_chain_request = recv_captured_request(&receiver).await?;
     let restore_audit_request = recv_captured_request(&receiver).await?;
     assert_eq!(restore_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert!(
+        restore_chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
     assert_eq!(
         restore_audit_request.path,
-        "/rest/v1/rpc/rpc_append_audit_event"
+        "/rest/v1/rpc/rpc_append_audit_event_with_ledger"
+    );
+    assert_eq!(
+        restore_audit_request
+            .body
+            .as_ref()
+            .and_then(|body| body["p_entry_type"].as_str()),
+        Some("restore_test_completed")
     );
     assert_eq!(
         restore_audit_request
@@ -1451,11 +1593,24 @@ async fn background_restore_and_integrity_startup_offsets_are_phased()
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
     let integrity_request = recv_captured_request(&receiver).await?;
+    let integrity_chain_request = recv_captured_request(&receiver).await?;
     let integrity_audit_request = recv_captured_request(&receiver).await?;
     assert_eq!(integrity_request.path, "/rest/v1/rpc/rpc_integrity_check");
+    assert!(
+        integrity_chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
     assert_eq!(
         integrity_audit_request.path,
-        "/rest/v1/rpc/rpc_append_audit_event"
+        "/rest/v1/rpc/rpc_append_audit_event_with_ledger"
+    );
+    assert_eq!(
+        integrity_audit_request
+            .body
+            .as_ref()
+            .and_then(|body| body["p_entry_type"].as_str()),
+        Some("integrity_check_completed")
     );
     assert_eq!(
         integrity_audit_request
@@ -1570,15 +1725,15 @@ async fn jwks_refresh_loop_stops_on_shutdown_signal() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn decrypt_endpoint_returns_plaintext_hex_encoding_and_no_store_when_audit_falls_back() {
+async fn decrypt_endpoint_returns_plaintext_after_audit_and_ledger_append() {
     let plaintext = b"router secret";
     let (secret_id, row_json) =
         decrypt_row_json(plaintext).expect("decrypt row JSON should be constructed");
     let body = row_json.to_string();
     let (supabase_url, receiver, server_thread) =
-        spawn_supabase_read_and_audit_server(body, 500, r#"{"error":"audit failed"}"#)
+        spawn_supabase_read_and_audit_server(body, 200, r#"[]"#)
             .expect("Supabase test server should start");
-    let fallback_path = temp_path("decrypt-fallback-success.jsonl");
+    let fallback_path = temp_path("decrypt-audit-ledger-success.jsonl");
     let state = test_app_state(&supabase_url, fallback_path.clone())
         .expect("test app state should be created");
     let token = valid_token().expect("test JWT should be created");
@@ -1612,16 +1767,25 @@ async fn decrypt_endpoint_returns_plaintext_hex_encoding_and_no_store_when_audit
     let read_request = receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("secret read request should be captured");
+    let chain_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("ledger chain head request should be captured");
     let audit_request = receiver
         .recv_timeout(Duration::from_secs(2))
-        .expect("audit append request should be captured");
+        .expect("audit and ledger append request should be captured");
     assert_eq!(read_request.method, "GET");
     assert!(read_request.path.starts_with("/rest/v1/secret_versions"));
+    assert_eq!(chain_request.method, "GET");
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
     assert_eq!(audit_request.method, "POST");
     assert!(
         audit_request
             .path
-            .ends_with("/rest/v1/rpc/rpc_append_audit_event")
+            .ends_with("/rest/v1/rpc/rpc_append_audit_event_with_ledger")
     );
     assert!(audit_request.body.is_some());
     let audit_body = audit_request
@@ -1629,16 +1793,21 @@ async fn decrypt_endpoint_returns_plaintext_hex_encoding_and_no_store_when_audit
         .as_ref()
         .and_then(Value::as_object)
         .expect("audit append request body should be a JSON object");
+    assert_eq!(audit_body["p_action"], "decrypt");
+    assert_eq!(audit_body["p_entry_type"], "secret_decrypted");
+    assert_eq!(audit_body["p_result"], "success");
+    assert_eq!(
+        audit_body["p_payload"]["algorithm"],
+        mipsorcu::ALGORITHM_XCHACHA20_POLY1305
+    );
+    assert_eq!(audit_body["p_payload"]["version"], 1);
+    assert!(audit_body["p_payload"].get("plaintext").is_none());
+    assert!(audit_body["p_payload"].get("decrypt_result").is_none());
     let source_event_at = audit_body["p_metadata_json"]["source_event_at"]
         .as_str()
         .expect("decrypt audit append request should include metadata_json.source_event_at");
     assert!(SourceEventAt::parse(source_event_at).is_ok());
-
-    let fallback_contents =
-        fs::read_to_string(&fallback_path).expect("fallback JSON Lines file should exist");
-    assert!(fallback_contents.contains(r#""action":"decrypt""#));
-    assert!(fallback_contents.contains(r#""delivery_status":"pending""#));
-    assert!(fallback_contents.contains(r#""source_event_at":"#));
+    assert!(!fallback_path.exists());
 
     app_task.abort();
     let _ = app_task.await;
@@ -1671,14 +1840,14 @@ async fn decrypt_endpoint_fails_closed_when_primary_and_fallback_audit_both_fail
         .await
         .expect("decrypt request should succeed");
 
-    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
     let json: Value = response
         .json()
         .await
         .expect("decrypt response should be JSON");
     assert_eq!(
         json["code"],
-        Value::String("audit_record_failed".to_owned())
+        Value::String("ledger_append_failed".to_owned())
     );
     assert!(json.get("request_id").is_some());
     assert!(json.get("plaintext_hex").is_none());
@@ -1686,11 +1855,25 @@ async fn decrypt_endpoint_fails_closed_when_primary_and_fallback_audit_both_fail
     let read_request = receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("secret read request should be captured");
+    let chain_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("ledger chain head request should be captured");
     let audit_request = receiver
         .recv_timeout(Duration::from_secs(2))
-        .expect("audit append request should be captured");
+        .expect("audit and ledger append request should be captured");
     assert_eq!(read_request.method, "GET");
+    assert_eq!(chain_request.method, "GET");
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
     assert_eq!(audit_request.method, "POST");
+    assert!(
+        audit_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_append_audit_event_with_ledger")
+    );
     assert!(!fallback_path.is_file());
 
     app_task.abort();
@@ -1733,7 +1916,7 @@ async fn create_endpoint_maps_upstream_401_to_502_with_request_id() {
         .expect("error response should be JSON");
     assert_eq!(
         json["code"],
-        Value::String("upstream_dependency_failed".to_owned())
+        Value::String("ledger_append_failed".to_owned())
     );
     let request_id = json["request_id"]
         .as_str()
@@ -1745,14 +1928,14 @@ async fn create_endpoint_maps_upstream_401_to_502_with_request_id() {
             .is_some_and(|object| object.contains_key("error"))
     );
 
-    let write_request = receiver
+    let chain_request = receiver
         .recv_timeout(Duration::from_secs(2))
-        .expect("write RPC request should be captured");
-    assert_eq!(write_request.method, "POST");
+        .expect("ledger chain head request should be captured");
+    assert_eq!(chain_request.method, "GET");
     assert!(
-        write_request
+        chain_request
             .path
-            .ends_with("/rest/v1/rpc/rpc_write_secret_version")
+            .starts_with("/rest/v1/ledger_chain_state")
     );
 
     app_task.abort();
@@ -1767,7 +1950,7 @@ async fn create_endpoint_maps_upstream_401_to_502_with_request_id() {
 async fn rotate_endpoint_maps_upstream_403_to_502_with_request_id() {
     let (secret_id, row_json) =
         decrypt_row_json(b"rotate seed secret").expect("decrypt row JSON should be constructed");
-    let (supabase_url, receiver, server_thread) = spawn_supabase_read_and_audit_server(
+    let (supabase_url, receiver, server_thread) = spawn_supabase_rotate_server(
         row_json.to_string(),
         403,
         r#"{"error":"upstream denied rotate"}"#,
@@ -1811,10 +1994,28 @@ async fn rotate_endpoint_maps_upstream_403_to_502_with_request_id() {
     let read_request = receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("secret read request should be captured");
+    let snapshot_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("retention snapshot request should be captured");
+    let chain_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("ledger chain head request should be captured");
     let write_request = receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("write RPC request should be captured");
     assert_eq!(read_request.method, "GET");
+    assert_eq!(snapshot_request.method, "GET");
+    assert!(
+        snapshot_request
+            .path
+            .starts_with("/rest/v1/secret_versions")
+    );
+    assert_eq!(chain_request.method, "GET");
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
     assert_eq!(write_request.method, "POST");
     assert!(
         write_request

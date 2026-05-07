@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::audit::{AuditMetadata, AuditResult, AuditTrigger, RequestId};
 use crate::auth::VerifiedJwtClaims;
 use crate::decrypt_current_secret_version_with_keyring;
@@ -9,6 +11,7 @@ use crate::server::supabase::RestoreTestSampleRow;
 use crate::{KeyVersion, SecretId, SecretVersion};
 
 pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger: AuditTrigger) {
+    let started_at = Instant::now();
     let request_id = match RequestId::generate() {
         Ok(request_id) => request_id,
         Err(error) => {
@@ -36,11 +39,12 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     result: AuditResult::Success,
                     target_secret_id: None,
                     key_version: None,
-                    metadata: restore_test_metadata(
+                    metadata: restore_test_metadata_with_duration(
                         0,
                         Some("no_current_secret_versions"),
                         None,
                         trigger,
+                        elapsed_ms(started_at),
                     ),
                     error_code: None,
                 },
@@ -70,7 +74,13 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     result: AuditResult::Failure,
                     target_secret_id: None,
                     key_version: None,
-                    metadata: restore_test_metadata(0, Some("sample_fetch_failed"), None, trigger),
+                    metadata: restore_test_metadata_with_duration(
+                        0,
+                        Some("sample_fetch_failed"),
+                        None,
+                        trigger,
+                        elapsed_ms(started_at),
+                    ),
                     error_code: Some("sample_fetch_failed"),
                 },
             )
@@ -113,11 +123,12 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                         result: AuditResult::Failure,
                         target_secret_id: failure_context.target_secret_id,
                         key_version: failure_context.key_version,
-                        metadata: restore_test_metadata(
+                        metadata: restore_test_metadata_with_duration(
                             sample_count,
                             Some("row_validation_failed"),
                             failure_context.failed_version,
                             trigger,
+                            elapsed_ms(started_at),
                         ),
                         error_code: Some("row_validation_failed"),
                     },
@@ -163,11 +174,12 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     result: AuditResult::Failure,
                     target_secret_id: failure_context.target_secret_id.clone(),
                     key_version: failure_context.key_version,
-                    metadata: restore_test_metadata(
+                    metadata: restore_test_metadata_with_duration(
                         sample_count,
                         Some("decrypt_failed"),
                         failure_context.failed_version,
                         trigger,
+                        elapsed_ms(started_at),
                     ),
                     error_code: Some("decrypt_failed"),
                 },
@@ -206,7 +218,13 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
             result: AuditResult::Success,
             target_secret_id: None,
             key_version: None,
-            metadata: restore_test_metadata(sample_count, None, None, trigger),
+            metadata: restore_test_metadata_with_duration(
+                sample_count,
+                None,
+                None,
+                trigger,
+                elapsed_ms(started_at),
+            ),
             error_code: None,
         },
     )
@@ -239,6 +257,32 @@ pub fn restore_test_metadata(
     failed_version: Option<u32>,
     trigger: AuditTrigger,
 ) -> AuditMetadata {
+    restore_test_metadata_value(sample_count, error_code, failed_version, trigger, None)
+}
+
+fn restore_test_metadata_with_duration(
+    sample_count: u64,
+    error_code: Option<&'static str>,
+    failed_version: Option<u32>,
+    trigger: AuditTrigger,
+    duration_ms: u64,
+) -> AuditMetadata {
+    restore_test_metadata_value(
+        sample_count,
+        error_code,
+        failed_version,
+        trigger,
+        Some(duration_ms),
+    )
+}
+
+fn restore_test_metadata_value(
+    sample_count: u64,
+    error_code: Option<&'static str>,
+    failed_version: Option<u32>,
+    trigger: AuditTrigger,
+    duration_ms: Option<u64>,
+) -> AuditMetadata {
     let value = match error_code {
         Some("no_current_secret_versions") => serde_json::json!({
             "phase": "verify",
@@ -260,7 +304,22 @@ pub fn restore_test_metadata(
         }),
     };
 
+    let value = match (value, duration_ms) {
+        (serde_json::Value::Object(mut object), Some(duration_ms)) => {
+            object.insert(
+                "duration_ms".to_owned(),
+                serde_json::Value::from(duration_ms),
+            );
+            serde_json::Value::Object(object)
+        }
+        (value, _) => value,
+    };
+
     AuditMetadata::new(value).unwrap_or_else(|_| AuditMetadata::empty())
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 struct RestoreTestFailureContext {

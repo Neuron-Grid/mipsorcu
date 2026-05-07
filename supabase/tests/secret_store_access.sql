@@ -470,7 +470,7 @@ select ok(
 select ok(
     not has_function_privilege(
         'anon',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb)',
+        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)',
         'execute'
     ),
     'anon cannot execute write RPC'
@@ -479,7 +479,7 @@ select ok(
 select ok(
     not has_function_privilege(
         'authenticated',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb)',
+        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)',
         'execute'
     ),
     'authenticated cannot execute write RPC'
@@ -488,7 +488,7 @@ select ok(
 select ok(
     has_function_privilege(
         'service_role',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb)',
+        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)',
         'execute'
     ),
     'service_role can execute write RPC'
@@ -718,7 +718,7 @@ select ok(
 select ok(
     not has_function_privilege(
         'anon',
-        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb)',
+        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)',
         'execute'
     ),
     'anon cannot execute apply key rotation batch RPC'
@@ -727,7 +727,7 @@ select ok(
 select ok(
     not has_function_privilege(
         'authenticated',
-        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb)',
+        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)',
         'execute'
     ),
     'authenticated cannot execute apply key rotation batch RPC'
@@ -736,7 +736,7 @@ select ok(
 select ok(
     has_function_privilege(
         'service_role',
-        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb)',
+        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)',
         'execute'
     ),
     'service_role can execute apply key rotation batch RPC'
@@ -745,7 +745,7 @@ select ok(
 select ok(
     not has_function_privilege(
         'anon',
-        'public.rpc_complete_key_rotation(uuid,integer,integer)',
+        'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)',
         'execute'
     ),
     'anon cannot execute complete key rotation RPC'
@@ -754,7 +754,7 @@ select ok(
 select ok(
     not has_function_privilege(
         'authenticated',
-        'public.rpc_complete_key_rotation(uuid,integer,integer)',
+        'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)',
         'execute'
     ),
     'authenticated cannot execute complete key rotation RPC'
@@ -763,7 +763,7 @@ select ok(
 select ok(
     has_function_privilege(
         'service_role',
-        'public.rpc_complete_key_rotation(uuid,integer,integer)',
+        'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)',
         'execute'
     ),
     'service_role can execute complete key rotation RPC'

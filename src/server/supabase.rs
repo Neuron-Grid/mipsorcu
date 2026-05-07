@@ -6,17 +6,18 @@ use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender, RequestId};
+use crate::audit::{AuditAppendError, AuditEvent, AuditEventAppender};
 use crate::auth::RawJwt;
 use crate::ledger::{
     LedgerChainHead, LedgerEntryId, LedgerHash, LedgerSequenceNo, SignedLedgerEntry,
 };
-use crate::{KeyVersion, SecretId, SecretVersion};
+use crate::{KeyVersion, SecretId, SecretVersion, SecretVersionId};
 
 const CURRENT_SECRET_VERSION_READ_COLUMNS: &str = "\
 id,secret_id,version,ciphertext,encrypted_data_key,key_version,\
 algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,\
 created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+const SECRET_VERSION_RETENTION_SNAPSHOT_COLUMNS: &str = "id,version,key_version";
 const LEDGER_CHAIN_STATE_READ_COLUMNS: &str = "last_sequence_no,last_entry_hash";
 const AUDIT_EVENT_ID_CONFLICT_MARKER: &str = "audit_event_id_conflict";
 const LEDGER_ENTRY_ID_CONFLICT_MARKER: &str = "ledger_entry_id_conflict";
@@ -141,8 +142,29 @@ impl SupabaseClient {
         &self,
         entry: &SignedLedgerEntry,
     ) -> Result<AppendLedgerEntryOutcome, SupabaseRpcError> {
-        let params = AppendLedgerEntryParams::from_signed_entry(entry);
+        let params = LedgerEntryRpcParams::from_signed_entry(entry);
         let response = self.post_rpc("rpc_append_ledger_entry", &params).await?;
+        let rows: Vec<AppendLedgerEntryResponse> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .next()
+            .ok_or(SupabaseRpcError::EmptyResult)
+            .and_then(AppendLedgerEntryOutcome::try_from)
+    }
+
+    pub async fn call_append_audit_event_with_ledger(
+        &self,
+        event: &AuditEvent,
+        entry: &SignedLedgerEntry,
+    ) -> Result<AppendLedgerEntryOutcome, SupabaseRpcError> {
+        let params = AppendAuditEventWithLedgerParams::from_event_and_entry(event, entry);
+        let response = self
+            .post_rpc("rpc_append_audit_event_with_ledger", &params)
+            .await?;
         let rows: Vec<AppendLedgerEntryResponse> = ensure_success(response)
             .await?
             .json()
@@ -207,6 +229,35 @@ impl SupabaseClient {
             .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
 
         Ok(rows)
+    }
+
+    pub async fn fetch_secret_version_retention_snapshot(
+        &self,
+        secret_id: &SecretId,
+    ) -> Result<Vec<SecretVersionRetentionSnapshot>, SupabaseRpcError> {
+        let secret_id = secret_id.as_canonical_string();
+        let url = format!(
+            "{}/rest/v1/secret_versions?select={SECRET_VERSION_RETENTION_SNAPSHOT_COLUMNS}&secret_id=eq.{secret_id}&order=version.desc",
+            self.base_url
+        );
+        let response = self
+            .http_client
+            .get(&url)
+            .header("apikey", &self.service_role_key)
+            .bearer_auth(&self.service_role_key)
+            .send()
+            .await
+            .map_err(SupabaseRpcError::Network)?;
+
+        let rows: Vec<SecretVersionRetentionSnapshotResponse> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .map(SecretVersionRetentionSnapshot::try_from)
+            .collect()
     }
 
     pub async fn call_sample_restore_test(
@@ -279,16 +330,25 @@ impl SupabaseClient {
 
     pub async fn call_apply_key_rotation_batch(
         &self,
-        request_id: &RequestId,
+        event: &AuditEvent,
+        ledger_entry: &SignedLedgerEntry,
         old_key_version: KeyVersion,
         new_key_version: KeyVersion,
         rows: Vec<KeyRotationApplyRow>,
     ) -> Result<KeyRotationApplyOutcome, SupabaseRpcError> {
+        let source_event_at = event.source_event_at().map_err(|error| {
+            SupabaseRpcError::InvalidResponse(format!(
+                "key rotation audit event source_event_at is invalid: {error}"
+            ))
+        })?;
         let params = ApplyKeyRotationBatchParams {
-            p_request_id: request_id.as_canonical_string(),
+            p_request_id: event.request_id().as_canonical_string(),
             p_old_key_version: old_key_version.get(),
             p_new_key_version: new_key_version.get(),
             p_rows: rows,
+            p_audit_event_id: event.audit_event_id().as_canonical_string(),
+            p_source_event_at: source_event_at.as_str().to_owned(),
+            p_ledger_entry: LedgerEntryRpcParams::from_signed_entry(ledger_entry),
         };
         let response = self
             .post_rpc("rpc_apply_key_rotation_batch", &params)
@@ -307,14 +367,23 @@ impl SupabaseClient {
 
     pub async fn call_complete_key_rotation(
         &self,
-        request_id: &RequestId,
+        event: &AuditEvent,
+        ledger_entry: &SignedLedgerEntry,
         old_key_version: KeyVersion,
         new_key_version: KeyVersion,
     ) -> Result<KeyRotationCompleteOutcome, SupabaseRpcError> {
+        let source_event_at = event.source_event_at().map_err(|error| {
+            SupabaseRpcError::InvalidResponse(format!(
+                "key rotation audit event source_event_at is invalid: {error}"
+            ))
+        })?;
         let params = CompleteKeyRotationParams {
-            p_request_id: request_id.as_canonical_string(),
+            p_request_id: event.request_id().as_canonical_string(),
             p_old_key_version: old_key_version.get(),
             p_new_key_version: new_key_version.get(),
+            p_audit_event_id: event.audit_event_id().as_canonical_string(),
+            p_source_event_at: source_event_at.as_str().to_owned(),
+            p_ledger_entry: LedgerEntryRpcParams::from_signed_entry(ledger_entry),
         };
         let response = self.post_rpc("rpc_complete_key_rotation", &params).await?;
         let rows: Vec<KeyRotationCompleteResponse> =
@@ -421,6 +490,68 @@ pub struct SecretReadJoin {
     pub current_version_id: String,
     pub owner_user_id: String,
     pub classification: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SecretVersionRetentionSnapshotResponse {
+    id: String,
+    version: i32,
+    key_version: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretVersionRetentionSnapshot {
+    secret_version_id: SecretVersionId,
+    version: SecretVersion,
+    key_version: KeyVersion,
+}
+
+impl SecretVersionRetentionSnapshot {
+    pub fn secret_version_id(&self) -> &SecretVersionId {
+        &self.secret_version_id
+    }
+
+    pub fn version(&self) -> SecretVersion {
+        self.version
+    }
+
+    pub fn key_version(&self) -> KeyVersion {
+        self.key_version
+    }
+}
+
+impl TryFrom<SecretVersionRetentionSnapshotResponse> for SecretVersionRetentionSnapshot {
+    type Error = SupabaseRpcError;
+
+    fn try_from(response: SecretVersionRetentionSnapshotResponse) -> Result<Self, Self::Error> {
+        let secret_version_id = SecretVersionId::parse(&response.id).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "retention snapshot returned invalid secret version id".to_owned(),
+            )
+        })?;
+        let version = u32::try_from(response.version)
+            .ok()
+            .and_then(|value| SecretVersion::new(value).ok())
+            .ok_or_else(|| {
+                SupabaseRpcError::InvalidResponse(
+                    "retention snapshot returned invalid version".to_owned(),
+                )
+            })?;
+        let key_version = u32::try_from(response.key_version)
+            .ok()
+            .and_then(|value| KeyVersion::new(value).ok())
+            .ok_or_else(|| {
+                SupabaseRpcError::InvalidResponse(
+                    "retention snapshot returned invalid key version".to_owned(),
+                )
+            })?;
+
+        Ok(Self {
+            secret_version_id,
+            version,
+            key_version,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -582,8 +713,8 @@ impl From<KeyRotationCompleteResponse> for KeyRotationCompleteOutcome {
     }
 }
 
-#[derive(Serialize)]
-struct AppendLedgerEntryParams {
+#[derive(Clone, Serialize)]
+pub struct LedgerEntryRpcParams {
     p_ledger_entry_id: String,
     p_sequence_no: u64,
     p_entry_type: String,
@@ -766,8 +897,8 @@ pub fn classify_append_ledger_error(error: &SupabaseRpcError) -> LedgerAppendRpc
     }
 }
 
-impl AppendLedgerEntryParams {
-    fn from_signed_entry(entry: &SignedLedgerEntry) -> Self {
+impl LedgerEntryRpcParams {
+    pub fn from_signed_entry(entry: &SignedLedgerEntry) -> Self {
         Self {
             p_ledger_entry_id: entry.ledger_entry_id().as_canonical_string(),
             p_sequence_no: entry.sequence_no().get(),
@@ -808,6 +939,7 @@ pub struct WriteSecretVersionParams {
     pub p_request_id: String,
     pub p_action: String,
     pub p_secret_id: String,
+    pub p_secret_version_id: String,
     pub p_owner_user_id: String,
     pub p_classification: String,
     pub p_created_by_device_id: String,
@@ -819,6 +951,7 @@ pub struct WriteSecretVersionParams {
     pub p_algorithm: String,
     pub p_nonce_or_iv: String,
     pub p_aad_context: Value,
+    pub p_ledger_entries: Vec<LedgerEntryRpcParams>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -833,7 +966,7 @@ struct WriteSecretVersionResponse {
 #[derive(Debug)]
 pub struct WriteSecretVersionOutcome {
     secret_id: SecretId,
-    secret_version_id: String,
+    secret_version_id: SecretVersionId,
     version: SecretVersion,
     purged_version_ids: Vec<String>,
 }
@@ -843,7 +976,7 @@ impl WriteSecretVersionOutcome {
         &self.secret_id
     }
 
-    pub fn secret_version_id(&self) -> &str {
+    pub fn secret_version_id(&self) -> &SecretVersionId {
         &self.secret_version_id
     }
 
@@ -871,10 +1004,16 @@ impl TryFrom<WriteSecretVersionResponse> for WriteSecretVersionOutcome {
         let secret_id = SecretId::parse(&response.secret_id).map_err(|_| {
             SupabaseRpcError::InvalidResponse("write RPC returned invalid secret_id".to_owned())
         })?;
+        let secret_version_id =
+            SecretVersionId::parse(&response.secret_version_id).map_err(|_| {
+                SupabaseRpcError::InvalidResponse(
+                    "write RPC returned invalid secret_version_id".to_owned(),
+                )
+            })?;
 
         Ok(Self {
             secret_id,
-            secret_version_id: response.secret_version_id,
+            secret_version_id,
             version,
             purged_version_ids: response.purged_version_ids,
         })
@@ -892,6 +1031,34 @@ struct AppendAuditEventParams {
     p_result: String,
     p_key_version: Option<u32>,
     p_metadata_json: Value,
+}
+
+#[derive(Serialize)]
+struct AppendAuditEventWithLedgerParams {
+    p_audit_event_id: String,
+    p_request_id: String,
+    p_actor_user_id: Option<String>,
+    p_actor_device_id: Option<String>,
+    p_action: String,
+    p_target_secret_id: Option<String>,
+    p_result: String,
+    p_key_version: Option<u32>,
+    p_metadata_json: Value,
+    p_ledger_entry_id: String,
+    p_sequence_no: u64,
+    p_entry_type: String,
+    p_source_event_at: String,
+    p_source_event_id: Option<String>,
+    p_target_secret_version_id: Option<String>,
+    p_error_code: Option<String>,
+    p_payload: Value,
+    p_canonicalization_version: u8,
+    p_previous_entry_hash: String,
+    p_entry_hash: String,
+    p_hash_algorithm: String,
+    p_signature: String,
+    p_signature_algorithm: String,
+    p_signature_key_version: u32,
 }
 
 #[derive(Serialize)]
@@ -916,6 +1083,9 @@ struct ApplyKeyRotationBatchParams {
     p_old_key_version: u32,
     p_new_key_version: u32,
     p_rows: Vec<KeyRotationApplyRow>,
+    p_audit_event_id: String,
+    p_source_event_at: String,
+    p_ledger_entry: LedgerEntryRpcParams,
 }
 
 #[derive(Serialize)]
@@ -923,6 +1093,9 @@ struct CompleteKeyRotationParams {
     p_request_id: String,
     p_old_key_version: u32,
     p_new_key_version: u32,
+    p_audit_event_id: String,
+    p_source_event_at: String,
+    p_ledger_entry: LedgerEntryRpcParams,
 }
 
 #[derive(Debug, Deserialize)]
@@ -954,6 +1127,40 @@ impl AppendAuditEventParams {
             p_result: event.result().as_str().to_owned(),
             p_key_version: event.key_version().map(|kv| kv.get()),
             p_metadata_json: event.metadata_json().as_value().clone(),
+        }
+    }
+}
+
+impl AppendAuditEventWithLedgerParams {
+    fn from_event_and_entry(event: &AuditEvent, entry: &SignedLedgerEntry) -> Self {
+        let audit_event = AppendAuditEventParams::from_event(event);
+        let ledger_entry = LedgerEntryRpcParams::from_signed_entry(entry);
+
+        Self {
+            p_audit_event_id: audit_event.p_audit_event_id,
+            p_request_id: audit_event.p_request_id,
+            p_actor_user_id: audit_event.p_actor_user_id,
+            p_actor_device_id: audit_event.p_actor_device_id,
+            p_action: audit_event.p_action,
+            p_target_secret_id: audit_event.p_target_secret_id,
+            p_result: audit_event.p_result,
+            p_key_version: audit_event.p_key_version,
+            p_metadata_json: audit_event.p_metadata_json,
+            p_ledger_entry_id: ledger_entry.p_ledger_entry_id,
+            p_sequence_no: ledger_entry.p_sequence_no,
+            p_entry_type: ledger_entry.p_entry_type,
+            p_source_event_at: ledger_entry.p_source_event_at,
+            p_source_event_id: ledger_entry.p_source_event_id,
+            p_target_secret_version_id: ledger_entry.p_target_secret_version_id,
+            p_error_code: ledger_entry.p_error_code,
+            p_payload: ledger_entry.p_payload,
+            p_canonicalization_version: ledger_entry.p_canonicalization_version,
+            p_previous_entry_hash: ledger_entry.p_previous_entry_hash,
+            p_entry_hash: ledger_entry.p_entry_hash,
+            p_hash_algorithm: ledger_entry.p_hash_algorithm,
+            p_signature: ledger_entry.p_signature,
+            p_signature_algorithm: ledger_entry.p_signature_algorithm,
+            p_signature_key_version: ledger_entry.p_signature_key_version,
         }
     }
 }

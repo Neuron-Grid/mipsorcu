@@ -1,5 +1,6 @@
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
@@ -62,6 +63,7 @@ pub async fn run_integrity_check_once(
     trigger: IntegrityCheckTrigger,
 ) -> Result<IntegrityCheckOutcome, IntegrityCheckError> {
     let request_id = RequestId::generate().map_err(IntegrityCheckError::RequestId)?;
+    let started_at = Instant::now();
 
     let summary = match state.supabase_client.call_integrity_check().await {
         Ok(summary) => summary,
@@ -74,6 +76,7 @@ pub async fn run_integrity_check_once(
                 &summary,
                 trigger,
                 Some("rpc_failed"),
+                elapsed_ms(started_at),
             )
             .await?;
             tracing::error!(
@@ -97,6 +100,7 @@ pub async fn run_integrity_check_once(
             &summary,
             trigger,
             None,
+            elapsed_ms(started_at),
         )
         .await?;
         tracing::info!(
@@ -125,6 +129,7 @@ pub async fn run_integrity_check_once(
         &summary,
         trigger,
         Some("integrity_violation_detected"),
+        elapsed_ms(started_at),
     )
     .await?;
     tracing::error!(
@@ -177,11 +182,21 @@ pub fn build_integrity_check_metadata(
     trigger: IntegrityCheckTrigger,
     error_code: Option<&'static str>,
 ) -> Result<AuditMetadata, AuditEventError> {
+    build_integrity_check_metadata_with_duration(summary, trigger, error_code, 0)
+}
+
+fn build_integrity_check_metadata_with_duration(
+    summary: &IntegrityCheckSummary,
+    trigger: IntegrityCheckTrigger,
+    error_code: Option<&'static str>,
+    duration_ms: u64,
+) -> Result<AuditMetadata, AuditEventError> {
     let mut value = json!({
         "check_name": "mvp_integrity_check",
         "checked_secret_count": summary.checked_secret_count,
         "checked_secret_version_count": summary.checked_secret_version_count,
         "checked_audit_event_count": summary.checked_audit_event_count,
+        "duration_ms": duration_ms,
         "violation_count": summary.violation_count,
         "violation_summary": &summary.violation_summary,
         "trigger": trigger.as_str(),
@@ -204,9 +219,11 @@ async fn record_integrity_check_audit(
     summary: &IntegrityCheckSummary,
     trigger: IntegrityCheckTrigger,
     error_code: Option<&'static str>,
+    duration_ms: u64,
 ) -> Result<AuditRecordOutcome, IntegrityCheckError> {
-    let metadata = build_integrity_check_metadata(summary, trigger, error_code)
-        .map_err(IntegrityCheckError::Metadata)?;
+    let metadata =
+        build_integrity_check_metadata_with_duration(summary, trigger, error_code, duration_ms)
+            .map_err(IntegrityCheckError::Metadata)?;
     audit_reporter::record_integrity_check_audit(
         state,
         request_id,
@@ -218,6 +235,10 @@ async fn record_integrity_check_audit(
     )
     .await
     .map_err(IntegrityCheckError::AuditRecordFailed)
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckError> {
@@ -247,12 +268,17 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         audit_appender,
         audit_fallback_store.clone(),
     ));
+    let ledger_appender = Arc::new(crate::server::ledger_appender::LedgerAppender::new(
+        supabase_client.clone(),
+        config.ledger_signing_key.clone(),
+    ));
 
     Ok(AppState {
         master_key_ring: Arc::new(config.master_key_ring),
         jwt_verifier: Arc::new(jwt_verifier),
         supabase_client,
         audit_recorder,
+        ledger_appender,
         audit_fallback_store,
         readiness_state: ReadinessState::new(),
         health_readiness_poll_interval: config.health_readiness_poll_interval,

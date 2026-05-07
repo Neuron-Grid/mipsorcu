@@ -12,7 +12,9 @@ create function public.rpc_write_secret_version(
     p_key_version integer,
     p_algorithm text,
     p_nonce_or_iv bytea,
-    p_aad_context jsonb
+    p_aad_context jsonb,
+    p_secret_version_id uuid default gen_random_uuid(),
+    p_ledger_entries jsonb default null
 )
 returns table (
     secret_id uuid,
@@ -33,6 +35,9 @@ declare
     v_secret_version_from_aad integer;
     v_aad_created_at timestamptz;
     v_audit_metadata jsonb;
+    v_write_ledger_entry jsonb;
+    v_purge_ledger_entry jsonb;
+    v_purge_ledger_count integer;
     v_constraint_name text;
 begin
     if p_request_id is null
@@ -49,6 +54,7 @@ begin
         or p_algorithm is null
         or p_nonce_or_iv is null
         or p_aad_context is null
+        or p_secret_version_id is null
     then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
@@ -58,6 +64,14 @@ begin
     end if;
 
     if p_secret_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if p_secret_version_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if p_ledger_entries is not null and jsonb_typeof(p_ledger_entries) <> 'array' then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
@@ -205,6 +219,7 @@ begin
 
     begin
         insert into public.secret_versions (
+            id,
             secret_id,
             version,
             ciphertext,
@@ -219,6 +234,7 @@ begin
             created_at
         )
         values (
+            p_secret_version_id,
             p_secret_id,
             p_version,
             p_ciphertext,
@@ -248,6 +264,43 @@ begin
     set current_version_id = v_secret_version_id
     where id = p_secret_id;
 
+    if p_ledger_entries is not null then
+        select entries.entry
+        into v_write_ledger_entry
+        from jsonb_array_elements(p_ledger_entries) as entries(entry)
+        where entries.entry ->> 'p_entry_type' = case
+            when p_action = 'encrypt_create' then 'secret_created'
+            else 'secret_version_created'
+        end;
+
+        if not found or (
+            select count(*)::integer
+            from jsonb_array_elements(p_ledger_entries) as entries(entry)
+            where entries.entry ->> 'p_entry_type' in (
+                'secret_created',
+                'secret_version_created'
+            )
+        ) <> 1 then
+            raise exception 'invalid_rpc_input' using errcode = '22023';
+        end if;
+
+        if v_write_ledger_entry ->> 'p_request_id' <> p_request_id::text
+            or v_write_ledger_entry ->> 'p_source_event_id' is null
+            or v_write_ledger_entry ->> 'p_target_secret_id' <> p_secret_id::text
+            or v_write_ledger_entry ->> 'p_target_secret_version_id' <> v_secret_version_id::text
+            or v_write_ledger_entry ->> 'p_actor_user_id' <> p_owner_user_id::text
+            or v_write_ledger_entry ->> 'p_actor_device_id' <> p_created_by_device_id
+            or v_write_ledger_entry ->> 'p_result' <> 'success'
+            or v_write_ledger_entry ->> 'p_error_code' is not null
+            or v_write_ledger_entry -> 'p_payload' ->> 'classification' <> p_classification
+            or v_write_ledger_entry -> 'p_payload' ->> 'algorithm' <> p_algorithm
+            or (v_write_ledger_entry -> 'p_payload' ->> 'version')::integer <> p_version
+            or (v_write_ledger_entry -> 'p_payload' ->> 'key_version')::integer <> p_key_version
+        then
+            raise exception 'invalid_rpc_input' using errcode = '22023';
+        end if;
+    end if;
+
     v_audit_metadata := jsonb_build_object(
         'version',
         p_version,
@@ -255,11 +308,19 @@ begin
         v_secret_version_id
     );
 
+    if v_write_ledger_entry is not null then
+        v_audit_metadata := v_audit_metadata || jsonb_build_object(
+            'source_event_at',
+            v_write_ledger_entry ->> 'p_source_event_at'
+        );
+    end if;
+
     if public.audit_metadata_has_forbidden_key(v_audit_metadata) then
         raise exception 'invalid_audit_metadata' using errcode = '22023';
     end if;
 
     insert into public.audit_events (
+        id,
         request_id,
         actor_user_id,
         actor_device_id,
@@ -270,6 +331,7 @@ begin
         metadata_json
     )
     values (
+        coalesce((v_write_ledger_entry ->> 'p_source_event_id')::uuid, gen_random_uuid()),
         p_request_id,
         p_owner_user_id,
         p_created_by_device_id,
@@ -279,6 +341,11 @@ begin
         p_key_version,
         v_audit_metadata
     );
+
+    if v_write_ledger_entry is not null then
+        perform *
+        from public.rpc_append_ledger_entry_from_jsonb(v_write_ledger_entry);
+    end if;
 
     for v_purged in
         delete from public.secret_versions sv
@@ -301,6 +368,30 @@ begin
     loop
         v_purged_version_ids := array_append(v_purged_version_ids, v_purged.id);
 
+        v_purge_ledger_entry := null;
+        if p_ledger_entries is not null then
+            select entries.entry
+            into v_purge_ledger_entry
+            from jsonb_array_elements(p_ledger_entries) as entries(entry)
+            where entries.entry ->> 'p_entry_type' = 'secret_version_purged'
+                and entries.entry ->> 'p_target_secret_version_id' = v_purged.id::text;
+
+            if not found
+                or v_purge_ledger_entry ->> 'p_request_id' <> p_request_id::text
+                or v_purge_ledger_entry ->> 'p_source_event_id' is null
+                or v_purge_ledger_entry ->> 'p_target_secret_id' <> p_secret_id::text
+                or v_purge_ledger_entry ->> 'p_actor_user_id' <> p_owner_user_id::text
+                or v_purge_ledger_entry ->> 'p_actor_device_id' <> p_created_by_device_id
+                or v_purge_ledger_entry ->> 'p_result' <> 'success'
+                or v_purge_ledger_entry ->> 'p_error_code' is not null
+                or (v_purge_ledger_entry -> 'p_payload' ->> 'version')::integer <> v_purged.version
+                or (v_purge_ledger_entry -> 'p_payload' ->> 'key_version')::integer <> v_purged.key_version
+                or (v_purge_ledger_entry -> 'p_payload' ->> 'retention_limit')::integer <> 4
+            then
+                raise exception 'invalid_rpc_input' using errcode = '22023';
+            end if;
+        end if;
+
         v_audit_metadata := jsonb_build_object(
             'version',
             v_purged.version,
@@ -308,11 +399,19 @@ begin
             v_purged.id
         );
 
+        if v_purge_ledger_entry is not null then
+            v_audit_metadata := v_audit_metadata || jsonb_build_object(
+                'source_event_at',
+                v_purge_ledger_entry ->> 'p_source_event_at'
+            );
+        end if;
+
         if public.audit_metadata_has_forbidden_key(v_audit_metadata) then
             raise exception 'invalid_audit_metadata' using errcode = '22023';
         end if;
 
         insert into public.audit_events (
+            id,
             request_id,
             actor_user_id,
             actor_device_id,
@@ -323,6 +422,7 @@ begin
             metadata_json
         )
         values (
+            coalesce((v_purge_ledger_entry ->> 'p_source_event_id')::uuid, gen_random_uuid()),
             p_request_id,
             p_owner_user_id,
             p_created_by_device_id,
@@ -332,7 +432,23 @@ begin
             v_purged.key_version,
             v_audit_metadata
         );
+
+        if v_purge_ledger_entry is not null then
+            perform *
+            from public.rpc_append_ledger_entry_from_jsonb(v_purge_ledger_entry);
+        end if;
     end loop;
+
+    if p_ledger_entries is not null then
+        select count(*)::integer
+        into v_purge_ledger_count
+        from jsonb_array_elements(p_ledger_entries) as entries(entry)
+        where entries.entry ->> 'p_entry_type' = 'secret_version_purged';
+
+        if v_purge_ledger_count <> coalesce(array_length(v_purged_version_ids, 1), 0) then
+            raise exception 'invalid_rpc_input' using errcode = '22023';
+        end if;
+    end if;
 
     return query
     select
@@ -357,6 +473,8 @@ comment on function public.rpc_write_secret_version(
     integer,
     text,
     bytea,
+    jsonb,
+    uuid,
     jsonb
 ) is
     'Authoritative production write RPC for encrypt_create and encrypt_rotate. Inserts the version, advances current_version_id, appends success audit events, and purges versions beyond retention in one transaction.';
@@ -375,6 +493,8 @@ revoke execute on function public.rpc_write_secret_version(
     integer,
     text,
     bytea,
+    jsonb,
+    uuid,
     jsonb
 ) from public, anon, authenticated;
 revoke execute on function public.rpc_write_secret_version(
@@ -391,6 +511,8 @@ revoke execute on function public.rpc_write_secret_version(
     integer,
     text,
     bytea,
+    jsonb,
+    uuid,
     jsonb
 ) from public;
 
@@ -408,5 +530,7 @@ grant execute on function public.rpc_write_secret_version(
     integer,
     text,
     bytea,
+    jsonb,
+    uuid,
     jsonb
 ) to service_role;

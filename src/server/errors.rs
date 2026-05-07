@@ -22,6 +22,7 @@ pub enum ApiError {
     DecryptFailed,
     KeyUnavailable,
     AuditRecordFailed,
+    LedgerAppendFailed,
     SupabaseError(SupabaseRpcError),
     DbIntegrityViolation(String),
     InternalInvariantViolation(String),
@@ -44,6 +45,7 @@ impl fmt::Display for ApiError {
             Self::DecryptFailed => write!(formatter, "decrypt failed"),
             Self::KeyUnavailable => write!(formatter, "key unavailable"),
             Self::AuditRecordFailed => write!(formatter, "audit record failed"),
+            Self::LedgerAppendFailed => write!(formatter, "ledger append failed"),
             Self::SupabaseError(error) => write!(formatter, "{error}"),
             Self::DbIntegrityViolation(message) => {
                 write!(formatter, "db integrity violation: {message}")
@@ -74,6 +76,7 @@ impl ApiError {
             Self::DecryptFailed => (StatusCode::BAD_REQUEST, "decrypt_failed"),
             Self::KeyUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "key_unavailable"),
             Self::AuditRecordFailed => (StatusCode::SERVICE_UNAVAILABLE, "audit_record_failed"),
+            Self::LedgerAppendFailed => (StatusCode::BAD_GATEWAY, "ledger_append_failed"),
             Self::SupabaseError(_) => (StatusCode::BAD_GATEWAY, "upstream_dependency_failed"),
             Self::DbIntegrityViolation(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "db_integrity_violation")

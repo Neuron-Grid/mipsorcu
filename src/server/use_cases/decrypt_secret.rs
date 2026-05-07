@@ -77,6 +77,7 @@ pub(in crate::server) async fn decrypt_secret(
 
     let key_version = row.key_version();
     let response_secret_id = row.secret_id().clone();
+    let response_secret_version_id = row.secret_version_id().clone();
     let version = row.version();
     let input = row.into_decrypt_input(claims);
 
@@ -102,6 +103,8 @@ pub(in crate::server) async fn decrypt_secret(
         request_id,
         &actor_user_id,
         &response_secret_id,
+        &response_secret_version_id,
+        version,
         key_version,
     )
     .await?;

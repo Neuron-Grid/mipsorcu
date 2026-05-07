@@ -10,7 +10,7 @@ use crate::crypto::{
 use crate::error::SecretWriteError;
 use crate::types::{
     Ciphertext, Classification, CreatedAt, DataKey, DeviceId, EncryptedDataKey, KeyVersion,
-    MasterKey, Nonce, OwnerUserId, Plaintext, SecretId, SecretVersion,
+    MasterKey, Nonce, OwnerUserId, Plaintext, SecretId, SecretVersion, SecretVersionId,
 };
 
 use super::input::{
@@ -36,6 +36,7 @@ impl SecretWriteAction {
 pub struct PreparedSecretVersion {
     write_action: SecretWriteAction,
     secret_id: SecretId,
+    secret_version_id: SecretVersionId,
     version: SecretVersion,
     owner_user_id: OwnerUserId,
     classification: Classification,
@@ -55,6 +56,10 @@ impl PreparedSecretVersion {
 
     pub fn secret_id(&self) -> &SecretId {
         &self.secret_id
+    }
+
+    pub fn secret_version_id(&self) -> &SecretVersionId {
+        &self.secret_version_id
     }
 
     pub fn version(&self) -> SecretVersion {
@@ -108,6 +113,7 @@ impl fmt::Debug for PreparedSecretVersion {
             .debug_struct("PreparedSecretVersion")
             .field("write_action", &self.write_action)
             .field("secret_id", &self.secret_id)
+            .field("secret_version_id", &self.secret_version_id)
             .field("version", &self.version)
             .field("owner_user_id", &self.owner_user_id)
             .field("classification", &self.classification)
@@ -262,6 +268,7 @@ fn prepare_secret_version_with_data_key(
     data_key: &DataKey,
     plaintext: &Plaintext,
 ) -> Result<PreparedSecretVersion, SecretWriteError> {
+    let secret_version_id = SecretVersionId::generate()?;
     let aad = AadV1::from_row_metadata(
         metadata.secret_id.clone(),
         metadata.version,
@@ -275,6 +282,7 @@ fn prepare_secret_version_with_data_key(
     Ok(PreparedSecretVersion {
         write_action,
         secret_id: metadata.secret_id,
+        secret_version_id,
         version: metadata.version,
         owner_user_id: metadata.owner_user_id,
         classification: metadata.classification,

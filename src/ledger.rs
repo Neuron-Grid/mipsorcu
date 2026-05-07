@@ -10,7 +10,7 @@ use uuid::{Builder, Uuid, Version};
 use zeroize::Zeroize;
 
 use crate::audit::{AuditEventId, RequestId};
-use crate::types::{DeviceId, OwnerUserId, SecretId, SourceEventAt};
+use crate::types::{DeviceId, OwnerUserId, SecretId, SecretVersionId, SourceEventAt};
 
 pub const LEDGER_CANONICALIZATION_VERSION_V1: u8 = 1;
 pub const LEDGER_CANONICAL_SCHEMA_V1: &str = "mipsorcu.ledger_entry.v1";
@@ -274,6 +274,10 @@ pub struct LedgerTargetSecretVersionId(Uuid);
 impl LedgerTargetSecretVersionId {
     pub fn parse(value: &str) -> Result<Self, LedgerError> {
         parse_uuid(value, "target_secret_version_id").map(Self)
+    }
+
+    pub fn from_secret_version_id(value: &SecretVersionId) -> Result<Self, LedgerError> {
+        Self::parse(&value.as_canonical_string())
     }
 
     pub fn as_canonical_string(&self) -> String {

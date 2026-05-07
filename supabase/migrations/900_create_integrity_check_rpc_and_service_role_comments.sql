@@ -265,6 +265,8 @@ comment on function public.rpc_write_secret_version(
     integer,
     text,
     bytea,
+    jsonb,
+    uuid,
     jsonb
 ) is
     'Authoritative production write RPC for encrypt_create and encrypt_rotate. Supabase の service_role ロールは BYPASSRLS 属性を持つ高権限ロールである。ただし mipsorcu runtime では direct DML に依存せず、rpc_write_secret_version / rpc_append_audit_event / rpc_sample_restore_test / rpc_integrity_check の EXECUTE 権限と、復号用の限定的 SELECT を中心に最小化して運用する。audit_events には service_role を含む runtime role の direct table privileges を付与しない。';

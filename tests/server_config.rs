@@ -14,7 +14,10 @@ use mipsorcu::server::config::{
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
 };
-use mipsorcu::{KeyVersion, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing};
+use mipsorcu::{
+    KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
+    MASTER_KEY_LENGTH, MasterKey, MasterKeyRing,
+};
 
 fn base_dotenv() -> HashMap<String, String> {
     HashMap::from([
@@ -34,6 +37,14 @@ fn base_dotenv() -> HashMap<String, String> {
         (
             "MIPSORCU_SUPABASE_PUBLISHABLE_KEY".to_owned(),
             "publishable-secret".to_owned(),
+        ),
+        (
+            "MIPSORCU_LEDGER_SIGNING_KEY".to_owned(),
+            hex::encode([9u8; LEDGER_ED25519_SECRET_KEY_LENGTH]),
+        ),
+        (
+            "MIPSORCU_LEDGER_SIGNATURE_KEY_VERSION".to_owned(),
+            "1".to_owned(),
         ),
         (
             "MIPSORCU_JWT_ISSUER".to_owned(),
@@ -763,6 +774,11 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         supabase_url: "https://example.supabase.co".to_owned(),
         supabase_service_role_key: "service-role-secret".to_owned(),
         supabase_publishable_key: "publishable-secret".to_owned(),
+        ledger_signing_key: LedgerSigningKey::from_secret_key_bytes(
+            LedgerSignatureKeyVersion::new(1).expect("ledger key version should be valid"),
+            &[9u8; LEDGER_ED25519_SECRET_KEY_LENGTH],
+        )
+        .expect("ledger signing key should be valid"),
         jwt_issuer: "issuer".to_owned(),
         jwt_audience: "audience".to_owned(),
         jwks_url: "https://example.supabase.co/auth/v1/.well-known/jwks.json".to_owned(),

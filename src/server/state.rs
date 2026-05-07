@@ -7,6 +7,7 @@ use crate::MasterKeyRing;
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::JwtVerifier;
 
+use super::ledger_appender::LedgerAppender;
 use super::supabase::{SupabaseAuditAppender, SupabaseClient};
 
 #[derive(Clone)]
@@ -15,6 +16,7 @@ pub struct AppState {
     pub jwt_verifier: Arc<JwtVerifier>,
     pub supabase_client: Arc<SupabaseClient>,
     pub audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
+    pub ledger_appender: Arc<LedgerAppender>,
     pub audit_fallback_store: LocalAuditFallbackStore,
     pub readiness_state: ReadinessState,
     pub health_readiness_poll_interval: Duration,

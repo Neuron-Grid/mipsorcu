@@ -7,7 +7,11 @@ use std::time::Duration;
 
 use crate::MasterKeyRing;
 use crate::error::KeyringError;
+use crate::ledger::{
+    LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
+};
 use crate::types::{KeyVersion, MasterKey};
+use zeroize::Zeroize;
 
 const DEFAULT_DOTENV_PATH: &str = ".env";
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:3000";
@@ -38,6 +42,8 @@ const ENV_MASTER_KEY_DIR: &str = "MIPSORCU_MASTER_KEY_DIR";
 const ENV_SUPABASE_URL: &str = "MIPSORCU_SUPABASE_URL";
 const ENV_SUPABASE_SERVICE_ROLE_KEY: &str = "MIPSORCU_SUPABASE_SERVICE_ROLE_KEY";
 const ENV_SUPABASE_PUBLISHABLE_KEY: &str = "MIPSORCU_SUPABASE_PUBLISHABLE_KEY";
+const ENV_LEDGER_SIGNING_KEY: &str = "MIPSORCU_LEDGER_SIGNING_KEY";
+const ENV_LEDGER_SIGNATURE_KEY_VERSION: &str = "MIPSORCU_LEDGER_SIGNATURE_KEY_VERSION";
 const ENV_JWT_ISSUER: &str = "MIPSORCU_JWT_ISSUER";
 const ENV_JWT_AUDIENCE: &str = "MIPSORCU_JWT_AUDIENCE";
 const ENV_JWKS_URL: &str = "MIPSORCU_JWKS_URL";
@@ -77,6 +83,7 @@ pub struct AppConfig {
     pub supabase_url: String,
     pub supabase_service_role_key: String,
     pub supabase_publishable_key: String,
+    pub ledger_signing_key: LedgerSigningKey,
     pub jwt_issuer: String,
     pub jwt_audience: String,
     pub jwks_url: String,
@@ -110,6 +117,7 @@ impl fmt::Debug for AppConfig {
             .field("supabase_url", &self.supabase_url)
             .field("supabase_service_role_key", &"<redacted>")
             .field("supabase_publishable_key", &"<redacted>")
+            .field("ledger_signing_key", &self.ledger_signing_key)
             .field("jwt_issuer", &self.jwt_issuer)
             .field("jwt_audience", &self.jwt_audience)
             .field("jwks_url", &self.jwks_url)
@@ -247,6 +255,7 @@ where
         required_var(ENV_SUPABASE_SERVICE_ROLE_KEY, dotenv, get_process_var)?;
     let supabase_publishable_key =
         required_var(ENV_SUPABASE_PUBLISHABLE_KEY, dotenv, get_process_var)?;
+    let ledger_signing_key = load_ledger_signing_key(dotenv, get_process_var)?;
     let jwt_issuer = required_var(ENV_JWT_ISSUER, dotenv, get_process_var)?;
     let jwt_audience = required_var(ENV_JWT_AUDIENCE, dotenv, get_process_var)?;
     let jwks_url = required_var(ENV_JWKS_URL, dotenv, get_process_var)?;
@@ -352,6 +361,7 @@ where
         supabase_url,
         supabase_service_role_key,
         supabase_publishable_key,
+        ledger_signing_key,
         jwt_issuer,
         jwt_audience,
         jwks_url,
@@ -374,6 +384,62 @@ where
         restore_test_sample_limit,
         integrity_check_interval,
         integrity_check_startup_delay,
+    })
+}
+
+fn load_ledger_signing_key<F>(
+    dotenv: &DotenvVars,
+    get_process_var: &F,
+) -> Result<LedgerSigningKey, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let key_version = parse_ledger_signature_key_version(&required_var(
+        ENV_LEDGER_SIGNATURE_KEY_VERSION,
+        dotenv,
+        get_process_var,
+    )?)?;
+    let mut key_bytes = hex::decode(required_var(
+        ENV_LEDGER_SIGNING_KEY,
+        dotenv,
+        get_process_var,
+    )?)
+    .map_err(|error| ConfigError::InvalidValue {
+        name: ENV_LEDGER_SIGNING_KEY,
+        reason: error.to_string(),
+    })?;
+
+    let result = if key_bytes.len() == LEDGER_ED25519_SECRET_KEY_LENGTH {
+        LedgerSigningKey::from_secret_key_bytes(key_version, &key_bytes).map_err(|error| {
+            ConfigError::InvalidValue {
+                name: ENV_LEDGER_SIGNING_KEY,
+                reason: error.to_string(),
+            }
+        })
+    } else {
+        Err(ConfigError::InvalidValue {
+            name: ENV_LEDGER_SIGNING_KEY,
+            reason: format!("decoded key must be {LEDGER_ED25519_SECRET_KEY_LENGTH} bytes"),
+        })
+    };
+    key_bytes.zeroize();
+
+    result
+}
+
+fn parse_ledger_signature_key_version(
+    value: &str,
+) -> Result<LedgerSignatureKeyVersion, ConfigError> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|error| ConfigError::InvalidValue {
+            name: ENV_LEDGER_SIGNATURE_KEY_VERSION,
+            reason: error.to_string(),
+        })?;
+
+    LedgerSignatureKeyVersion::new(parsed).map_err(|error| ConfigError::InvalidValue {
+        name: ENV_LEDGER_SIGNATURE_KEY_VERSION,
+        reason: error.to_string(),
     })
 }
 

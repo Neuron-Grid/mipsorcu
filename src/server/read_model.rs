@@ -7,7 +7,7 @@ use crate::server::state::AppState;
 use crate::server::supabase::{RestoreTestSampleRow, SecretVersionReadRow, SupabaseRpcError};
 use crate::types::{
     Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
-    SecretId, SecretVersion,
+    SecretId, SecretVersion, SecretVersionId,
 };
 use crate::write::CurrentSecretVersionState;
 
@@ -27,6 +27,7 @@ impl From<FetchCurrentSecretVersionError> for ApiError {
 
 pub struct PreparedDecryptRow {
     secret_id: SecretId,
+    secret_version_id: SecretVersionId,
     version: SecretVersion,
     owner_user_id: OwnerUserId,
     classification: Classification,
@@ -40,6 +41,7 @@ pub struct PreparedDecryptRow {
 
 struct PreparedDecryptRowParts {
     secret_id: String,
+    secret_version_id: String,
     version: i32,
     owner_user_id: String,
     classification: String,
@@ -66,6 +68,10 @@ struct ReadModelMessages {
 impl PreparedDecryptRow {
     pub fn secret_id(&self) -> &SecretId {
         &self.secret_id
+    }
+
+    pub fn secret_version_id(&self) -> &SecretVersionId {
+        &self.secret_version_id
     }
 
     pub fn version(&self) -> SecretVersion {
@@ -142,6 +148,7 @@ fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, Ap
     build_prepared_decrypt_row(
         PreparedDecryptRowParts {
             secret_id: row.secret_id,
+            secret_version_id: row.id,
             version: row.version,
             owner_user_id: row.secrets.owner_user_id,
             classification: row.classification,
@@ -206,6 +213,7 @@ pub fn parse_restore_test_sample(
     build_prepared_decrypt_row(
         PreparedDecryptRowParts {
             secret_id: secret_id.as_canonical_string(),
+            secret_version_id: row.id,
             version: row.version,
             owner_user_id: owner_user_id.as_canonical_string(),
             classification: row.classification,
@@ -270,6 +278,9 @@ fn build_prepared_decrypt_row(
     Ok(PreparedDecryptRow {
         secret_id: SecretId::parse(&parts.secret_id)
             .map_err(|_| ApiError::DbIntegrityViolation(messages.secret_id_invalid.to_owned()))?,
+        secret_version_id: SecretVersionId::parse(&parts.secret_version_id).map_err(|_| {
+            ApiError::DbIntegrityViolation("secret version id is invalid".to_owned())
+        })?,
         version: parse_secret_version(parts.version, messages.version_invalid)?,
         owner_user_id: OwnerUserId::parse(&parts.owner_user_id).map_err(|_| {
             ApiError::DbIntegrityViolation(messages.owner_user_id_invalid.to_owned())

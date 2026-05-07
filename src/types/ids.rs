@@ -39,6 +39,40 @@ impl SecretId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SecretVersionId(Uuid);
+
+impl SecretVersionId {
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| CryptoError::RandomnessUnavailable)?;
+        let uuid = Builder::from_random_bytes(bytes).into_uuid();
+
+        Ok(Self(uuid))
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AadError> {
+        let uuid = Uuid::parse_str(value).map_err(|_| AadError::InvalidUuid {
+            field: "secret_version_id",
+            value: value.to_owned(),
+        })?;
+
+        if uuid.get_version() != Some(Version::Random) {
+            return Err(AadError::InvalidUuidVersion {
+                field: "secret_version_id",
+                value: value.to_owned(),
+                expected: "v4",
+            });
+        }
+
+        Ok(Self(uuid))
+    }
+
+    pub fn as_canonical_string(&self) -> String {
+        self.0.hyphenated().to_string()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SecretVersion(NonZeroU32);
 

@@ -11,13 +11,15 @@ use axum::extract::State;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mipsorcu::server::dto::CreateSecretRequest;
 use mipsorcu::server::handlers::create_secret;
+use mipsorcu::server::ledger_appender::LedgerAppender;
 use mipsorcu::server::middleware::{AuthenticatedUser, RequestContext, RequestJson};
 use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use mipsorcu::{
-    AuditRecorder, Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion, LocalAuditFallbackStore,
-    MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, RawJwt, RequestId, SourceEventAt,
-    VerifiedJwtClaims,
+    AuditRecorder, Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion,
+    LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
+    LocalAuditFallbackStore, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, RawJwt, RequestId,
+    SourceEventAt, VerifiedJwtClaims,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -93,6 +95,7 @@ async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() 
 
     assert!(result.is_err());
 
+    let chain_request = receiver.recv_timeout(Duration::from_secs(2))?;
     let write_request = receiver.recv_timeout(Duration::from_secs(2))?;
     let append_request = receiver.recv_timeout(Duration::from_secs(2))?;
     let join_result = server_thread
@@ -100,6 +103,11 @@ async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() 
         .map_err(|_| std::io::Error::other("test Supabase RPC server thread panicked"))?;
     join_result?;
 
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
     assert!(
         write_request
             .path
@@ -170,6 +178,7 @@ async fn create_secret_write_rpc_failure_writes_local_fallback_before_return() -
 
     assert!(result.is_err());
 
+    let chain_request = receiver.recv_timeout(Duration::from_secs(2))?;
     let write_request = receiver.recv_timeout(Duration::from_secs(2))?;
     let append_request = receiver.recv_timeout(Duration::from_secs(2))?;
     let join_result = server_thread
@@ -177,6 +186,11 @@ async fn create_secret_write_rpc_failure_writes_local_fallback_before_return() -
         .map_err(|_| std::io::Error::other("test Supabase RPC server thread panicked"))?;
     join_result?;
 
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
     assert!(
         write_request
             .path
@@ -244,6 +258,14 @@ fn test_app_state_with_fallback(
         audit_appender,
         audit_fallback_store.clone(),
     ));
+    let ledger_signing_key = LedgerSigningKey::from_secret_key_bytes(
+        LedgerSignatureKeyVersion::new(1)?,
+        &[9u8; LEDGER_ED25519_SECRET_KEY_LENGTH],
+    )?;
+    let ledger_appender = Arc::new(LedgerAppender::new(
+        supabase_client.clone(),
+        ledger_signing_key,
+    ));
 
     Ok(AppState {
         master_key_ring: Arc::new(MasterKeyRing::single(
@@ -253,6 +275,7 @@ fn test_app_state_with_fallback(
         jwt_verifier: Arc::new(test_jwt_verifier()?),
         supabase_client,
         audit_recorder,
+        ledger_appender,
         audit_fallback_store,
         readiness_state: ReadinessState::new(),
         health_readiness_poll_interval: Duration::from_secs(30),
@@ -344,9 +367,10 @@ fn spawn_supabase_rpc_server_with_append_response(
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (mut stream, _) = listener.accept()?;
             let request = read_http_request(&mut stream)?;
+            let is_ledger_chain_head = request.path.starts_with("/rest/v1/ledger_chain_state");
             let is_write_rpc = request
                 .path
                 .ends_with("/rest/v1/rpc/rpc_write_secret_version");
@@ -357,7 +381,9 @@ fn spawn_supabase_rpc_server_with_append_response(
                 )
             })?;
 
-            if is_write_rpc {
+            if is_ledger_chain_head {
+                write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
+            } else if is_write_rpc {
                 write_http_response(
                     &mut stream,
                     500,
@@ -395,7 +421,7 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest>
     };
 
     let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
-    let content_length = content_length(&headers)?;
+    let content_length = content_length(&headers)?.unwrap_or(0);
     let body_start = header_end + 4;
     let body_end = body_start + content_length;
 
@@ -416,7 +442,11 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest>
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or_default()
         .to_owned();
-    let body = serde_json::from_slice(&buffer[body_start..body_end])?;
+    let body = if content_length == 0 {
+        Value::Null
+    } else {
+        serde_json::from_slice(&buffer[body_start..body_end])?
+    };
 
     Ok(CapturedRequest { path, body })
 }
@@ -425,7 +455,7 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn content_length(headers: &str) -> std::io::Result<usize> {
+fn content_length(headers: &str) -> std::io::Result<Option<usize>> {
     headers
         .lines()
         .find_map(|line| {
@@ -437,13 +467,15 @@ fn content_length(headers: &str) -> std::io::Result<usize> {
             }
         })
         .transpose()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "request is missing content-length",
-            )
-        })
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn ledger_chain_head_body() -> String {
+    serde_json::json!([{
+        "last_sequence_no": 0,
+        "last_entry_hash": "\\x0000000000000000000000000000000000000000000000000000000000000000",
+    }])
+    .to_string()
 }
 
 fn write_http_response(

@@ -39,7 +39,7 @@ pub async fn rotate_secret(
         Json(RotateSecretResponse {
             secret_id: output.secret_id().as_canonical_string(),
             version: output.version().get(),
-            secret_version_id: output.secret_version_id().to_owned(),
+            secret_version_id: output.secret_version_id().as_canonical_string(),
         }),
     ))
 }

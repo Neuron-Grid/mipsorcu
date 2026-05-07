@@ -4,17 +4,18 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventAppender, AuditEventId, AuditEventParts, AuditMetadata,
-    AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditResult, LocalAuditFallbackStore,
-    RequestId,
+    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
 };
+#[cfg(test)]
+use crate::audit::{AuditEventAppender, AuditRecordError, AuditRecordOutcome, AuditRecorder};
 use crate::crypto::{KeyWrapContext, unwrap_data_key, wrap_data_key};
 use crate::server::config::AppConfig;
+use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts, LedgerAppender};
 use crate::server::supabase::{
-    KeyRotationApplyRow, KeyRotationBatchRow, SupabaseAuditAppender, SupabaseClient,
-    SupabaseRpcError,
+    KeyRotationApplyRow, KeyRotationBatchRow, SupabaseClient, SupabaseRpcError,
 };
 use crate::types::{EncryptedDataKey, KeyVersion, SecretId, SecretVersion};
+use crate::{LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, SignedLedgerEntry};
 
 #[derive(Debug)]
 pub enum KeyRotationCliError {
@@ -60,31 +61,18 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), KeyRotati
         config.supabase_service_role_key.clone(),
         config.supabase_publishable_key.clone(),
     ));
+    let ledger_appender = Arc::new(LedgerAppender::new(
+        supabase_client.clone(),
+        config.ledger_signing_key.clone(),
+    ));
 
     match command.as_str() {
         "status" => status(supabase_client, command_args).await,
-        "start" => {
-            let audit_recorder = key_rotation_start_audit_recorder(supabase_client, &config);
-            start(&audit_recorder, &config, command_args).await
-        }
-        "rewrap" => rewrap(supabase_client, &config, command_args).await,
-        "complete" => complete(supabase_client, command_args).await,
+        "start" => start_with_ledger(supabase_client, ledger_appender, &config, command_args).await,
+        "rewrap" => rewrap(supabase_client, ledger_appender, &config, command_args).await,
+        "complete" => complete(supabase_client, ledger_appender, command_args).await,
         _ => Err(KeyRotationCliError::Usage(usage())),
     }
-}
-
-fn key_rotation_start_audit_recorder(
-    supabase_client: Arc<SupabaseClient>,
-    config: &AppConfig,
-) -> AuditRecorder<SupabaseAuditAppender> {
-    let audit_appender = SupabaseAuditAppender::new(supabase_client);
-    let audit_fallback_store = LocalAuditFallbackStore::with_rollover_config(
-        config.audit_fallback_path.clone(),
-        config.audit_fallback_archive_dir.clone(),
-        config.audit_fallback_rotate_size_bytes,
-    );
-
-    AuditRecorder::new(audit_appender, audit_fallback_store)
 }
 
 async fn status(
@@ -103,6 +91,45 @@ async fn status(
     Ok(())
 }
 
+async fn start_with_ledger(
+    supabase_client: Arc<SupabaseClient>,
+    ledger_appender: Arc<LedgerAppender>,
+    config: &AppConfig,
+    args: &[String],
+) -> Result<(), KeyRotationCliError> {
+    let old_key_version = parse_key_version_flag(args, "--old-key-version")?;
+    let new_key_version = parse_key_version_flag(args, "--new-key-version")?;
+    ensure_keyring_contains(config, old_key_version)?;
+    ensure_keyring_contains(config, new_key_version)?;
+
+    let request_id =
+        RequestId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let event = build_key_rotation_start_event(&request_id, old_key_version, new_key_version)?;
+    let ledger_draft = build_key_rotation_ledger_draft(
+        &event,
+        LedgerEntryType::KeyRotationStarted,
+        json!({
+            "old_key_version": old_key_version.get(),
+            "new_key_version": new_key_version.get(),
+        }),
+    )?;
+    let signed_entry = sign_single_ledger_entry(&ledger_appender, &ledger_draft).await?;
+
+    supabase_client
+        .call_append_audit_event_with_ledger(&event, &signed_entry)
+        .await
+        .map_err(KeyRotationCliError::Supabase)?;
+
+    println!(
+        "key_rotation_start request_id={} old_key_version={} new_key_version={}",
+        request_id.as_canonical_string(),
+        old_key_version.get(),
+        new_key_version.get()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
 async fn start<A>(
     audit_recorder: &AuditRecorder<A>,
     config: &AppConfig,
@@ -152,6 +179,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 async fn record_key_rotation_start_audit<A>(
     audit_recorder: &AuditRecorder<A>,
     event: &AuditEvent,
@@ -202,9 +230,11 @@ where
     }
 }
 
+#[cfg(test)]
 fn audit_record_error_label(error: &AuditRecordError) -> &'static str {
     match error {
         AuditRecordError::EventConstructionFailed(_) => "event_construction_failed",
+        AuditRecordError::LedgerAppendFailed => "ledger_append_failed",
         AuditRecordError::PrimaryAndFallbackFailed { .. } => "both_failed",
         AuditRecordError::IdempotencyConflict => "idempotency_conflict",
         AuditRecordError::ResendReadFailed(_) | AuditRecordError::ResendMarkSentFailed(_) => {
@@ -215,6 +245,7 @@ fn audit_record_error_label(error: &AuditRecordError) -> &'static str {
 
 async fn rewrap(
     supabase_client: Arc<SupabaseClient>,
+    ledger_appender: Arc<LedgerAppender>,
     config: &AppConfig,
     args: &[String],
 ) -> Result<(), KeyRotationCliError> {
@@ -258,10 +289,47 @@ async fn rewrap(
         });
     }
 
+    let status_before_apply = supabase_client
+        .call_key_rotation_status(old_key_version)
+        .await?;
+    let batch_size = u64::try_from(apply_rows.len())
+        .map_err(|_| KeyRotationCliError::Config("rotation batch size is invalid".to_owned()))?;
+    let old_remaining = u64::try_from(status_before_apply.remaining_count).map_err(|_| {
+        KeyRotationCliError::Config("rotation remaining_count is invalid".to_owned())
+    })?;
+    let remaining_count = old_remaining.checked_sub(batch_size).ok_or_else(|| {
+        KeyRotationCliError::Config("rotation remaining_count is inconsistent".to_owned())
+    })?;
     let request_id =
         RequestId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let event = build_key_rotation_reencrypt_event(
+        &request_id,
+        old_key_version,
+        new_key_version,
+        batch_size,
+        batch_size,
+        remaining_count,
+    )?;
+    let ledger_draft = build_key_rotation_ledger_draft(
+        &event,
+        LedgerEntryType::KeyRotationReencrypted,
+        json!({
+            "old_key_version": old_key_version.get(),
+            "new_key_version": new_key_version.get(),
+            "batch_size": batch_size,
+            "processed_count": batch_size,
+            "remaining_count": remaining_count,
+        }),
+    )?;
+    let signed_entry = sign_single_ledger_entry(&ledger_appender, &ledger_draft).await?;
     let outcome = supabase_client
-        .call_apply_key_rotation_batch(&request_id, old_key_version, new_key_version, apply_rows)
+        .call_apply_key_rotation_batch(
+            &event,
+            &signed_entry,
+            old_key_version,
+            new_key_version,
+            apply_rows,
+        )
         .await?;
 
     println!(
@@ -277,14 +345,27 @@ async fn rewrap(
 
 async fn complete(
     supabase_client: Arc<SupabaseClient>,
+    ledger_appender: Arc<LedgerAppender>,
     args: &[String],
 ) -> Result<(), KeyRotationCliError> {
     let old_key_version = parse_key_version_flag(args, "--old-key-version")?;
     let new_key_version = parse_key_version_flag(args, "--new-key-version")?;
     let request_id =
         RequestId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let event =
+        build_key_rotation_complete_event(&request_id, old_key_version, new_key_version, 0)?;
+    let ledger_draft = build_key_rotation_ledger_draft(
+        &event,
+        LedgerEntryType::KeyRotationCompleted,
+        json!({
+            "old_key_version": old_key_version.get(),
+            "new_key_version": new_key_version.get(),
+            "remaining_count": 0,
+        }),
+    )?;
+    let signed_entry = sign_single_ledger_entry(&ledger_appender, &ledger_draft).await?;
     let outcome = supabase_client
-        .call_complete_key_rotation(&request_id, old_key_version, new_key_version)
+        .call_complete_key_rotation(&event, &signed_entry, old_key_version, new_key_version)
         .await?;
 
     println!(
@@ -323,6 +404,113 @@ fn build_key_rotation_start_event(
         metadata_json: metadata,
     })
     .map_err(|error| KeyRotationCliError::Audit(error.to_string()))
+}
+
+fn build_key_rotation_reencrypt_event(
+    request_id: &RequestId,
+    old_key_version: KeyVersion,
+    new_key_version: KeyVersion,
+    batch_size: u64,
+    processed_count: u64,
+    remaining_count: u64,
+) -> Result<AuditEvent, KeyRotationCliError> {
+    let metadata = AuditMetadata::new(json!({
+        "old_key_version": old_key_version.get(),
+        "new_key_version": new_key_version.get(),
+        "batch_size": batch_size,
+        "processed_count": processed_count,
+        "remaining_count": remaining_count,
+    }))
+    .and_then(AuditMetadata::with_current_source_event_at)
+    .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let audit_event_id =
+        AuditEventId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+
+    AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: request_id.clone(),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::KeyRotationReencrypt,
+        target_secret_id: None,
+        result: AuditResult::Success,
+        key_version: Some(new_key_version),
+        metadata_json: metadata,
+    })
+    .map_err(|error| KeyRotationCliError::Audit(error.to_string()))
+}
+
+fn build_key_rotation_complete_event(
+    request_id: &RequestId,
+    old_key_version: KeyVersion,
+    new_key_version: KeyVersion,
+    remaining_count: u64,
+) -> Result<AuditEvent, KeyRotationCliError> {
+    let metadata = AuditMetadata::new(json!({
+        "old_key_version": old_key_version.get(),
+        "new_key_version": new_key_version.get(),
+        "remaining_count": remaining_count,
+    }))
+    .and_then(AuditMetadata::with_current_source_event_at)
+    .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let audit_event_id =
+        AuditEventId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+
+    AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: request_id.clone(),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::KeyRotationComplete,
+        target_secret_id: None,
+        result: AuditResult::Success,
+        key_version: Some(new_key_version),
+        metadata_json: metadata,
+    })
+    .map_err(|error| KeyRotationCliError::Audit(error.to_string()))
+}
+
+fn build_key_rotation_ledger_draft(
+    event: &AuditEvent,
+    entry_type: LedgerEntryType,
+    payload_value: serde_json::Value,
+) -> Result<LedgerAppendDraft, KeyRotationCliError> {
+    let payload = LedgerPayload::new(entry_type, payload_value)
+        .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let source_event_at = event
+        .source_event_at()
+        .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+
+    LedgerAppendDraft::new(LedgerAppendDraftParts {
+        ledger_entry_id: LedgerEntryId::generate()
+            .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?,
+        entry_type,
+        source_event_at,
+        request_id: event.request_id().clone(),
+        source_event_id: Some(event.audit_event_id().clone()),
+        target_secret_id: None,
+        target_secret_version_id: None,
+        actor_user_id: None,
+        actor_device_id: None,
+        result: LedgerResult::Success,
+        error_code: None,
+        payload,
+    })
+    .map_err(|error| KeyRotationCliError::Audit(error.to_string()))
+}
+
+async fn sign_single_ledger_entry(
+    ledger_appender: &LedgerAppender,
+    ledger_draft: &LedgerAppendDraft,
+) -> Result<SignedLedgerEntry, KeyRotationCliError> {
+    let signed_entries = ledger_appender
+        .sign_entries(std::slice::from_ref(ledger_draft))
+        .await
+        .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+
+    signed_entries.into_iter().next().ok_or_else(|| {
+        KeyRotationCliError::Audit("ledger entry signing returned no entry".to_owned())
+    })
 }
 
 fn ensure_keyring_contains(
@@ -480,8 +668,10 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+    use crate::LocalAuditFallbackStore;
     use crate::audit::AuditAppendError;
     use crate::crypto::MasterKeyRing;
+    use crate::ledger::{LedgerSignatureKeyVersion, LedgerSigningKey};
     use crate::types::{MASTER_KEY_LENGTH, MasterKey, SourceEventAt};
 
     #[derive(Debug, Clone)]
@@ -568,6 +758,11 @@ mod tests {
             supabase_url: "http://127.0.0.1:1".to_owned(),
             supabase_service_role_key: "service-role-key".to_owned(),
             supabase_publishable_key: "publishable-key".to_owned(),
+            ledger_signing_key: LedgerSigningKey::from_secret_key_bytes(
+                LedgerSignatureKeyVersion::new(1).expect("ledger key version should be valid"),
+                &[9u8; 32],
+            )
+            .expect("ledger signing key should be valid"),
             jwt_issuer: "issuer".to_owned(),
             jwt_audience: "audience".to_owned(),
             jwks_url: "http://127.0.0.1:1/jwks".to_owned(),
