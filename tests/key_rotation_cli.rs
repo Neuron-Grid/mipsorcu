@@ -18,6 +18,8 @@ const SERVICE_ROLE_KEY: &str = "service-role-key";
 const PUBLISHABLE_KEY: &str = "publishable-key";
 const OLD_MASTER_KEY_BYTES: [u8; MASTER_KEY_LENGTH] = [11u8; MASTER_KEY_LENGTH];
 const NEW_MASTER_KEY_BYTES: [u8; MASTER_KEY_LENGTH] = [12u8; MASTER_KEY_LENGTH];
+const LEDGER_SIGNING_KEY_BYTES: [u8; LEDGER_ED25519_SECRET_KEY_LENGTH] =
+    [9u8; LEDGER_ED25519_SECRET_KEY_LENGTH];
 
 #[derive(Debug)]
 struct CapturedRequest {
@@ -116,7 +118,7 @@ fn run_key_rotation_start(
         .env("MIPSORCU_SUPABASE_PUBLISHABLE_KEY", PUBLISHABLE_KEY)
         .env(
             "MIPSORCU_LEDGER_SIGNING_KEY",
-            hex::encode([9u8; LEDGER_ED25519_SECRET_KEY_LENGTH]),
+            hex::encode(LEDGER_SIGNING_KEY_BYTES),
         )
         .env("MIPSORCU_LEDGER_SIGNATURE_KEY_VERSION", "1")
         .env("MIPSORCU_JWT_ISSUER", "issuer")
@@ -158,6 +160,11 @@ fn key_rotation_start_appends_audit_event_with_signed_ledger_entry()
     assert!(stdout.contains("key_rotation_start"));
     assert!(stdout.contains("old_key_version=1"));
     assert!(stdout.contains("new_key_version=2"));
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(
+        stderr.is_empty(),
+        "success stderr should be empty: {stderr}"
+    );
 
     assert_eq!(chain_request.method, "GET");
     assert!(
@@ -194,16 +201,15 @@ fn key_rotation_start_appends_audit_event_with_signed_ledger_entry()
         required_str(&body["p_source_event_id"], "p_source_event_id")?,
         required_str(&body["p_audit_event_id"], "p_audit_event_id")?
     );
-    assert!(
-        uuid::Uuid::parse_str(required_str(&body["p_audit_event_id"], "p_audit_event_id")?).is_ok()
-    );
-    assert!(
-        uuid::Uuid::parse_str(required_str(
-            &body["p_ledger_entry_id"],
-            "p_ledger_entry_id"
-        )?)
-        .is_ok()
-    );
+    assert_uuid(&body["p_request_id"], "p_request_id")?;
+    assert_uuid(&body["p_audit_event_id"], "p_audit_event_id")?;
+    assert_uuid(&body["p_source_event_id"], "p_source_event_id")?;
+    assert_uuid(&body["p_ledger_entry_id"], "p_ledger_entry_id")?;
+    assert_eq!(body["p_target_secret_id"], Value::Null);
+    assert_eq!(body["p_target_secret_version_id"], Value::Null);
+    assert_eq!(body["p_actor_user_id"], Value::Null);
+    assert_eq!(body["p_actor_device_id"], Value::Null);
+    assert_eq!(body["p_error_code"], Value::Null);
     assert_eq!(body["p_sequence_no"], 1);
     assert_eq!(
         body["p_canonicalization_version"],
@@ -265,6 +271,12 @@ fn key_rotation_start_fails_when_append_audit_event_with_ledger_fails()
         .ok_or_else(|| std::io::Error::other("audit request body should be JSON"))?;
     assert_eq!(body["p_action"], "key_rotation_start");
     assert_eq!(body["p_entry_type"], "key_rotation_started");
+    assert_eq!(body["p_result"], "success");
+    assert_eq!(body["p_key_version"], 2);
+    assert_eq!(body["p_metadata_json"]["old_key_version"], 1);
+    assert_eq!(body["p_metadata_json"]["new_key_version"], 2);
+    assert_eq!(body["p_payload"]["old_key_version"], 1);
+    assert_eq!(body["p_payload"]["new_key_version"], 2);
     assert_no_secret_material(&body, "failed append request body")?;
     assert_no_secret_material(&body["p_metadata_json"], "failed append metadata")?;
     assert_no_secret_material(&body["p_payload"], "failed append ledger payload")?;
@@ -290,6 +302,7 @@ fn assert_no_secret_material(
     let serialized = serde_json::to_string(value)?;
     let old_master_key_hex = hex::encode(OLD_MASTER_KEY_BYTES);
     let new_master_key_hex = hex::encode(NEW_MASTER_KEY_BYTES);
+    let ledger_signing_key_hex = hex::encode(LEDGER_SIGNING_KEY_BYTES);
 
     for forbidden in [
         "master_key",
@@ -304,6 +317,7 @@ fn assert_no_secret_material(
         "plaintext",
         old_master_key_hex.as_str(),
         new_master_key_hex.as_str(),
+        ledger_signing_key_hex.as_str(),
     ] {
         assert!(
             !serialized.contains(forbidden),
@@ -347,6 +361,13 @@ fn required_str<'a>(
     value
         .as_str()
         .ok_or_else(|| std::io::Error::other(format!("{field} should be a string")).into())
+}
+
+fn assert_uuid(value: &Value, field: &'static str) -> Result<(), Box<dyn std::error::Error>> {
+    let text = required_str(value, field)?;
+    uuid::Uuid::parse_str(text)?;
+
+    Ok(())
 }
 
 fn assert_bytea_hex(
