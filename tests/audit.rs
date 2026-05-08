@@ -776,6 +776,36 @@ fn pending_tracking_uses_audit_event_id_not_request_id() -> TestResult<()> {
     Ok(())
 }
 
+#[test]
+fn pending_events_skips_blank_lines_without_changing_pending_state() -> TestResult<()> {
+    let path = temp_jsonl_path("pending-skips-blank-lines");
+    let store = LocalAuditFallbackStore::new(path.clone());
+    let first = sample_event_with_ids(AUDIT_EVENT_ID, REQUEST_ID)?;
+    let second = sample_event_with_ids(AUDIT_EVENT_ID_2, REQUEST_ID)?;
+    store.append_pending(&first)?;
+    store.append_pending(&second)?;
+
+    let text = fs::read_to_string(&path)?;
+    let mut lines = text.lines();
+    let first_line = lines
+        .next()
+        .ok_or_else(|| std::io::Error::other("first fallback line should exist"))?;
+    let second_line = lines
+        .next()
+        .ok_or_else(|| std::io::Error::other("second fallback line should exist"))?;
+    fs::write(&path, format!("\n  \n{first_line}\n\n{second_line}\n\t\n"))?;
+
+    let pending_ids = store
+        .pending_events()?
+        .into_iter()
+        .map(|event| event.audit_event_id().as_canonical_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(pending_ids, vec![AUDIT_EVENT_ID, AUDIT_EVENT_ID_2]);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn resend_success_appends_sent_marker_without_deleting_pending_line() -> TestResult<()> {
     let path = temp_jsonl_path("resend-success");
@@ -854,21 +884,54 @@ async fn resend_marks_only_successful_events_as_sent() -> TestResult<()> {
 fn pending_events_reject_missing_source_event_at_without_regenerating_it() -> TestResult<()> {
     let path = temp_jsonl_path("missing-source-event-at");
     let store = LocalAuditFallbackStore::new(path.clone());
-    fs::write(
-        &path,
-        format!(
-            r#"{{"audit_event_id":"{AUDIT_EVENT_ID}","request_id":"{REQUEST_ID}","actor_user_id":"{OWNER_USER_ID}","actor_device_id":"{DEVICE_ID}","action":"decrypt","target_secret_id":"{TARGET_SECRET_ID}","result":"failure","key_version":1,"metadata_json":{{"error_code":"decrypt_failed"}},"occurred_at":"{SOURCE_EVENT_AT}","delivery_status":"pending"}}"#
-        ),
-    )?;
+    let invalid_line = format!(
+        r#"{{"audit_event_id":"{AUDIT_EVENT_ID}","request_id":"{REQUEST_ID}","actor_user_id":"{OWNER_USER_ID}","actor_device_id":"{DEVICE_ID}","action":"decrypt","target_secret_id":"{TARGET_SECRET_ID}","result":"failure","key_version":1,"metadata_json":{{"error_code":"decrypt_failed"}},"occurred_at":"{SOURCE_EVENT_AT}","delivery_status":"pending"}}"#
+    );
+    fs::write(&path, format!("\n  \n{invalid_line}\n"))?;
 
-    let error = store
-        .pending_events()
-        .expect_err("missing source_event_at should fail closed");
+    let error = match store.pending_events() {
+        Ok(_) => {
+            return Err(std::io::Error::other("missing source_event_at should fail closed").into());
+        }
+        Err(error) => error,
+    };
 
     assert!(matches!(
         error,
-        mipsorcu::LocalAuditStoreError::InvalidLine { reason, .. }
+        mipsorcu::LocalAuditStoreError::InvalidLine {
+            line_number: 3,
+            reason,
+        }
             if reason == "metadata_json.source_event_at is missing"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn fallback_reader_returns_json_error_for_invalid_json_in_pending_and_snapshot_paths()
+-> TestResult<()> {
+    let path = temp_jsonl_path("invalid-fallback-json");
+    let archive_dir = temp_jsonl_path("invalid-fallback-json-archive");
+    let store = LocalAuditFallbackStore::with_rollover_config(path.clone(), archive_dir, 1);
+    fs::write(&path, "{not-json}\n")?;
+
+    let pending_error = match store.pending_events() {
+        Ok(_) => return Err(std::io::Error::other("pending_events should reject JSON").into()),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        pending_error,
+        mipsorcu::LocalAuditStoreError::Json(_)
+    ));
+
+    let snapshot_error = match store.should_rollover() {
+        Ok(_) => return Err(std::io::Error::other("should_rollover should reject JSON").into()),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        snapshot_error,
+        mipsorcu::LocalAuditStoreError::Json(_)
     ));
 
     Ok(())
@@ -936,6 +999,44 @@ fn rollover_seals_all_sent_current_file_and_resets_current_file() -> TestResult<
 
     let decoded = read_gzip_text(&archive.archive_path)?;
     assert_eq!(decoded.lines().count(), 2);
+    assert_eq!(store.pending_events()?.len(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn rollover_snapshot_skips_blank_lines_without_changing_all_sent_eligibility() -> TestResult<()> {
+    let path = temp_jsonl_path("rollover-all-sent-with-blank-lines");
+    let archive_dir = temp_jsonl_path("rollover-all-sent-with-blank-lines-archive");
+    let store = LocalAuditFallbackStore::with_rollover_config(path.clone(), archive_dir, 1);
+    let event = sample_event()?;
+    store.append_pending(&event)?;
+    store.mark_sent(&event)?;
+
+    let text = fs::read_to_string(&path)?;
+    let mut lines = text.lines();
+    let pending_line = lines
+        .next()
+        .ok_or_else(|| std::io::Error::other("pending fallback line should exist"))?;
+    let sent_line = lines
+        .next()
+        .ok_or_else(|| std::io::Error::other("sent fallback line should exist"))?;
+    fs::write(&path, format!("\n{pending_line}\n\n{sent_line}\n  \n\t\n"))?;
+
+    assert!(store.should_rollover()?);
+
+    let archive = match store.rollover()? {
+        RolloverOutcome::Sealed(archive) => archive,
+        RolloverOutcome::Skipped => {
+            return Err(
+                std::io::Error::other("rollover should seal all-sent fallback file").into(),
+            );
+        }
+    };
+
+    assert_eq!(archive.line_count, 2);
+    assert!(archive.first_occurred_at.is_some());
+    assert!(archive.last_occurred_at.is_some());
     assert_eq!(store.pending_events()?.len(), 0);
 
     Ok(())

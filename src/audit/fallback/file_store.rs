@@ -202,29 +202,17 @@ impl LocalAuditFallbackStore {
             return Ok(Vec::new());
         }
 
-        let file = File::open(&self.path)?;
-        let reader = BufReader::new(file);
         let mut states = BTreeMap::<String, LocalAuditEventState>::new();
-
-        for (index, line) in reader.lines().enumerate() {
-            let line_number = index + 1;
-            let line = line?;
-
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let record: LocalAuditFallbackRecord = serde_json::from_str(&line)?;
-            let event = record.to_event(line_number)?;
-            let event_id = event.audit_event_id().as_canonical_string();
+        self.parse_existing_fallback_records_unlocked(|record| {
             states.insert(
-                event_id,
+                record.event_id,
                 LocalAuditEventState {
-                    event,
-                    delivery_status: record.delivery_status(),
+                    event: record.event,
+                    delivery_status: record.delivery_status,
                 },
             );
-        }
+            Ok(())
+        })?;
 
         Ok(states
             .into_values()
@@ -259,12 +247,42 @@ impl LocalAuditFallbackStore {
             return Ok(None);
         }
 
-        let file = File::open(&self.path)?;
-        let reader = BufReader::new(file);
         let mut final_status_by_event_id = BTreeMap::<String, DeliveryStatus>::new();
         let mut line_count = 0usize;
         let mut first_occurred_at = None;
         let mut last_occurred_at = None;
+
+        self.parse_existing_fallback_records_unlocked(|record| {
+            final_status_by_event_id.insert(record.event_id, record.delivery_status);
+            line_count += 1;
+
+            if let Some(occurred_at) = record.occurred_at {
+                if first_occurred_at.is_none() {
+                    first_occurred_at = Some(occurred_at.to_owned());
+                }
+                last_occurred_at = Some(occurred_at.to_owned());
+            }
+            Ok(())
+        })?;
+
+        Ok(Some(FallbackFileSnapshot {
+            size_bytes: metadata.len(),
+            line_count,
+            final_status_by_event_id,
+            first_occurred_at,
+            last_occurred_at,
+        }))
+    }
+
+    fn parse_existing_fallback_records_unlocked<F>(
+        &self,
+        mut handle_record: F,
+    ) -> Result<(), LocalAuditStoreError>
+    where
+        F: for<'a> FnMut(ParsedFallbackRecord<'a>) -> Result<(), LocalAuditStoreError>,
+    {
+        let file = File::open(&self.path)?;
+        let reader = BufReader::new(file);
 
         for (index, line) in reader.lines().enumerate() {
             let line_number = index + 1;
@@ -277,24 +295,15 @@ impl LocalAuditFallbackStore {
             let record: LocalAuditFallbackRecord = serde_json::from_str(&line)?;
             let event = record.to_event(line_number)?;
             let event_id = event.audit_event_id().as_canonical_string();
-            final_status_by_event_id.insert(event_id, record.delivery_status());
-            line_count += 1;
-
-            if let Some(occurred_at) = record.non_empty_occurred_at() {
-                if first_occurred_at.is_none() {
-                    first_occurred_at = Some(occurred_at.to_owned());
-                }
-                last_occurred_at = Some(occurred_at.to_owned());
-            }
+            handle_record(ParsedFallbackRecord {
+                event,
+                event_id,
+                delivery_status: record.delivery_status(),
+                occurred_at: record.non_empty_occurred_at(),
+            })?;
         }
 
-        Ok(Some(FallbackFileSnapshot {
-            size_bytes: metadata.len(),
-            line_count,
-            final_status_by_event_id,
-            first_occurred_at,
-            last_occurred_at,
-        }))
+        Ok(())
     }
 
     fn next_archive_path(&self) -> Result<PathBuf, LocalAuditStoreError> {
@@ -351,6 +360,13 @@ impl LocalAuditFallbackStore {
 struct LocalAuditEventState {
     event: AuditEvent,
     delivery_status: DeliveryStatus,
+}
+
+struct ParsedFallbackRecord<'a> {
+    event: AuditEvent,
+    event_id: String,
+    delivery_status: DeliveryStatus,
+    occurred_at: Option<&'a str>,
 }
 
 struct FallbackFileSnapshot {
