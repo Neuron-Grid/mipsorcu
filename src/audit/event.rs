@@ -6,8 +6,7 @@ use uuid::{Builder, Uuid};
 
 use crate::types::{DeviceId, KeyVersion, OwnerUserId, SecretId, SourceEventAt};
 
-use super::error::{AuditAppendError, AuditEventError, LocalAuditStoreError};
-use super::fallback::{DeliveryStatus, current_occurred_at};
+use super::error::{AuditAppendError, AuditEventError};
 
 const SOURCE_EVENT_AT_KEY: &str = "source_event_at";
 const TRIGGER_KEY: &str = "trigger";
@@ -427,29 +426,6 @@ impl AuditEvent {
 
     pub fn source_event_at(&self) -> Result<SourceEventAt, AuditEventError> {
         self.metadata_json.require_source_event_at()
-    }
-
-    pub(super) fn to_fallback_json(
-        &self,
-        delivery_status: DeliveryStatus,
-    ) -> Result<Value, LocalAuditStoreError> {
-        Ok(json!({
-            "audit_event_id": self.audit_event_id.as_canonical_string(),
-            "request_id": self.request_id.as_canonical_string(),
-            "actor_user_id": self.actor_user_id
-                .as_ref()
-                .map(OwnerUserId::as_canonical_string),
-            "actor_device_id": self.actor_device_id.as_ref().map(DeviceId::as_str),
-            "action": self.action.as_str(),
-            "target_secret_id": self.target_secret_id
-                .as_ref()
-                .map(SecretId::as_canonical_string),
-            "result": self.result.as_str(),
-            "key_version": self.key_version.map(KeyVersion::get),
-            "metadata_json": self.metadata_json.as_value(),
-            "occurred_at": current_occurred_at()?,
-            "delivery_status": delivery_status.as_str(),
-        }))
     }
 }
 

@@ -1,6 +1,8 @@
 use super::error::{AuditAppendError, AuditRecordError, LocalAuditStoreError};
 use super::event::{AuditEvent, AuditEventAppender};
-use super::fallback::LocalAuditFallbackStore;
+use super::fallback::{LocalAuditFallbackStore, resend_pending};
+
+pub use super::fallback::ResendAuditSummary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditRecordOutcome {
@@ -53,52 +55,10 @@ where
     }
 
     pub async fn resend_pending(&self) -> Result<ResendAuditSummary, AuditRecordError> {
-        let fallback_store = self.fallback_store.clone();
-        let pending_events = tokio::task::spawn_blocking(move || fallback_store.pending_events())
-            .await
-            .map_err(|_| AuditRecordError::ResendReadFailed(join_failed_store_error()))?
-            .map_err(AuditRecordError::ResendReadFailed)?;
-        let attempted = pending_events.len();
-        let mut sent = 0;
-        let mut failed = 0;
-
-        for event in pending_events {
-            match self.appender.append_audit_event(&event).await {
-                Ok(()) => {
-                    let fallback_store = self.fallback_store.clone();
-                    let sent_event = event.clone();
-                    tokio::task::spawn_blocking(move || fallback_store.mark_sent(&sent_event))
-                        .await
-                        .map_err(|_| {
-                            AuditRecordError::ResendMarkSentFailed(join_failed_store_error())
-                        })?
-                        .map_err(AuditRecordError::ResendMarkSentFailed)?;
-                    sent += 1;
-                }
-                Err(AuditAppendError::ExternalDependencyFailed { .. }) => {
-                    failed += 1;
-                }
-                Err(AuditAppendError::IdempotencyConflict) => {
-                    return Err(AuditRecordError::IdempotencyConflict);
-                }
-            }
-        }
-
-        Ok(ResendAuditSummary {
-            attempted,
-            sent,
-            failed,
-        })
+        resend_pending(&self.appender, &self.fallback_store).await
     }
 }
 
 fn join_failed_store_error() -> LocalAuditStoreError {
     std::io::Error::other("join failed").into()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResendAuditSummary {
-    pub attempted: usize,
-    pub sent: usize,
-    pub failed: usize,
 }

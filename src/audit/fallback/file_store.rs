@@ -8,23 +8,16 @@ use std::time::{Duration, SystemTime};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
-use crate::types::{DeviceId, KeyVersion, OwnerUserId, SecretId};
+use super::super::event::AuditEvent;
+use super::error::LocalAuditStoreError;
+use super::event::{DeliveryStatus, LocalAuditFallbackRecord, fallback_json};
+use super::store::{ArchiveSweepOutcome, RolloverArchive, RolloverOutcome, SweptArchive};
 
-use super::error::{AuditEventError, LocalAuditStoreError};
-use super::event::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
-};
-
-pub const DEFAULT_ROLLOVER_SIZE_BYTES: u64 = 64 * 1024 * 1024;
-
-const DELIVERY_STATUS_PENDING: &str = "pending";
-const DELIVERY_STATUS_SENT: &str = "sent";
+const DEFAULT_ROLLOVER_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const ARCHIVE_FILE_PREFIX: &str = "audit-fallback-";
 const ARCHIVE_FILE_SUFFIX: &str = ".jsonl.sealed.gz";
 
@@ -70,11 +63,11 @@ impl LocalAuditFallbackStore {
     }
 
     pub fn append_pending(&self, event: &AuditEvent) -> Result<(), LocalAuditStoreError> {
-        self.append_line(&event.to_fallback_json(DeliveryStatus::Pending)?)
+        self.append_line(&fallback_json(event, DeliveryStatus::Pending)?)
     }
 
     pub fn mark_sent(&self, event: &AuditEvent) -> Result<(), LocalAuditStoreError> {
-        self.append_line(&event.to_fallback_json(DeliveryStatus::Sent)?)
+        self.append_line(&fallback_json(event, DeliveryStatus::Sent)?)
     }
 
     pub fn pending_events(&self) -> Result<Vec<AuditEvent>, LocalAuditStoreError> {
@@ -228,7 +221,7 @@ impl LocalAuditFallbackStore {
                 event_id,
                 LocalAuditEventState {
                     event,
-                    delivery_status: record.delivery_status,
+                    delivery_status: record.delivery_status(),
                 },
             );
         }
@@ -284,18 +277,14 @@ impl LocalAuditFallbackStore {
             let record: LocalAuditFallbackRecord = serde_json::from_str(&line)?;
             let event = record.to_event(line_number)?;
             let event_id = event.audit_event_id().as_canonical_string();
-            final_status_by_event_id.insert(event_id, record.delivery_status);
+            final_status_by_event_id.insert(event_id, record.delivery_status());
             line_count += 1;
 
-            if let Some(occurred_at) = record
-                .occurred_at
-                .as_ref()
-                .filter(|value| !value.trim().is_empty())
-            {
+            if let Some(occurred_at) = record.non_empty_occurred_at() {
                 if first_occurred_at.is_none() {
-                    first_occurred_at = Some(occurred_at.clone());
+                    first_occurred_at = Some(occurred_at.to_owned());
                 }
-                last_occurred_at = Some(occurred_at.clone());
+                last_occurred_at = Some(occurred_at.to_owned());
             }
         }
 
@@ -359,58 +348,11 @@ impl LocalAuditFallbackStore {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RolloverOutcome {
-    Skipped,
-    Sealed(RolloverArchive),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RolloverArchive {
-    pub archive_path: PathBuf,
-    pub sha256_hex: String,
-    pub line_count: usize,
-    pub first_occurred_at: Option<String>,
-    pub last_occurred_at: Option<String>,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveSweepOutcome {
-    pub deleted_archives: Vec<SweptArchive>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SweptArchive {
-    pub archive_path: PathBuf,
-    pub sha256_hex: Option<String>,
-    pub line_count: Option<usize>,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum DeliveryStatus {
-    Pending,
-    Sent,
-}
-
-impl DeliveryStatus {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => DELIVERY_STATUS_PENDING,
-            Self::Sent => DELIVERY_STATUS_SENT,
-        }
-    }
-}
-
-#[derive(Debug)]
 struct LocalAuditEventState {
     event: AuditEvent,
     delivery_status: DeliveryStatus,
 }
 
-#[derive(Debug)]
 struct FallbackFileSnapshot {
     size_bytes: u64,
     line_count: usize,
@@ -428,95 +370,6 @@ impl FallbackFileSnapshot {
                 .final_status_by_event_id
                 .values()
                 .all(|status| *status == DeliveryStatus::Sent)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct LocalAuditFallbackRecord {
-    audit_event_id: String,
-    request_id: String,
-    actor_user_id: Option<String>,
-    actor_device_id: Option<String>,
-    action: String,
-    target_secret_id: Option<String>,
-    result: String,
-    key_version: Option<u32>,
-    metadata_json: Value,
-    occurred_at: Option<String>,
-    delivery_status: DeliveryStatus,
-}
-
-impl LocalAuditFallbackRecord {
-    fn to_event(&self, line_number: usize) -> Result<AuditEvent, LocalAuditStoreError> {
-        let actor_user_id = self
-            .actor_user_id
-            .as_deref()
-            .map(OwnerUserId::parse)
-            .transpose()
-            .map_err(|_| LocalAuditStoreError::InvalidLine {
-                line_number,
-                reason: "actor_user_id is invalid",
-            })?;
-        let actor_device_id = self
-            .actor_device_id
-            .as_deref()
-            .map(DeviceId::new)
-            .transpose()
-            .map_err(|_| LocalAuditStoreError::InvalidLine {
-                line_number,
-                reason: "actor_device_id is invalid",
-            })?;
-        let target_secret_id = self
-            .target_secret_id
-            .as_deref()
-            .map(SecretId::parse)
-            .transpose()
-            .map_err(|_| LocalAuditStoreError::InvalidLine {
-                line_number,
-                reason: "target_secret_id is invalid",
-            })?;
-        let key_version = self
-            .key_version
-            .map(KeyVersion::new)
-            .transpose()
-            .map_err(|_| LocalAuditStoreError::InvalidLine {
-                line_number,
-                reason: "key_version is invalid",
-            })?;
-
-        let metadata_json = match AuditMetadata::new(self.metadata_json.clone()) {
-            Ok(metadata_json) => metadata_json,
-            Err(AuditEventError::InvalidSourceEventAt) => {
-                return Err(LocalAuditStoreError::InvalidLine {
-                    line_number,
-                    reason: "metadata_json.source_event_at is invalid",
-                });
-            }
-            Err(error) => return Err(LocalAuditStoreError::from(error)),
-        };
-
-        AuditEvent::new(AuditEventParts {
-            audit_event_id: AuditEventId::parse(&self.audit_event_id)?,
-            request_id: RequestId::parse(&self.request_id)?,
-            actor_user_id,
-            actor_device_id,
-            action: AuditAction::parse(&self.action)?,
-            target_secret_id,
-            result: AuditResult::parse(&self.result)?,
-            key_version,
-            metadata_json,
-        })
-        .map_err(|error| match error {
-            AuditEventError::MissingSourceEventAt => LocalAuditStoreError::InvalidLine {
-                line_number,
-                reason: "metadata_json.source_event_at is missing",
-            },
-            AuditEventError::InvalidSourceEventAt => LocalAuditStoreError::InvalidLine {
-                line_number,
-                reason: "metadata_json.source_event_at is invalid",
-            },
-            error => LocalAuditStoreError::from(error),
-        })
     }
 }
 
@@ -613,10 +466,4 @@ fn gzip_line_count(path: &Path) -> Result<usize, std::io::Error> {
     }
 
     Ok(line_count)
-}
-
-pub(super) fn current_occurred_at() -> Result<String, LocalAuditStoreError> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(LocalAuditStoreError::TimestampFormat)
 }
