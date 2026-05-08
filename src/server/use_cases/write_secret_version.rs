@@ -7,8 +7,9 @@ use crate::server::errors::ApiError;
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts};
 use crate::server::read_model::{self, FetchCurrentSecretVersionError};
 use crate::server::state::AppState;
-use crate::server::supabase::{
-    SecretVersionRetentionSnapshot, WriteSecretVersionOutcome, WriteSecretVersionParams,
+use crate::types::supabase::{
+    LedgerEntryRpcParams, SecretVersionRetentionSnapshot, WriteSecretVersionOutcome,
+    WriteSecretVersionParams,
 };
 use crate::types::{Classification, CreatedAt, DeviceId, Plaintext};
 use crate::{
@@ -421,7 +422,7 @@ async fn build_rpc_params(
         })?;
     let ledger_entries = ledger_entries
         .iter()
-        .map(crate::server::supabase::LedgerEntryRpcParams::from_signed_entry)
+        .map(LedgerEntryRpcParams::from_signed_entry)
         .collect();
 
     Ok(WriteSecretVersionParams {

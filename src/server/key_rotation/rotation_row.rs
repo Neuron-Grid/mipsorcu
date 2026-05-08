@@ -1,4 +1,4 @@
-use crate::server::supabase::KeyRotationBatchRow;
+use crate::types::supabase::KeyRotationBatchRow;
 use crate::types::{EncryptedDataKey, KeyVersion, SecretId, SecretVersion};
 
 use super::KeyRotationCliError;

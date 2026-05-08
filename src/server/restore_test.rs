@@ -7,7 +7,7 @@ use crate::server::audit_reporter::{self, RestoreTestAudit};
 use crate::server::errors::ApiError;
 use crate::server::read_model::{self, PreparedDecryptRow};
 use crate::server::state::AppState;
-use crate::server::supabase::RestoreTestSampleRow;
+use crate::types::supabase::RestoreTestSampleRow;
 use crate::{KeyVersion, SecretId, SecretVersion};
 
 pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger: AuditTrigger) {

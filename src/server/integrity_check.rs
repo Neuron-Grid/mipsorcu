@@ -11,7 +11,8 @@ use crate::audit::{
 use crate::server::audit_reporter::{self, IntegrityCheckAudit};
 use crate::server::config::AppConfig;
 use crate::server::state::{AppState, ReadinessState};
-use crate::server::supabase::{IntegrityCheckSummary, SupabaseAuditAppender, SupabaseClient};
+use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
+use crate::types::supabase::IntegrityCheckSummary;
 use crate::{AuditRecorder, LocalAuditFallbackStore};
 
 pub type IntegrityCheckTrigger = AuditTrigger;

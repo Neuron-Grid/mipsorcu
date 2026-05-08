@@ -7,10 +7,8 @@ use crate::ledger::{
     LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo, LedgerSigningKey,
     LedgerTargetSecretVersionId, SignedLedgerEntry,
 };
-use crate::server::supabase::{
-    AppendLedgerEntryOutcome, LedgerAppendRpcFailure, SupabaseClient, SupabaseRpcError,
-    classify_append_ledger_error,
-};
+use crate::server::supabase::{SupabaseClient, SupabaseRpcError, classify_append_ledger_error};
+use crate::types::supabase::{AppendLedgerEntryOutcome, LedgerAppendRpcFailure};
 use crate::types::{DeviceId, OwnerUserId, SecretId, SourceEventAt};
 
 const DEFAULT_MAX_CONFLICT_RETRIES: u8 = 1;

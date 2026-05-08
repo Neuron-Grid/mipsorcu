@@ -7,8 +7,9 @@ use crate::audit::RequestId;
 use crate::crypto::{KeyWrapContext, unwrap_data_key, wrap_data_key};
 use crate::server::config::AppConfig;
 use crate::server::ledger_appender::LedgerAppender;
-use crate::server::supabase::{KeyRotationApplyRow, SupabaseClient};
+use crate::server::supabase::SupabaseClient;
 use crate::types::KeyVersion;
+use crate::types::supabase::KeyRotationApplyRow;
 
 use super::KeyRotationCliError;
 use super::audit_event::{

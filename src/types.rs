@@ -1,5 +1,6 @@
 mod ids;
 mod secret_material;
+pub mod supabase;
 mod time;
 
 pub use ids::{

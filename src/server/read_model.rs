@@ -4,7 +4,8 @@ use crate::crypto::ALGORITHM_XCHACHA20_POLY1305;
 use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts};
 use crate::server::errors::ApiError;
 use crate::server::state::AppState;
-use crate::server::supabase::{RestoreTestSampleRow, SecretVersionReadRow, SupabaseRpcError};
+use crate::server::supabase::SupabaseRpcError;
+use crate::types::supabase::{RestoreTestSampleRow, SecretVersionReadRow};
 use crate::types::{
     Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
     SecretId, SecretVersion, SecretVersionId,
