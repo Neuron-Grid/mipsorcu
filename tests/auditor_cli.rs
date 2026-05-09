@@ -7,7 +7,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mipsorcu::{LEDGER_ED25519_SECRET_KEY_LENGTH, MASTER_KEY_LENGTH};
+use mipsorcu::{
+    LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerEntryDraft, LedgerEntryDraftParts, LedgerEntryId,
+    LedgerEntryType, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo,
+    LedgerSignatureKeyVersion, MASTER_KEY_LENGTH, RequestId, SourceEventAt,
+};
 use serde_json::{Value, json};
 
 const SERVICE_ROLE_KEY: &str = "service-role-key";
@@ -165,6 +169,60 @@ fn valid_single_entry_body() -> &'static str {
     )
 }
 
+fn make_missing_key_test_body() -> &'static str {
+    let entry_type = LedgerEntryType::IntegrityCheckCompleted;
+    let payload = LedgerPayload::empty(entry_type).expect("valid empty payload");
+    let source_event_at =
+        SourceEventAt::parse("2026-04-08T12:00:00Z").expect("valid source_event_at");
+    let request_id =
+        RequestId::parse("00000000-0000-4000-8000-000000000000").expect("valid request_id");
+    let previous_hash = LedgerHash::genesis();
+
+    let draft = LedgerEntryDraft::new(LedgerEntryDraftParts {
+        ledger_entry_id: LedgerEntryId::parse("00000000-0000-4000-8000-000000000000")
+            .expect("valid ledger_entry_id"),
+        sequence_no: LedgerSequenceNo::new(1).expect("valid sequence_no"),
+        entry_type,
+        source_event_at,
+        request_id,
+        source_event_id: None,
+        target_secret_id: None,
+        target_secret_version_id: None,
+        actor_user_id: None,
+        actor_device_id: None,
+        result: LedgerResult::Success,
+        error_code: None,
+        payload,
+        previous_entry_hash: previous_hash,
+        signature_key_version: LedgerSignatureKeyVersion::new(99).expect("valid key_version"),
+    })
+    .expect("valid draft");
+
+    let canonical = draft.canonical_payload().expect("valid canonical");
+    let entry_hash = LedgerHash::from_canonical_payload(&canonical);
+
+    let body = json!([{
+        "sequence_no": 1i64,
+        "entry_hash": format!("\\x{}", entry_hash.to_hex()),
+        "previous_entry_hash": format!("\\x{}", previous_hash.to_hex()),
+        "signature": "\\x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "signature_key_version": 99,
+        "entry_type": "integrity_check_completed",
+        "source_event_at": "2026-04-08T12:00:00Z",
+        "canonicalization_version": 1,
+        "hash_algorithm": "sha-256",
+        "signature_algorithm": "ed25519",
+        "pk_key_version": null,
+        "pk_public_key": null,
+        "pk_algorithm": null,
+        "pk_status": null,
+        "pk_created_at": null,
+        "pk_retired_at": null
+    }]);
+
+    Box::leak(body.to_string().into_boxed_str())
+}
+
 //  Tests
 #[test]
 fn auditor_verify_empty_valid_chain_exit_code_0() -> Result<(), Box<dyn std::error::Error>> {
@@ -295,28 +353,7 @@ fn auditor_verify_no_secret_bearing_fields_in_output() -> Result<(), Box<dyn std
 
 #[test]
 fn auditor_verify_missing_key_non_zero_exit() -> Result<(), Box<dyn std::error::Error>> {
-    let body: &'static str = Box::leak(
-        json!([{
-            "sequence_no": 1,
-            "entry_hash": "\\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "previous_entry_hash": "\\x0000000000000000000000000000000000000000000000000000000000000000",
-            "signature": "\\xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "signature_key_version": 99,
-            "entry_type": "integrity_check_completed",
-            "source_event_at": "2026-04-08T12:00:00Z",
-            "canonicalization_version": 1,
-            "hash_algorithm": "sha-256",
-            "signature_algorithm": "ed25519",
-            "pk_key_version": null,
-            "pk_public_key": null,
-            "pk_algorithm": null,
-            "pk_status": null,
-            "pk_created_at": null,
-            "pk_retired_at": null
-        }])
-        .to_string()
-        .into_boxed_str(),
-    );
+    let body: &'static str = make_missing_key_test_body();
     let (supabase_url, _receiver, server_thread) = spawn_auditor_server(200, body)?;
     let run = run_auditor_verify(&supabase_url, "missing-key", 1, 1)?;
     server_thread
@@ -334,18 +371,10 @@ fn auditor_verify_missing_key_non_zero_exit() -> Result<(), Box<dyn std::error::
     assert_eq!(parsed["valid"], false);
     let error_code = parsed["first_error"]["code"].as_str().unwrap_or("");
     assert!(!error_code.is_empty(), "first_error.code must be present");
-    // Verify it is one of the known error classifications
-    let known_errors = [
-        "sequence_gap",
-        "previous_hash_mismatch",
-        "entry_hash_mismatch",
-        "signature_invalid",
-        "unknown_signature_key",
-        "invalid_exported_material",
-    ];
-    assert!(
-        known_errors.contains(&error_code),
-        "error code '{error_code}' not in known errors"
+    // Integration test requirement 7: missing key must produce UnknownSignatureKey
+    assert_eq!(
+        error_code, "unknown_signature_key",
+        "expected error code 'unknown_signature_key' for missing key, got '{error_code}'"
     );
     assert!(parsed["first_error"]["sequence_no"].is_u64());
 
