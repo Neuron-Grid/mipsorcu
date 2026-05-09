@@ -1,6 +1,6 @@
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
-    AuditRecordOutcome, AuditResult, RequestId,
+    AuditAction, AuditEvent, AuditEventError, AuditMetadata, AuditRecordOutcome, AuditResult,
+    RequestId,
 };
 use crate::server::errors::ApiError;
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts};
@@ -160,19 +160,16 @@ fn build_success_decrypt_audit_event(
     target_secret_id: &SecretId,
     key_version: KeyVersion,
 ) -> Result<AuditEvent, AuditEventError> {
-    let metadata_json = AuditMetadata::empty().with_current_source_event_at()?;
-
-    AuditEvent::new(AuditEventParts {
-        audit_event_id: AuditEventId::generate()?,
-        request_id: request_id.clone(),
-        actor_user_id: Some(actor_user_id.clone()),
-        actor_device_id: None,
-        action: AuditAction::Decrypt,
-        target_secret_id: Some(target_secret_id.clone()),
-        result: AuditResult::Success,
-        key_version: Some(key_version),
-        metadata_json,
-    })
+    AuditEvent::build_with_current_source_event_at(
+        request_id.clone(),
+        Some(actor_user_id.clone()),
+        None,
+        AuditAction::Decrypt,
+        Some(target_secret_id.clone()),
+        AuditResult::Success,
+        Some(key_version),
+        AuditMetadata::empty(),
+    )
 }
 
 fn audit_recording_failed() -> ApiError {

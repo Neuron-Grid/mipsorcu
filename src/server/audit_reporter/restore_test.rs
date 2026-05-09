@@ -1,6 +1,6 @@
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
-    AuditRecordOutcome, AuditResult, RequestId,
+    AuditAction, AuditEvent, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditResult,
+    RequestId,
 };
 use crate::server::state::AppState;
 use crate::{KeyVersion, SecretId};
@@ -27,45 +27,16 @@ pub async fn record_restore_test_audit(
         metadata,
         error_code,
     } = audit;
-    let audit_event_id = match AuditEventId::generate() {
-        Ok(audit_event_id) => audit_event_id,
-        Err(error) => {
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                error = %error,
-                action = "restore_test",
-                result = "failure",
-                error_code = "audit_event_id_generation_failed",
-                "restore test audit setup failed"
-            );
-            return Err(AuditRecordError::EventConstructionFailed(error));
-        }
-    };
-    let metadata_json = match metadata.with_current_source_event_at() {
-        Ok(metadata_json) => metadata_json,
-        Err(error) => {
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                error = %error,
-                action = "restore_test",
-                result = "failure",
-                error_code = "audit_metadata_build_failed",
-                "restore test audit metadata setup failed"
-            );
-            return Err(AuditRecordError::EventConstructionFailed(error));
-        }
-    };
-    let event = match AuditEvent::new(AuditEventParts {
-        audit_event_id,
-        request_id: request_id.clone(),
-        actor_user_id: None,
-        actor_device_id: None,
-        action: AuditAction::RestoreTest,
+    let event = match AuditEvent::build_with_current_source_event_at(
+        request_id.clone(),
+        None,
+        None,
+        AuditAction::RestoreTest,
         target_secret_id,
         result,
         key_version,
-        metadata_json,
-    }) {
+        metadata,
+    ) {
         Ok(event) => event,
         Err(error) => {
             tracing::error!(

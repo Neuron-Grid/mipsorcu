@@ -6,8 +6,6 @@ mod ledger;
 mod restore_test;
 
 pub use decrypt_success::record_success_audit;
-#[allow(unused_imports)]
-pub use failure::build_failure_audit_event;
 pub use failure::failure_audit_metadata_for_attempted_secret;
 pub use failure_context::FailureAuditContext;
 pub use integrity_check::{IntegrityCheckAudit, record_integrity_check_audit};

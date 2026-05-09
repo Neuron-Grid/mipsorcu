@@ -1505,7 +1505,10 @@ async fn integrity_check_success_records_success_audit() -> Result<(), Box<dyn s
     assert_eq!(audit_body["p_metadata_json"]["violation_count"], 0);
     assert_eq!(audit_body["p_payload"]["violation_count"], 0);
     assert!(audit_body["p_payload"]["duration_ms"].is_number());
-    assert!(audit_body["p_metadata_json"]["source_event_at"].is_string());
+    let source_event_at = audit_body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("integrity audit should include source_event_at"))?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
 
     Ok(())
 }
@@ -1559,6 +1562,12 @@ async fn integrity_check_violation_records_failure_audit() -> Result<(), Box<dyn
         1
     );
     assert_eq!(audit_body["p_payload"]["violation_count"], 1);
+    let source_event_at = audit_body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .ok_or_else(|| {
+            std::io::Error::other("integrity failure audit should include source_event_at")
+        })?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
 
     Ok(())
 }
@@ -1638,6 +1647,10 @@ async fn restore_test_records_no_sample_reason_without_forbidden_keys()
     );
     assert_eq!(audit_body["p_metadata_json"]["sample_count"], 0);
     assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+    let source_event_at = audit_body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("restore audit should include source_event_at"))?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
     let metadata_and_payload = serde_json::to_string(&json!({
         "metadata_json": audit_body["p_metadata_json"].clone(),
         "payload": audit_body["p_payload"].clone(),
@@ -1681,6 +1694,10 @@ async fn restore_test_round_trips_existing_encrypted_sample_via_runtime()
     assert_eq!(audit_body["p_metadata_json"]["sample_count"], 1);
     assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
     assert!(audit_body["p_metadata_json"].get("error_code").is_none());
+    let source_event_at = audit_body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("restore audit should include source_event_at"))?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
     let metadata_and_payload = serde_json::to_string(&json!({
         "metadata_json": audit_body["p_metadata_json"].clone(),
         "payload": audit_body["p_payload"].clone(),
@@ -1728,6 +1745,12 @@ async fn restore_test_rejects_aad_tampering_via_runtime() -> Result<(), Box<dyn 
         "row_validation_failed"
     );
     assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+    let source_event_at = audit_body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .ok_or_else(|| {
+            std::io::Error::other("restore failure audit should include source_event_at")
+        })?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
 
     Ok(())
 }
@@ -1770,6 +1793,12 @@ async fn restore_test_rejects_ciphertext_tampering_via_runtime()
         "decrypt_failed"
     );
     assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+    let source_event_at = audit_body["p_metadata_json"]["source_event_at"]
+        .as_str()
+        .ok_or_else(|| {
+            std::io::Error::other("restore failure audit should include source_event_at")
+        })?;
+    assert!(SourceEventAt::parse(source_event_at).is_ok());
 
     Ok(())
 }
