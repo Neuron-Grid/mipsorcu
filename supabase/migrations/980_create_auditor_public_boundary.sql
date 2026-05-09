@@ -391,6 +391,10 @@ declare
     v_checked bigint := 0;
     v_chain_head record;
     v_expected_prev_hash bytea;
+    v_expected_sequence_no bigint;
+    v_last_sequence_no bigint := null;
+    v_last_entry_hash bytea := null;
+    v_zero_hash bytea := decode(repeat('00', 32), 'hex');
 begin
     if p_start_sequence_no is not null and p_start_sequence_no <= 0 then
         raise exception 'invalid_rpc_input' using errcode = '22023';
@@ -423,14 +427,28 @@ begin
 
     chain_head_sequence_no := v_chain_head.last_sequence_no;
     chain_head_entry_hash := v_chain_head.last_entry_hash;
+    v_expected_sequence_no := coalesce(p_start_sequence_no, 1);
 
     if p_start_sequence_no is not null and p_start_sequence_no > 1 then
         select prec.entry_hash
         into v_expected_prev_hash
         from public.ledger_entries prec
         where prec.sequence_no = p_start_sequence_no - 1;
+
+        if not found then
+            chain_valid := false;
+            entries_checked := 0;
+            first_gap_sequence_no := p_start_sequence_no - 1;
+            first_gap_detail := 'sequence ' || (p_start_sequence_no - 1)::text
+                || ': preceding ledger entry missing for range start '
+                || p_start_sequence_no::text;
+            first_hash_mismatch_sequence_no := null;
+            first_hash_mismatch_detail := null;
+            return next;
+            return;
+        end if;
     else
-        v_expected_prev_hash := decode(repeat('00', 32), 'hex');
+        v_expected_prev_hash := v_zero_hash;
     end if;
 
     for v_curr in
@@ -449,8 +467,21 @@ begin
         )
         order by le.sequence_no
     loop
+        if v_curr.sequence_no <> v_expected_sequence_no then
+            chain_valid := false;
+            entries_checked := v_checked;
+            first_gap_sequence_no := v_expected_sequence_no;
+            first_gap_detail := 'sequence ' || v_expected_sequence_no::text
+                || ': expected sequence_no, found '
+                || v_curr.sequence_no::text;
+            first_hash_mismatch_sequence_no := null;
+            first_hash_mismatch_detail := null;
+            return next;
+            return;
+        end if;
+
         if v_curr.previous_entry_hash is distinct from v_expected_prev_hash then
-            if v_expected_prev_hash = decode(repeat('00', 32), 'hex') then
+            if v_expected_prev_hash = v_zero_hash then
                 first_hash_mismatch_detail := 'sequence ' || v_curr.sequence_no::text
                     || ': previous_entry_hash does not match genesis zero hash';
             else
@@ -466,8 +497,79 @@ begin
         end if;
 
         v_expected_prev_hash := v_curr.entry_hash;
+        v_last_sequence_no := v_curr.sequence_no;
+        v_last_entry_hash := v_curr.entry_hash;
         v_checked := v_checked + 1;
+        v_expected_sequence_no := v_expected_sequence_no + 1;
     end loop;
+
+    if p_end_sequence_no is not null and v_expected_sequence_no <= p_end_sequence_no then
+        chain_valid := false;
+        entries_checked := v_checked;
+        first_gap_sequence_no := v_expected_sequence_no;
+        first_gap_detail := 'sequence ' || v_expected_sequence_no::text
+            || ': expected sequence_no before range end '
+            || p_end_sequence_no::text;
+        first_hash_mismatch_sequence_no := null;
+        first_hash_mismatch_detail := null;
+        return next;
+        return;
+    end if;
+
+    if p_start_sequence_no is null and p_end_sequence_no is null then
+        if v_checked = 0 then
+            if v_chain_head.last_sequence_no is distinct from 0 then
+                chain_valid := false;
+                entries_checked := v_checked;
+                first_gap_sequence_no := 1;
+                first_gap_detail := 'ledger_chain_state last_sequence_no mismatch: '
+                    || 'expected 0 for empty ledger, found '
+                    || coalesce(v_chain_head.last_sequence_no::text, 'null');
+                first_hash_mismatch_sequence_no := null;
+                first_hash_mismatch_detail := null;
+                return next;
+                return;
+            end if;
+
+            if v_chain_head.last_entry_hash is distinct from v_zero_hash then
+                chain_valid := false;
+                entries_checked := v_checked;
+                first_gap_sequence_no := null;
+                first_gap_detail := null;
+                first_hash_mismatch_sequence_no := 0;
+                first_hash_mismatch_detail := 'ledger_chain_state last_entry_hash mismatch: '
+                    || 'expected genesis zero hash for empty ledger';
+                return next;
+                return;
+            end if;
+        else
+            if v_chain_head.last_sequence_no is distinct from v_last_sequence_no then
+                chain_valid := false;
+                entries_checked := v_checked;
+                first_gap_sequence_no := v_last_sequence_no;
+                first_gap_detail := 'ledger_chain_state last_sequence_no mismatch: expected '
+                    || v_last_sequence_no::text || ', found '
+                    || coalesce(v_chain_head.last_sequence_no::text, 'null');
+                first_hash_mismatch_sequence_no := null;
+                first_hash_mismatch_detail := null;
+                return next;
+                return;
+            end if;
+
+            if v_chain_head.last_entry_hash is distinct from v_last_entry_hash then
+                chain_valid := false;
+                entries_checked := v_checked;
+                first_gap_sequence_no := null;
+                first_gap_detail := null;
+                first_hash_mismatch_sequence_no := v_last_sequence_no;
+                first_hash_mismatch_detail := 'ledger_chain_state last_entry_hash mismatch: '
+                    || 'expected entry_hash at sequence '
+                    || v_last_sequence_no::text;
+                return next;
+                return;
+            end if;
+        end if;
+    end if;
 
     chain_valid := true;
     entries_checked := v_checked;
@@ -480,7 +582,7 @@ end;
 $$;
 
 comment on function public.rpc_verify_ledger_hash_chain(bigint, bigint)
-is 'Verifies sequence_no continuity and previous_entry_hash chain within a ledger range or globally. Does not recompute entry_hash or verify signatures (Rust responsibility).';
+is 'Verifies sequence_no continuity, previous_entry_hash chain, and full-chain ledger_chain_state consistency. Does not reconstruct canonical payload, recompute entry_hash, or verify Ed25519 signatures (Rust responsibility).';
 
 -- RPC: rpc_verify_ledger_range
 

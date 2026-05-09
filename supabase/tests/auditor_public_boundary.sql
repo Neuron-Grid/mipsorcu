@@ -2,7 +2,7 @@ begin;
 
 \ir _support/common.psql
 
-select plan(72);
+select plan(76);
 
 -- Register two signing public keys (one active, one to retire later)
 select lives_ok(
@@ -468,6 +468,79 @@ select is(
     true,
     'range 1-2 hash chain valid=true'
 );
+
+reset role;
+
+alter table public.ledger_entries disable trigger ledger_entries_no_update_delete;
+update public.ledger_entries
+set sequence_no = 5
+where id = 'a0000000-0000-4000-a000-000000000003'::uuid;
+alter table public.ledger_entries enable trigger ledger_entries_no_update_delete;
+
+set local role mipsorcu_auditor;
+set local search_path = public, extensions, pg_temp;
+
+select is(
+    (select chain_valid from public.rpc_verify_ledger_hash_chain()),
+    false,
+    'rpc_verify_ledger_hash_chain detects sequence gap'
+);
+
+select is(
+    (select first_gap_sequence_no from public.rpc_verify_ledger_hash_chain()),
+    3::bigint,
+    'rpc_verify_ledger_hash_chain reports first missing sequence_no for sequence gap'
+);
+
+reset role;
+
+alter table public.ledger_entries disable trigger ledger_entries_no_update_delete;
+update public.ledger_entries
+set sequence_no = 3
+where id = 'a0000000-0000-4000-a000-000000000003'::uuid;
+alter table public.ledger_entries enable trigger ledger_entries_no_update_delete;
+
+update public.ledger_chain_state
+set last_sequence_no = 999
+where chain_id = 'global';
+
+set local role mipsorcu_auditor;
+set local search_path = public, extensions, pg_temp;
+
+select is(
+    (select chain_valid from public.rpc_verify_ledger_hash_chain()),
+    false,
+    'rpc_verify_ledger_hash_chain detects ledger_chain_state last_sequence_no mismatch'
+);
+
+reset role;
+
+update public.ledger_chain_state
+set last_sequence_no = 4
+where chain_id = 'global';
+
+update public.ledger_chain_state
+set last_entry_hash = decode(repeat('ee', 32), 'hex')
+where chain_id = 'global';
+
+set local role mipsorcu_auditor;
+set local search_path = public, extensions, pg_temp;
+
+select is(
+    (select chain_valid from public.rpc_verify_ledger_hash_chain()),
+    false,
+    'rpc_verify_ledger_hash_chain detects ledger_chain_state last_entry_hash mismatch'
+);
+
+reset role;
+
+update public.ledger_chain_state
+set last_sequence_no = 4,
+    last_entry_hash = decode(repeat('0d', 32), 'hex')
+where chain_id = 'global';
+
+set local role mipsorcu_auditor;
+set local search_path = public, extensions, pg_temp;
 
 -- 7. rpc_verify_ledger_range: gap / empty range detection.
 select is(
