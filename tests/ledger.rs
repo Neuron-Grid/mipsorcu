@@ -357,7 +357,7 @@ fn ledger_payload_tampering_makes_signature_verification_fail() -> TestResult {
 
     assert!(matches!(
         tampered.verify_signature(&verification_key),
-        Err(LedgerError::SignatureInvalid)
+        Err(LedgerError::SignatureInvalid { .. })
     ));
 
     Ok(())
@@ -399,7 +399,7 @@ fn ledger_previous_hash_tampering_makes_signature_verification_fail() -> TestRes
 
     assert!(matches!(
         tampered.verify_signature(&verification_key),
-        Err(LedgerError::SignatureInvalid)
+        Err(LedgerError::SignatureInvalid { .. })
     ));
 
     Ok(())
@@ -480,7 +480,7 @@ fn ledger_signature_key_version_mismatch_and_unknown_key_are_rejected() -> TestR
     ));
     assert!(matches!(
         verify_ledger_chain(&[entry], LedgerChainHead::genesis(), &[]),
-        Err(LedgerError::UnknownSignatureKey { key_version: 1 })
+        Err(LedgerError::UnknownSignatureKey { key_version: 1, .. })
     ));
 
     Ok(())
@@ -496,7 +496,7 @@ fn ledger_signature_verification_fails_with_different_public_key() -> TestResult
 
     assert!(matches!(
         entry.verify_signature(&different_verification_key),
-        Err(LedgerError::SignatureInvalid)
+        Err(LedgerError::SignatureInvalid { .. })
     ));
 
     Ok(())
@@ -536,7 +536,7 @@ fn ledger_key_rotation_keeps_old_signatures_verifiable_with_old_public_key() -> 
             LedgerChainHead::genesis(),
             &[new_verification_key]
         ),
-        Err(LedgerError::UnknownSignatureKey { key_version: 1 })
+        Err(LedgerError::UnknownSignatureKey { key_version: 1, .. })
     ));
 
     Ok(())

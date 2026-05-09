@@ -1,4 +1,5 @@
 mod audit_reporter;
+pub mod auditor;
 mod background;
 pub mod config;
 pub mod dto;

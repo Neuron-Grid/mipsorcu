@@ -189,7 +189,7 @@ impl LedgerVerifyingKey {
         let signature = Signature::from_bytes(signature.as_bytes());
         self.verifying_key
             .verify(payload.as_bytes(), &signature)
-            .map_err(|_| LedgerError::SignatureInvalid)
+            .map_err(|_| LedgerError::SignatureInvalid { sequence_no: 0 })
     }
 }
 

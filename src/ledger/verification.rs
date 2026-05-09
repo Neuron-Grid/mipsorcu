@@ -36,9 +36,16 @@ pub fn verify_ledger_chain(
             });
         }
 
-        let verification_key =
-            find_verification_key(verification_keys, entry.signature_key_version())?;
-        entry.verify_signature(verification_key)?;
+        let verification_key = find_verification_key_with_seq(
+            verification_keys,
+            entry.signature_key_version(),
+            actual_sequence_no,
+        )?;
+        entry
+            .verify_signature(verification_key)
+            .map_err(|_| LedgerError::SignatureInvalid {
+                sequence_no: actual_sequence_no,
+            })?;
 
         previous_sequence_no = actual_sequence_no;
         previous_hash = entry.entry_hash();
@@ -47,14 +54,16 @@ pub fn verify_ledger_chain(
     LedgerChainHead::new(previous_sequence_no, previous_hash)
 }
 
-fn find_verification_key(
+fn find_verification_key_with_seq(
     verification_keys: &[LedgerVerifyingKey],
     key_version: LedgerSignatureKeyVersion,
+    sequence_no: u64,
 ) -> Result<&LedgerVerifyingKey, LedgerError> {
     verification_keys
         .iter()
         .find(|key| key.key_version() == key_version)
         .ok_or_else(|| LedgerError::UnknownSignatureKey {
             key_version: key_version.get(),
+            sequence_no,
         })
 }

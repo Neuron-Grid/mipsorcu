@@ -68,7 +68,6 @@ pub struct LedgerVerificationMaterialRow {
 }
 
 impl LedgerVerificationMaterialRow {
-
     pub fn try_restore_verifying_key(&self) -> Result<Option<LedgerVerifyingKey>, LedgerError> {
         let pk_key_version = match self.pk_key_version {
             Some(v) => v,

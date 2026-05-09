@@ -67,8 +67,11 @@ pub enum LedgerError {
     },
     UnknownSignatureKey {
         key_version: u32,
+        sequence_no: u64,
     },
-    SignatureInvalid,
+    SignatureInvalid {
+        sequence_no: u64,
+    },
     HashMismatch {
         sequence_no: u64,
     },
@@ -165,13 +168,21 @@ impl fmt::Display for LedgerError {
                 formatter,
                 "ledger signature key version mismatch: expected {expected}, actual {actual}"
             ),
-            Self::UnknownSignatureKey { key_version } => {
+            Self::UnknownSignatureKey {
+                key_version,
+                sequence_no,
+            } => {
                 write!(
                     formatter,
-                    "unknown ledger signature key version: {key_version}"
+                    "unknown ledger signature key version: {key_version} at sequence {sequence_no}"
                 )
             }
-            Self::SignatureInvalid => write!(formatter, "ledger signature is invalid"),
+            Self::SignatureInvalid { sequence_no } => {
+                write!(
+                    formatter,
+                    "ledger signature is invalid at sequence {sequence_no}"
+                )
+            }
             Self::HashMismatch { sequence_no } => {
                 write!(
                     formatter,

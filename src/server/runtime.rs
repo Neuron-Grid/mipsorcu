@@ -10,7 +10,9 @@ use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{
     SupabaseAuditAppender, SupabaseClient, classify_register_public_key_error,
 };
-use crate::server::{background, config, integrity_check, key_rotation, restore_test, router};
+use crate::server::{
+    auditor, background, config, integrity_check, key_rotation, restore_test, router,
+};
 
 pub use crate::server::background::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
@@ -43,6 +45,18 @@ pub async fn run_entrypoint() {
             });
 
             if let Err(error) = integrity_check::run_cli(config, command_args).await {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        Some((command, command_args)) if command == "auditor" => {
+            init_tracing();
+            let config = config::load_config().unwrap_or_else(|error| {
+                tracing::error!(error = %error, "configuration loading failed");
+                std::process::exit(1);
+            });
+
+            if let Err(error) = auditor::run_cli(config, command_args).await {
                 eprintln!("{error}");
                 std::process::exit(2);
             }
@@ -216,7 +230,12 @@ async fn register_ledger_signing_public_key_at_startup(
 }
 
 fn usage() -> String {
-    [key_rotation::usage(), integrity_check::usage()].join("\n")
+    [
+        key_rotation::usage(),
+        integrity_check::usage(),
+        auditor::usage(),
+    ]
+    .join("\n")
 }
 
 async fn serve_app(
