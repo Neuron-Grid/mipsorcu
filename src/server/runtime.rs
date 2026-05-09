@@ -7,7 +7,9 @@ use tracing_subscriber::{EnvFilter, fmt};
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::{JwksCache, JwtVerifier, JwtVerifierConfig, fetch_jwks};
 use crate::server::state::{AppState, ReadinessState};
-use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
+use crate::server::supabase::{
+    SupabaseAuditAppender, SupabaseClient, classify_register_public_key_error,
+};
 use crate::server::{background, config, integrity_check, key_rotation, restore_test, router};
 
 pub use crate::server::background::{
@@ -129,9 +131,11 @@ async fn run_server_with_config(config: config::AppConfig) {
     );
     let app_fallback_store = fallback_store.clone();
     let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store.clone()));
+    let ledger_signing_key = config.ledger_signing_key.clone();
+    register_ledger_signing_public_key_at_startup(&supabase_client, &ledger_signing_key).await;
     let ledger_appender = Arc::new(crate::server::ledger_appender::LedgerAppender::new(
         supabase_client.clone(),
-        config.ledger_signing_key.clone(),
+        ledger_signing_key,
     ));
     tokio::spawn(background::run_audit_resend_loop(
         audit_recorder.clone(),
@@ -175,6 +179,40 @@ async fn run_server_with_config(config: config::AppConfig) {
 
 pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
     restore_test::run_restore_test_once(state, sample_limit, crate::audit::AuditTrigger::Cli).await;
+}
+
+async fn register_ledger_signing_public_key_at_startup(
+    client: &SupabaseClient,
+    signing_key: &crate::ledger::LedgerSigningKey,
+) {
+    let verification_key = signing_key.verification_key();
+    let key_version = verification_key.key_version().get();
+
+    match client
+        .register_ledger_signing_public_key(&verification_key)
+        .await
+    {
+        Ok(outcome) => {
+            if outcome.replayed() {
+                tracing::info!(
+                    key_version,
+                    "ledger signing public key already registered (idempotent)"
+                );
+            } else {
+                tracing::info!(key_version, "ledger signing public key registered");
+            }
+        }
+        Err(error) => {
+            let classification = classify_register_public_key_error(&error);
+            tracing::error!(
+                key_version,
+                error_code = classification.as_error_code(),
+                upstream_status = error.upstream_status(),
+                "ledger signing public key registration failed"
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 fn usage() -> String {

@@ -3,6 +3,7 @@ mod client;
 mod error;
 mod integrity_rpc;
 mod key_rotation_rpc;
+mod ledger_public_key_rpc;
 mod ledger_rpc;
 mod readiness;
 mod response;
@@ -13,6 +14,7 @@ mod write_secret_rpc;
 pub use audit_rpc::SupabaseAuditAppender;
 pub use client::SupabaseClient;
 pub use error::SupabaseRpcError;
+pub use ledger_public_key_rpc::{RegisterPublicKeyError, classify_register_public_key_error};
 pub use ledger_rpc::classify_append_ledger_error;
 
 pub use crate::types::supabase::{

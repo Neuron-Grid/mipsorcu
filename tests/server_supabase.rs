@@ -6,8 +6,9 @@ use std::sync::mpsc;
 use std::thread;
 
 use mipsorcu::server::supabase::{
-    IntegrityCheckViolationSummary, LedgerAppendRpcFailure, SupabaseAuditAppender, SupabaseClient,
-    SupabaseRpcError, classify_append_ledger_error,
+    IntegrityCheckViolationSummary, LedgerAppendRpcFailure, RegisterPublicKeyError,
+    SupabaseAuditAppender, SupabaseClient, SupabaseRpcError, classify_append_ledger_error,
+    classify_register_public_key_error,
 };
 use mipsorcu::{
     AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventId, AuditEventParts,
@@ -639,6 +640,206 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest>
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn register_ledger_signing_public_key_sends_bytea_params_and_returns_replayed_false() {
+    let signing_key = ledger_signing_key_for_tests();
+    let verification_key = signing_key.verification_key();
+    let response_body = serde_json::to_string(&json!([{
+        "out_key_version": 1,
+        "public_key": format!("\\x{}", hex::encode(verification_key.as_bytes())),
+        "algorithm": "ed25519",
+        "status": "active",
+        "created_at": "2026-05-09T12:00:00Z",
+        "retired_at": null,
+        "replayed": false
+    }]))
+    .expect("register response should serialize");
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+
+    let outcome = client
+        .register_ledger_signing_public_key(&verification_key)
+        .await
+        .expect("register RPC should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+    let body: Value = serde_json::from_str(&request.body).expect("request body should be JSON");
+
+    assert!(!outcome.replayed());
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        request.path,
+        "/rest/v1/rpc/rpc_register_ledger_signing_public_key"
+    );
+    assert_eq!(
+        request.headers.get("authorization"),
+        Some(&"Bearer service-role-secret".to_owned())
+    );
+    assert_eq!(
+        request.headers.get("apikey"),
+        Some(&"service-role-secret".to_owned())
+    );
+    assert_eq!(body["p_key_version"], 1);
+    assert_bytea_hex(&body["p_public_key"], 64);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn register_ledger_signing_public_key_replays_idempotently() {
+    let signing_key = ledger_signing_key_for_tests();
+    let verification_key = signing_key.verification_key();
+    let response_body = serde_json::to_string(&json!([{
+        "out_key_version": 1,
+        "public_key": format!("\\x{}", hex::encode(verification_key.as_bytes())),
+        "algorithm": "ed25519",
+        "status": "active",
+        "created_at": "2026-05-09T12:00:00Z",
+        "retired_at": null,
+        "replayed": true
+    }]))
+    .expect("register response should serialize");
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+
+    let outcome = client
+        .register_ledger_signing_public_key(&verification_key)
+        .await
+        .expect("register RPC should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert!(outcome.replayed());
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        request.path,
+        "/rest/v1/rpc/rpc_register_ledger_signing_public_key"
+    );
+}
+
+#[test]
+fn classify_register_public_key_error_maps_conflict() {
+    let body = r#"{"message":"ledger_signing_public_key_conflict with details"}"#.to_owned();
+    let error = SupabaseRpcError::NonSuccessStatus { status: 409, body };
+
+    assert_eq!(
+        classify_register_public_key_error(&error),
+        RegisterPublicKeyError::Conflict
+    );
+    assert_eq!(
+        classify_register_public_key_error(&error).as_error_code(),
+        "ledger_signing_public_key_conflict"
+    );
+}
+
+#[test]
+fn classify_register_public_key_error_maps_retired() {
+    let body = r#"{"details":"ledger_signing_public_key_retired for this key"}"#.to_owned();
+    let error = SupabaseRpcError::NonSuccessStatus { status: 409, body };
+
+    assert_eq!(
+        classify_register_public_key_error(&error),
+        RegisterPublicKeyError::Retired
+    );
+    assert_eq!(
+        classify_register_public_key_error(&error).as_error_code(),
+        "ledger_signing_public_key_retired"
+    );
+}
+
+#[test]
+fn classify_register_public_key_error_maps_invalid_rpc_input() {
+    let body = r#"{"hint":"invalid_rpc_input: bad key version"}"#.to_owned();
+    let error = SupabaseRpcError::NonSuccessStatus { status: 400, body };
+
+    assert_eq!(
+        classify_register_public_key_error(&error),
+        RegisterPublicKeyError::InvalidRpcInput
+    );
+    assert_eq!(
+        classify_register_public_key_error(&error).as_error_code(),
+        "invalid_rpc_input"
+    );
+}
+
+#[test]
+fn classify_register_public_key_error_falls_back_to_register_failed_for_unknown_body() {
+    let body = r#"{"message":"some other database error"}"#.to_owned();
+    let error = SupabaseRpcError::NonSuccessStatus { status: 500, body };
+
+    assert_eq!(
+        classify_register_public_key_error(&error),
+        RegisterPublicKeyError::RegisterFailed
+    );
+}
+
+#[test]
+fn classify_register_public_key_error_falls_back_to_register_failed_for_unknown_status_body() {
+    let body = r#"{"code":"50001"}"#.to_owned();
+    let error = SupabaseRpcError::NonSuccessStatus { status: 500, body };
+
+    assert_eq!(
+        classify_register_public_key_error(&error),
+        RegisterPublicKeyError::RegisterFailed
+    );
+}
+
+#[test]
+fn register_public_key_error_debug_and_error_code_do_not_expose_body() {
+    let body =
+        r#"{"message":"ledger_signing_public_key_conflict with secret upstream state"}"#.to_owned();
+    let error = SupabaseRpcError::NonSuccessStatus { status: 409, body };
+    let classification = classify_register_public_key_error(&error);
+
+    assert_eq!(
+        classification.as_error_code(),
+        "ledger_signing_public_key_conflict"
+    );
+    assert!(!format!("{error:?}").contains("secret upstream state"));
+    assert!(!error.to_string().contains("secret upstream state"));
+}
+
+#[test]
+fn ledger_verifying_key_debug_redacts_raw_public_key_bytes() {
+    let signing_key = ledger_signing_key_for_tests();
+    let verification_key = signing_key.verification_key();
+    let rendered = format!("{verification_key:?}");
+
+    assert!(rendered.contains("LedgerVerifyingKey"));
+    assert!(rendered.contains("key_version"));
+    // Raw public key bytes must not appear in Debug output
+    let hex_encoded = hex::encode(verification_key.as_bytes());
+    assert!(!rendered.contains(&hex_encoded));
+}
+
+fn ledger_signing_key_for_tests() -> LedgerSigningKey {
+    LedgerSigningKey::from_secret_key_bytes(
+        LedgerSignatureKeyVersion::new(1).expect("key version must be valid"),
+        &[9u8; 32],
+    )
+    .expect("ledger signing key must be valid")
 }
 
 fn write_http_response(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
