@@ -11,6 +11,7 @@ mod readiness;
 mod response;
 mod restore_rpc;
 mod secret_rpc;
+mod verify_digest_rpc;
 mod write_secret_rpc;
 
 pub use audit_rpc::SupabaseAuditAppender;
@@ -24,6 +25,9 @@ pub use ledger_export_rpc::{
 };
 pub use ledger_public_key_rpc::{RegisterPublicKeyError, classify_register_public_key_error};
 pub use ledger_rpc::classify_append_ledger_error;
+pub use verify_digest_rpc::{
+    MonthlyDigestVerificationMaterials, VerifyDigestRpcError, classify_verify_digest_rpc_error,
+};
 
 pub use crate::types::supabase::{
     AppendLedgerEntryOutcome, IntegrityCheckSummary, IntegrityCheckViolationSummary,

@@ -212,6 +212,17 @@ impl LedgerVerifyingKey {
             .verify(payload.as_bytes(), &signature)
             .map_err(|_| LedgerError::SignatureInvalid { sequence_no: 0 })
     }
+
+    pub fn verify_digest_bytes(
+        &self,
+        bytes: &[u8],
+        signature: &LedgerSignature,
+    ) -> Result<(), LedgerError> {
+        let sig = Signature::from_bytes(signature.as_bytes());
+        self.verifying_key
+            .verify(bytes, &sig)
+            .map_err(|_| LedgerError::DigestSignatureInvalid)
+    }
 }
 
 impl fmt::Debug for LedgerVerifyingKey {

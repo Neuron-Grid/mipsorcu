@@ -1,8 +1,10 @@
-//! 月次 digest 生成 CLI コマンド（Ledger Phase 2 §7.3）。
+//! 月次 digest CLI コマンド（Ledger Phase 2 §7.3 / §7.4）。
 //!
-//! 使い方: `mipsorcu digest generate --year-month YYYY-MM [--format json]`
+//! 使い方:
+//!   mipsorcu digest generate --year-month YYYY-MM --format json
+//!   mipsorcu digest verify   --year-month YYYY-MM --format json
 //!
-//! 信頼境界ノート: digest 生成は SBC 内で完結する。
+//! 信頼境界ノート: digest 生成・検証は SBC 内で完結する。
 //! Master Key・Data Key・平文・JWT 全文を処理しない。
 
 use std::sync::Arc;
@@ -17,6 +19,10 @@ use crate::server::use_cases::generate_monthly_digest::{
     GenerateMonthlyDigestError, GenerateMonthlyDigestInput, generate_monthly_digest,
     record_monthly_digest_failure_audit,
 };
+use crate::server::use_cases::verify_monthly_digest::{
+    VerifyMonthlyDigestError, VerifyMonthlyDigestInput, verify_monthly_digest,
+    record_monthly_digest_verify_failure_audit,
+};
 use crate::types::SourceEventAt;
 
 #[derive(Debug)]
@@ -24,6 +30,7 @@ pub enum DigestCliError {
     Usage(String),
     Config(String),
     GenerateFailed(GenerateMonthlyDigestError),
+    VerifyFailed(VerifyMonthlyDigestError),
     Serialization(String),
 }
 
@@ -34,6 +41,9 @@ impl std::fmt::Display for DigestCliError {
             Self::Config(message) => write!(formatter, "digest config error: {message}"),
             Self::GenerateFailed(error) => {
                 write!(formatter, "digest generation failed: {error}")
+            }
+            Self::VerifyFailed(error) => {
+                write!(formatter, "digest verification failed: {error}")
             }
             Self::Serialization(message) => {
                 write!(formatter, "digest serialization error: {message}")
@@ -48,6 +58,7 @@ pub fn usage() -> String {
     [
         "usage:",
         "  mipsorcu digest generate --year-month YYYY-MM --format json",
+        "  mipsorcu digest verify   --year-month YYYY-MM --format json",
     ]
     .join("\n")
 }
@@ -61,7 +72,7 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), DigestCli
     while i < args.len() {
         let arg = &args[i];
         match arg.as_str() {
-            "generate" if subcommand.is_none() => {
+            "generate" | "verify" if subcommand.is_none() => {
                 subcommand = Some(arg);
             }
             "--year-month" => {
@@ -89,11 +100,6 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), DigestCli
         i += 1;
     }
 
-    match subcommand {
-        Some(cmd) if cmd == "generate" => {}
-        _ => return Err(DigestCliError::Usage(usage())),
-    }
-
     let year_month = year_month.ok_or_else(|| DigestCliError::Usage(usage()))?;
 
     match format {
@@ -104,10 +110,24 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), DigestCli
     let period = MonthlyDigestPeriod::parse(&year_month)
         .map_err(|error| DigestCliError::Usage(format!("invalid --year-month: {error}")))?;
 
-    let output = run_generate_command(&config, period).await?;
-    let json_output = serde_json::to_string_pretty(&output)
-        .map_err(|error| DigestCliError::Serialization(error.to_string()))?;
-    println!("{json_output}");
+    match subcommand {
+        Some(cmd) if cmd == "generate" => {
+            let output = run_generate_command(&config, period).await?;
+            let json_output = serde_json::to_string_pretty(&output)
+                .map_err(|error| DigestCliError::Serialization(error.to_string()))?;
+            println!("{json_output}");
+        }
+        Some(cmd) if cmd == "verify" => {
+            let output = run_verify_command(&config, period).await?;
+            let json_output = serde_json::to_string_pretty(&output)
+                .map_err(|error| DigestCliError::Serialization(error.to_string()))?;
+            println!("{json_output}");
+            if let Some(verify_error) = output.error_variant {
+                return Err(DigestCliError::VerifyFailed(verify_error));
+            }
+        }
+        _ => return Err(DigestCliError::Usage(usage())),
+    }
 
     Ok(())
 }
@@ -176,6 +196,86 @@ async fn run_generate_command(
             .await;
 
             Err(DigestCliError::GenerateFailed(error))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DigestVerifyOutput {
+    period: String,
+    valid: bool,
+    start_sequence_no: Option<u64>,
+    end_sequence_no: Option<u64>,
+    entry_count: Option<u64>,
+    error: Option<DigestVerifyOutputError>,
+    #[serde(skip)]
+    error_variant: Option<VerifyMonthlyDigestError>,
+}
+
+#[derive(Debug, Serialize)]
+struct DigestVerifyOutputError {
+    code: String,
+    message: String,
+}
+
+async fn run_verify_command(
+    config: &AppConfig,
+    period: MonthlyDigestPeriod,
+) -> Result<DigestVerifyOutput, DigestCliError> {
+    let http_client = crate::server::config::build_outbound_http_client(config)
+        .map_err(|error| DigestCliError::Config(error.to_string()))?;
+
+    let supabase_client = Arc::new(SupabaseClient::new(
+        http_client,
+        config.supabase_url.clone(),
+        config.supabase_service_role_key.clone(),
+        config.supabase_publishable_key.clone(),
+    ));
+
+    let verified_at = SourceEventAt::now_utc()
+        .map_err(|error| DigestCliError::Config(error.to_string()))?;
+
+    let request_id = RequestId::generate()
+        .map_err(|error| DigestCliError::Config(error.to_string()))?;
+
+    let input = VerifyMonthlyDigestInput {
+        period: period.clone(),
+        request_id: request_id.clone(),
+    };
+
+    match verify_monthly_digest(&supabase_client, &input).await {
+        Ok(info) => Ok(DigestVerifyOutput {
+            period: period.as_str().to_owned(),
+            valid: true,
+            start_sequence_no: Some(info.start_sequence_no.get()),
+            end_sequence_no: Some(info.end_sequence_no.get()),
+            entry_count: Some(info.entry_count),
+            error: None,
+            error_variant: None,
+        }),
+        Err(error) => {
+            // 検証失敗を audit_events に同期記録（AGENTS.md §8 フェイルクローズ）
+            record_monthly_digest_verify_failure_audit(
+                &supabase_client,
+                &request_id,
+                &period,
+                &error,
+                &verified_at,
+            )
+            .await;
+
+            Ok(DigestVerifyOutput {
+                period: period.as_str().to_owned(),
+                valid: false,
+                start_sequence_no: None,
+                end_sequence_no: None,
+                entry_count: None,
+                error: Some(DigestVerifyOutputError {
+                    code: error.as_error_code().to_owned(),
+                    message: error.to_string(),
+                }),
+                error_variant: Some(error),
+            })
         }
     }
 }

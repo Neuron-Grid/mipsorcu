@@ -14,6 +14,8 @@ pub enum AuditAction {
     KeyRotationComplete,
     /// 月次 digest 生成操作（失敗時の監査記録用、Ledger Phase 2 §7.3）。
     MonthlyDigestGenerate,
+    /// 月次 digest 検証操作（失敗時の監査記録用、Ledger Phase 2 §7.4）。
+    MonthlyDigestVerify,
 }
 
 impl AuditAction {
@@ -30,6 +32,7 @@ impl AuditAction {
             "key_rotation_reencrypt" => Ok(Self::KeyRotationReencrypt),
             "key_rotation_complete" => Ok(Self::KeyRotationComplete),
             "monthly_digest_generate" => Ok(Self::MonthlyDigestGenerate),
+            "monthly_digest_verify" => Ok(Self::MonthlyDigestVerify),
             _ => Err(AuditEventError::UnknownAction {
                 value: value.to_owned(),
             }),
@@ -49,6 +52,7 @@ impl AuditAction {
             Self::KeyRotationReencrypt => "key_rotation_reencrypt",
             Self::KeyRotationComplete => "key_rotation_complete",
             Self::MonthlyDigestGenerate => "monthly_digest_generate",
+            Self::MonthlyDigestVerify => "monthly_digest_verify",
         }
     }
 

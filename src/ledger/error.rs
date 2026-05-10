@@ -85,6 +85,7 @@ pub enum LedgerError {
     SerializationFailed(String),
     RandomnessUnavailable,
     InvalidMonthlyDigestPeriod,
+    DigestSignatureInvalid,
 }
 
 impl fmt::Display for LedgerError {
@@ -209,6 +210,9 @@ impl fmt::Display for LedgerError {
                 formatter,
                 "monthly digest period must be in YYYY-MM format with a valid month (01-12)"
             ),
+            Self::DigestSignatureInvalid => {
+                write!(formatter, "digest Ed25519 signature is invalid")
+            }
         }
     }
 }
