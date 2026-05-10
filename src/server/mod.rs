@@ -2,6 +2,7 @@ mod audit_reporter;
 pub mod auditor;
 mod background;
 pub mod config;
+pub mod digest;
 pub mod dto;
 pub mod errors;
 pub mod handlers;

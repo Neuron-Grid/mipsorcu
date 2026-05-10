@@ -124,7 +124,7 @@ fn validate_payload_object(
 fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
     match key {
         "version" | "key_version" | "old_key_version" | "new_key_version" | "retention_limit"
-        | "start_sequence_no" | "end_sequence_no" => {
+        | "start_sequence_no" | "end_sequence_no" | "entry_count" => {
             let parsed = require_positive_json_u64(key, value)?;
             if key == "retention_limit" && parsed != 4 {
                 return Err(LedgerError::InvalidPayloadField {
@@ -152,11 +152,62 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         "classification" => validate_classification_value(key, value),
         "trigger" => validate_trigger_value(key, value),
         "error_code" | "reason_code" => validate_non_blank_short_string(key, value),
+        // ADR 0037: monthly_digest 専用フィールド
+        "target_year_month" => validate_year_month_value(key, value),
+        "digest_hash" => validate_digest_hash_value(key, value),
         _ => Err(LedgerError::UnknownPayloadKey {
             key: key.to_owned(),
             entry_type: LedgerEntryType::SecretCreated,
         }),
     }
+}
+
+/// `YYYY-MM` 形式の文字列値を検証する。
+fn validate_year_month_value(key: &str, value: &Value) -> Result<(), LedgerError> {
+    let Some(text) = value.as_str() else {
+        return Err(LedgerError::InvalidPayloadField {
+            key: key.to_owned(),
+            expected: "a string in YYYY-MM format",
+        });
+    };
+
+    let bytes = text.as_bytes();
+    let is_valid = bytes.len() == 7
+        && bytes[4] == b'-'
+        && bytes[..4].iter().all(|b| b.is_ascii_digit())
+        && bytes[5..].iter().all(|b| b.is_ascii_digit())
+        && {
+            let month: u8 = text[5..].parse().unwrap_or(0);
+            (1u8..=12).contains(&month)
+        };
+
+    if !is_valid {
+        return Err(LedgerError::InvalidPayloadField {
+            key: key.to_owned(),
+            expected: "a string in YYYY-MM format",
+        });
+    }
+
+    Ok(())
+}
+
+/// 64文字の小文字 hex 文字列を検証する（ADR 0037 の digest_hash フィールド用）。
+fn validate_digest_hash_value(key: &str, value: &Value) -> Result<(), LedgerError> {
+    let Some(text) = value.as_str() else {
+        return Err(LedgerError::InvalidPayloadField {
+            key: key.to_owned(),
+            expected: "a 64-character lowercase hex string",
+        });
+    };
+
+    if text.len() != 64 || !text.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()) {
+        return Err(LedgerError::InvalidPayloadField {
+            key: key.to_owned(),
+            expected: "a 64-character lowercase hex string",
+        });
+    }
+
+    Ok(())
 }
 
 fn require_positive_json_u64(key: &str, value: &Value) -> Result<u64, LedgerError> {

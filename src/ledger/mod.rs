@@ -1,6 +1,7 @@
 mod canonical;
 mod chain;
 mod constants;
+pub mod digest;
 mod entry;
 mod entry_type;
 mod error;
@@ -18,6 +19,10 @@ pub use constants::{
     LEDGER_ED25519_PUBLIC_KEY_LENGTH, LEDGER_ED25519_SECRET_KEY_LENGTH,
     LEDGER_HASH_ALGORITHM_SHA256, LEDGER_HASH_LENGTH, LEDGER_PAYLOAD_MAX_CANONICAL_BYTES,
     LEDGER_SIGNATURE_ALGORITHM_ED25519, LEDGER_SIGNATURE_LENGTH,
+};
+pub use digest::{
+    DIGEST_GENERATED_BY, DIGEST_SCHEMA_VERSION_V1, DigestCanonicalBytes, DigestHash,
+    MonthlyDigestPeriod, SignedMonthlyDigest, build_monthly_digest_canonical_form,
 };
 pub use entry::{
     LedgerEntryDraft, LedgerEntryDraftParts, SignedLedgerEntry, SignedLedgerEntryParts,

@@ -7,7 +7,10 @@ use mipsorcu::{
 };
 
 const MIGRATION_300_PATH: &str = "supabase/migrations/300_create_audit_event_guards_and_rpc.sql";
-const MIGRATION_990_PATH: &str = "supabase/migrations/990_add_audit_metadata_allowlist.sql";
+// T06 以降の allowlist 正本: 全 action を含む更新版の函数定義を持つ。
+// allowlist_parity および violation_summary_parity はこちらを参照する。
+// 新 action を追加する場合は、このパスの migration を更新すること。
+const MIGRATION_995_PATH: &str = "supabase/migrations/995_add_monthly_digest.sql";
 const FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_START";
 const FORBIDDEN_END_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_END";
 const ALLOWLIST_START_MARKER: &str = "-- ACTION_ALLOWLIST_START";
@@ -28,8 +31,11 @@ fn forbidden_keys_parity_between_rust_and_sql() {
 
 #[test]
 fn allowlist_parity_between_rust_and_sql() {
+    // T06 以降は 995 migration が audit_metadata_has_unknown_key_for_action の最新定義を持つ。
+    // 新 action を追加する場合は 995（または後続 migration）の ACTION_ALLOWLIST_START/END 内と
+    // rust_allowlist_for_action_result（このファイル内）の両方を更新すること。
     let migration =
-        fs::read_to_string(MIGRATION_990_PATH).expect("allowlist migration should be readable");
+        fs::read_to_string(MIGRATION_995_PATH).expect("allowlist migration 995 should be readable");
     let sql_allowlist = extract_sql_allowlist(&migration);
 
     // Rust 側 allowlist を action+result ごとに構成
@@ -63,8 +69,9 @@ fn allowlist_parity_between_rust_and_sql() {
 
 #[test]
 fn integrity_check_violation_summary_allowlist_parity() {
+    // 995 migration は完全な関数定義（violation_summary キーを含む）を保持する。
     let migration =
-        fs::read_to_string(MIGRATION_990_PATH).expect("allowlist migration should be readable");
+        fs::read_to_string(MIGRATION_995_PATH).expect("allowlist migration 995 should be readable");
     let sql_summary = extract_sql_violation_summary_keys(&migration);
     let rust_summary = INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST
         .iter()
@@ -495,6 +502,7 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::KeyRotationStart,
         AuditAction::KeyRotationReencrypt,
         AuditAction::KeyRotationComplete,
+        AuditAction::MonthlyDigestGenerate,
     ]
 }
 
@@ -560,6 +568,10 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "remaining_count",
                 "source_event_at",
             ]
+        }
+        // Ledger Phase 2 §7.3: 月次 digest 生成失敗時の監査記録
+        AuditAction::MonthlyDigestGenerate => {
+            vec!["error_code", "target_year_month", "source_event_at"]
         }
     };
     keys.sort();

@@ -125,6 +125,27 @@ impl LedgerSigningKey {
         let signature: Signature = self.signing_key.sign(payload.as_bytes());
         LedgerSignature::from_bytes(&signature.to_bytes())
     }
+
+    /// digest canonical form（UTF-8 バイト列）に対して Ed25519 署名を生成する。
+    ///
+    /// ADR 0037 §5 に従い、Phase 1 の `LedgerSigningKey` を再利用して
+    /// digest canonical bytes に署名する。ledger entry canonical payload とは
+    /// 別の署名対象であることに注意。
+    pub fn sign_raw_bytes(
+        &self,
+        expected_key_version: LedgerSignatureKeyVersion,
+        bytes: &[u8],
+    ) -> Result<LedgerSignature, LedgerError> {
+        if self.key_version != expected_key_version {
+            return Err(LedgerError::SignatureKeyVersionMismatch {
+                expected: expected_key_version.get(),
+                actual: self.key_version.get(),
+            });
+        }
+
+        let signature: Signature = self.signing_key.sign(bytes);
+        LedgerSignature::from_bytes(&signature.to_bytes())
+    }
 }
 
 impl fmt::Debug for LedgerSigningKey {

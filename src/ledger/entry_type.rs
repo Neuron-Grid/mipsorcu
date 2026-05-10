@@ -15,6 +15,7 @@ pub enum LedgerEntryType {
     LedgerVerified,
     LedgerVerificationFailed,
     AuditFallbackResent,
+    MonthlyDigest,
 }
 
 impl LedgerEntryType {
@@ -33,6 +34,7 @@ impl LedgerEntryType {
             "ledger_verified" => Ok(Self::LedgerVerified),
             "ledger_verification_failed" => Ok(Self::LedgerVerificationFailed),
             "audit_fallback_resent" => Ok(Self::AuditFallbackResent),
+            "monthly_digest" => Ok(Self::MonthlyDigest),
             _ => Err(LedgerError::UnknownEntryType {
                 value: value.to_owned(),
             }),
@@ -54,6 +56,7 @@ impl LedgerEntryType {
             Self::LedgerVerified => "ledger_verified",
             Self::LedgerVerificationFailed => "ledger_verification_failed",
             Self::AuditFallbackResent => "audit_fallback_resent",
+            Self::MonthlyDigest => "monthly_digest",
         }
     }
 
@@ -103,6 +106,14 @@ impl LedgerEntryType {
                 "start_sequence_no",
             ],
             Self::AuditFallbackResent => &["duration_ms", "failed_count", "resent_count"],
+            // ADR 0037: monthly_digest payload keys（アルファベット順）
+            Self::MonthlyDigest => &[
+                "digest_hash",
+                "end_sequence_no",
+                "entry_count",
+                "start_sequence_no",
+                "target_year_month",
+            ],
         }
     }
 }

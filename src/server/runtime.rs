@@ -11,7 +11,7 @@ use crate::server::supabase::{
     SupabaseAuditAppender, SupabaseClient, classify_register_public_key_error,
 };
 use crate::server::{
-    auditor, background, config, integrity_check, key_rotation, restore_test, router,
+    auditor, background, config, digest, integrity_check, key_rotation, restore_test, router,
 };
 
 pub use crate::server::background::{
@@ -57,6 +57,18 @@ pub async fn run_entrypoint() {
             });
 
             if let Err(error) = auditor::run_cli(config, command_args).await {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        Some((command, command_args)) if command == "digest" => {
+            init_tracing();
+            let config = config::load_config().unwrap_or_else(|error| {
+                tracing::error!(error = %error, "configuration loading failed");
+                std::process::exit(1);
+            });
+
+            if let Err(error) = digest::run_cli(config, command_args).await {
                 eprintln!("{error}");
                 std::process::exit(2);
             }
@@ -234,6 +246,7 @@ fn usage() -> String {
         key_rotation::usage(),
         integrity_check::usage(),
         auditor::usage(),
+        digest::usage(),
     ]
     .join("\n")
 }

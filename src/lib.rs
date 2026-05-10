@@ -38,15 +38,17 @@ pub use error::{
     JwtVerificationError, KeyringError, SecretDecryptError, SecretWriteError,
 };
 pub use ledger::{
-    FORBIDDEN_LEDGER_PAYLOAD_KEYS, LEDGER_CANONICAL_SCHEMA_V1, LEDGER_CANONICALIZATION_VERSION_V1,
+    DIGEST_GENERATED_BY, DIGEST_SCHEMA_VERSION_V1, FORBIDDEN_LEDGER_PAYLOAD_KEYS,
+    LEDGER_CANONICAL_SCHEMA_V1, LEDGER_CANONICALIZATION_VERSION_V1,
     LEDGER_ED25519_PUBLIC_KEY_LENGTH, LEDGER_ED25519_SECRET_KEY_LENGTH,
     LEDGER_HASH_ALGORITHM_SHA256, LEDGER_HASH_LENGTH, LEDGER_PAYLOAD_MAX_CANONICAL_BYTES,
-    LEDGER_SIGNATURE_ALGORITHM_ED25519, LEDGER_SIGNATURE_LENGTH, LedgerCanonicalPayload,
-    LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType,
-    LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo, LedgerSignature,
-    LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
-    LedgerVerificationKey, LedgerVerifyingKey, SignedLedgerEntry, SignedLedgerEntryParts,
-    verify_ledger_chain,
+    LEDGER_SIGNATURE_ALGORITHM_ED25519, LEDGER_SIGNATURE_LENGTH, DigestCanonicalBytes, DigestHash,
+    LedgerCanonicalPayload, LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts,
+    LedgerEntryId, LedgerEntryType, LedgerError, LedgerHash, LedgerPayload, LedgerResult,
+    LedgerSequenceNo, LedgerSignature, LedgerSignatureKeyVersion, LedgerSigningKey,
+    LedgerTargetSecretVersionId, LedgerVerificationKey, LedgerVerifyingKey,
+    MonthlyDigestPeriod, SignedLedgerEntry, SignedLedgerEntryParts, SignedMonthlyDigest,
+    build_monthly_digest_canonical_form, verify_ledger_chain,
 };
 pub use read::{
     DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts,

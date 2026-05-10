@@ -84,6 +84,7 @@ pub enum LedgerError {
     },
     SerializationFailed(String),
     RandomnessUnavailable,
+    InvalidMonthlyDigestPeriod,
 }
 
 impl fmt::Display for LedgerError {
@@ -204,6 +205,10 @@ impl fmt::Display for LedgerError {
                 )
             }
             Self::RandomnessUnavailable => write!(formatter, "ledger randomness unavailable"),
+            Self::InvalidMonthlyDigestPeriod => write!(
+                formatter,
+                "monthly digest period must be in YYYY-MM format with a valid month (01-12)"
+            ),
         }
     }
 }

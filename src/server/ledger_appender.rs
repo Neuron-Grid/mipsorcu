@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::audit::{AuditEventId, RequestId};
 use crate::ledger::{
     LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType,
-    LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo, LedgerSigningKey,
-    LedgerTargetSecretVersionId, SignedLedgerEntry,
+    LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo, LedgerSignature,
+    LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId, SignedLedgerEntry,
 };
 use crate::server::supabase::{SupabaseClient, SupabaseRpcError, classify_append_ledger_error};
 use crate::types::supabase::{AppendLedgerEntryOutcome, LedgerAppendRpcFailure};
@@ -60,6 +60,23 @@ impl LedgerAppender {
             signing_key,
             config,
         }
+    }
+
+    /// 現在の署名鍵バージョンを返す。
+    pub fn signing_key_version(&self) -> LedgerSignatureKeyVersion {
+        self.signing_key.key_version()
+    }
+
+    /// digest canonical bytes（任意の &[u8]）に対して Ed25519 署名を生成する。
+    ///
+    /// ADR 0037 §5 に従い、Phase 1 の `LedgerSigningKey` を再利用する。
+    /// ledger entry canonical payload への署名とは別の操作。
+    pub fn sign_digest_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> Result<LedgerSignature, LedgerError> {
+        self.signing_key
+            .sign_raw_bytes(self.signing_key.key_version(), bytes)
     }
 
     pub async fn append(

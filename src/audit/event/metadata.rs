@@ -285,6 +285,14 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            // Ledger Phase 2 §7.3: 月次 digest 生成失敗時の監査記録。
+            // error_code は failure result 時のみ記録する。
+            AuditAction::MonthlyDigestGenerate => {
+                ["error_code", "target_year_month", SOURCE_EVENT_AT_KEY]
+                    .iter()
+                    .cloned()
+                    .collect()
+            }
         };
 
         for key in object.keys() {
@@ -333,6 +341,9 @@ fn validate_required_metadata_keys(
         AuditAction::KeyRotationComplete => {
             vec!["old_key_version", "new_key_version", "remaining_count"]
         }
+        // monthly_digest_generate は failure 時のみ記録されるが、
+        // error_code は必須ではなく、source_event_at のみが必須。
+        AuditAction::MonthlyDigestGenerate => Vec::new(),
     };
 
     if require_source_event_at {
