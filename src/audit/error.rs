@@ -14,6 +14,8 @@ pub enum AuditEventError {
     MetadataMustBeObject,
     ForbiddenMetadataKey { key: String },
     UnknownMetadataKey { key: String },
+    MissingMetadataKey { key: &'static str },
+    InvalidMetadataValue { key: &'static str },
     ViolationSummaryMustBeObject,
     InvalidTrigger { value: String },
     InvalidSourceEventAt,
@@ -60,6 +62,15 @@ impl fmt::Display for AuditEventError {
                 write!(
                     formatter,
                     "audit metadata contains unknown key for action: {key}"
+                )
+            }
+            Self::MissingMetadataKey { key } => {
+                write!(formatter, "audit metadata is missing required key: {key}")
+            }
+            Self::InvalidMetadataValue { key } => {
+                write!(
+                    formatter,
+                    "audit metadata contains invalid value for key: {key}"
                 )
             }
             Self::ViolationSummaryMustBeObject => {

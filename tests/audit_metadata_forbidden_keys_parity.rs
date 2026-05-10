@@ -91,12 +91,17 @@ fn rust_allowlist_rejects_unknown_key() {
 }
 
 #[test]
-fn rust_allowlist_accepts_decrypt_success_empty() {
+fn rust_allowlist_rejects_decrypt_success_missing_source_event_at() {
     let metadata = AuditMetadata::empty();
     let result = metadata.validate_allowlist_for_action(AuditAction::Decrypt, AuditResult::Success);
     assert!(
-        result.is_ok(),
-        "empty metadata should pass decrypt success allowlist: {result:?}"
+        matches!(
+            result,
+            Err(mipsorcu::AuditEventError::MissingMetadataKey {
+                key: "source_event_at"
+            })
+        ),
+        "empty metadata should fail because source_event_at is required: {result:?}"
     );
 }
 
@@ -129,6 +134,21 @@ fn rust_allowlist_rejects_integrity_check_unknown_summary_key() {
         "violation_count": 0,
         "violation_summary": {
             "current_version_invalid": 0,
+            "version_invalid": 0,
+            "retention_exceeded": 0,
+            "ciphertext_empty": 0,
+            "encrypted_data_key_empty": 0,
+            "nonce_length_invalid": 0,
+            "algorithm_invalid": 0,
+            "nonce_duplicate": 0,
+            "aad_keys_invalid": 0,
+            "aad_row_mismatch": 0,
+            "created_at_mismatch": 0,
+            "audit_action_invalid": 0,
+            "audit_result_invalid": 0,
+            "audit_metadata_not_object": 0,
+            "audit_metadata_forbidden_key": 0,
+            "audit_source_event_at_invalid": 0,
             "unknown_summary_key": 1
         },
         "trigger": "startup",
@@ -186,7 +206,22 @@ fn rust_parity_integrity_check_success_valid() {
         "duration_ms": 0,
         "violation_count": 0,
         "violation_summary": {
-            "current_version_invalid": 0
+            "current_version_invalid": 0,
+            "version_invalid": 0,
+            "retention_exceeded": 0,
+            "ciphertext_empty": 0,
+            "encrypted_data_key_empty": 0,
+            "nonce_length_invalid": 0,
+            "algorithm_invalid": 0,
+            "nonce_duplicate": 0,
+            "aad_keys_invalid": 0,
+            "aad_row_mismatch": 0,
+            "created_at_mismatch": 0,
+            "audit_action_invalid": 0,
+            "audit_result_invalid": 0,
+            "audit_metadata_not_object": 0,
+            "audit_metadata_forbidden_key": 0,
+            "audit_source_event_at_invalid": 0
         },
         "trigger": "startup",
         "source_event_at": "2026-04-08T12:00:00Z"
@@ -467,12 +502,7 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
     // AuditMetadata::validate_allowlist_for_action と同一ロジック
     let mut keys = match action {
         AuditAction::EncryptCreate | AuditAction::EncryptRotate | AuditAction::VersionPurge => {
-            vec![
-                "version",
-                "secret_version_id",
-                "attempted_secret_id",
-                "source_event_at",
-            ]
+            vec!["version", "secret_version_id", "source_event_at"]
         }
         AuditAction::Decrypt => {
             if result == AuditResult::Failure {

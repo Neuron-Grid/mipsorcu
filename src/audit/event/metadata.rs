@@ -11,7 +11,7 @@ pub use builders::{
     KeyRotationStartMetadata, RestoreTestMetadata, VersionPurgeMetadata,
 };
 
-use crate::types::{SecretId, SourceEventAt};
+use crate::types::{SecretId, SecretVersionId, SourceEventAt};
 
 use super::super::error::AuditEventError;
 use super::action::{AuditAction, AuditResult};
@@ -194,15 +194,10 @@ impl AuditMetadata {
 
         let allowed_keys: HashSet<&str> = match action {
             AuditAction::EncryptCreate | AuditAction::EncryptRotate | AuditAction::VersionPurge => {
-                [
-                    "version",
-                    "secret_version_id",
-                    "attempted_secret_id",
-                    SOURCE_EVENT_AT_KEY,
-                ]
-                .iter()
-                .cloned()
-                .collect()
+                ["version", "secret_version_id", SOURCE_EVENT_AT_KEY]
+                    .iter()
+                    .cloned()
+                    .collect()
             }
             AuditAction::Decrypt => {
                 if result == AuditResult::Failure {
@@ -298,8 +293,219 @@ impl AuditMetadata {
             }
         }
 
+        validate_required_metadata_keys(action, object, true)?;
+        validate_metadata_values(action, result, object)?;
+
         Ok(())
     }
+}
+
+fn validate_required_metadata_keys(
+    action: AuditAction,
+    object: &Map<String, Value>,
+    require_source_event_at: bool,
+) -> Result<(), AuditEventError> {
+    let mut required: Vec<&'static str> = match action {
+        AuditAction::EncryptCreate | AuditAction::EncryptRotate | AuditAction::VersionPurge => {
+            vec!["version", "secret_version_id"]
+        }
+        AuditAction::Decrypt => Vec::new(),
+        AuditAction::IntegrityCheck => vec![
+            "check_name",
+            "checked_secret_count",
+            "checked_secret_version_count",
+            "checked_audit_event_count",
+            "duration_ms",
+            "violation_count",
+            "violation_summary",
+            TRIGGER_KEY,
+        ],
+        AuditAction::RestoreTest => vec!["phase", "sample_count", TRIGGER_KEY, "duration_ms"],
+        AuditAction::AuthFailure => vec!["error_code"],
+        AuditAction::KeyRotationStart => vec!["old_key_version", "new_key_version"],
+        AuditAction::KeyRotationReencrypt => vec![
+            "old_key_version",
+            "new_key_version",
+            "batch_size",
+            "processed_count",
+            "remaining_count",
+        ],
+        AuditAction::KeyRotationComplete => {
+            vec!["old_key_version", "new_key_version", "remaining_count"]
+        }
+    };
+
+    if require_source_event_at {
+        required.push(SOURCE_EVENT_AT_KEY);
+    }
+
+    for key in required {
+        if !object.contains_key(key) {
+            return Err(AuditEventError::MissingMetadataKey { key });
+        }
+    }
+
+    if action == AuditAction::IntegrityCheck {
+        let summary = object
+            .get("violation_summary")
+            .and_then(Value::as_object)
+            .ok_or(AuditEventError::ViolationSummaryMustBeObject)?;
+        for key in INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST {
+            if !summary.contains_key(*key) {
+                return Err(AuditEventError::MissingMetadataKey { key });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_metadata_values(
+    action: AuditAction,
+    result: AuditResult,
+    object: &Map<String, Value>,
+) -> Result<(), AuditEventError> {
+    for key in [
+        "checked_secret_count",
+        "checked_secret_version_count",
+        "checked_audit_event_count",
+        "duration_ms",
+        "violation_count",
+        "sample_count",
+        "processed_count",
+        "remaining_count",
+    ] {
+        if let Some(value) = object.get(key) {
+            validate_u64_value(key, value)?;
+        }
+    }
+
+    for key in [
+        "version",
+        "old_key_version",
+        "new_key_version",
+        "batch_size",
+    ] {
+        if let Some(value) = object.get(key) {
+            validate_positive_u64_value(key, value)?;
+        }
+    }
+
+    if let Some(value) = object.get("failed_version") {
+        if !value.is_null() {
+            validate_positive_u64_value("failed_version", value)?;
+        }
+        if result == AuditResult::Success {
+            return Err(AuditEventError::InvalidMetadataValue {
+                key: "failed_version",
+            });
+        }
+    }
+
+    for key in ["secret_version_id", "attempted_secret_id"] {
+        if let Some(value) = object.get(key) {
+            let text = value
+                .as_str()
+                .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+            SecretVersionId::parse(text)
+                .map_err(|_| AuditEventError::InvalidMetadataValue { key })?;
+        }
+    }
+
+    if object.contains_key("attempted_secret_id")
+        && !(action == AuditAction::Decrypt && result == AuditResult::Failure)
+    {
+        return Err(AuditEventError::InvalidMetadataValue {
+            key: "attempted_secret_id",
+        });
+    }
+
+    if let Some(value) = object.get("error_code") {
+        if result != AuditResult::Failure {
+            return Err(AuditEventError::InvalidMetadataValue { key: "error_code" });
+        }
+        validate_non_blank_short_string("error_code", value, 64)?;
+    }
+
+    if let Some(value) = object.get("check_name") {
+        validate_exact_string("check_name", value, "mvp_integrity_check")?;
+    }
+
+    if let Some(value) = object.get("phase") {
+        validate_exact_string("phase", value, "verify")?;
+    }
+
+    if let Some(value) = object.get("reason") {
+        validate_exact_string("reason", value, "no_current_secret_versions")?;
+    }
+
+    if action == AuditAction::IntegrityCheck
+        && let Some(summary_value) = object.get("violation_summary")
+    {
+        let summary = summary_value
+            .as_object()
+            .ok_or(AuditEventError::ViolationSummaryMustBeObject)?;
+        for (key, value) in summary {
+            validate_u64_value(
+                INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST
+                    .iter()
+                    .copied()
+                    .find(|allowed| *allowed == key.as_str())
+                    .unwrap_or("violation_summary"),
+                value,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_u64_value(key: &'static str, value: &Value) -> Result<(), AuditEventError> {
+    value
+        .as_u64()
+        .map(|_| ())
+        .ok_or(AuditEventError::InvalidMetadataValue { key })
+}
+
+fn validate_positive_u64_value(key: &'static str, value: &Value) -> Result<(), AuditEventError> {
+    let parsed = value
+        .as_u64()
+        .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+    if parsed == 0 {
+        return Err(AuditEventError::InvalidMetadataValue { key });
+    }
+
+    Ok(())
+}
+
+fn validate_non_blank_short_string(
+    key: &'static str,
+    value: &Value,
+    max_len: usize,
+) -> Result<(), AuditEventError> {
+    let text = value
+        .as_str()
+        .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+    if text.trim().is_empty() || text.len() > max_len {
+        return Err(AuditEventError::InvalidMetadataValue { key });
+    }
+
+    Ok(())
+}
+
+fn validate_exact_string(
+    key: &'static str,
+    value: &Value,
+    expected: &'static str,
+) -> Result<(), AuditEventError> {
+    let text = value
+        .as_str()
+        .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+    if text != expected {
+        return Err(AuditEventError::InvalidMetadataValue { key });
+    }
+
+    Ok(())
 }
 
 impl fmt::Debug for AuditMetadata {

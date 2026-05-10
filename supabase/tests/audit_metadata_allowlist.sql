@@ -150,8 +150,8 @@ select is(
         1,
         '{"version":1,"secret_version_id":"550e8400-e29b-41d4-a716-446655440000","attempted_secret_id":"550e8400-e29b-41d4-a716-446655440000","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
     ),
-    'ok',
-    'encrypt_create failure with attempted_secret_id is allowed'
+    'invalid_rpc_input',
+    'encrypt_create failure rejects attempted_secret_id reserved for decrypt failure'
 );
 
 select is(
@@ -236,8 +236,8 @@ select is(
         1,
         '{"version":1,"secret_version_id":"550e8400-e29b-41d4-a716-446655440000","attempted_secret_id":"550e8400-e29b-41d4-a716-446655440000","source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
     ),
-    'ok',
-    'version_purge failure with attempted_secret_id is allowed'
+    'invalid_rpc_input',
+    'version_purge failure rejects attempted_secret_id reserved for decrypt failure'
 );
 
 select is(
@@ -376,7 +376,22 @@ select is(
             'duration_ms', 0,
             'violation_count', 1,
             'violation_summary', jsonb_build_object(
-                'current_version_invalid', 1
+                'current_version_invalid', 1,
+                'version_invalid', 0,
+                'retention_exceeded', 0,
+                'ciphertext_empty', 0,
+                'encrypted_data_key_empty', 0,
+                'nonce_length_invalid', 0,
+                'algorithm_invalid', 0,
+                'nonce_duplicate', 0,
+                'aad_keys_invalid', 0,
+                'aad_row_mismatch', 0,
+                'created_at_mismatch', 0,
+                'audit_action_invalid', 0,
+                'audit_result_invalid', 0,
+                'audit_metadata_not_object', 0,
+                'audit_metadata_forbidden_key', 0,
+                'audit_source_event_at_invalid', 0
             ),
             'trigger', 'background',
             'error_code', 'rpc_failed',
@@ -873,9 +888,91 @@ select is(
 );
 
 select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000136',
+        '00000000-0000-4000-8000-000000000136',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'encrypt_create',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        1,
+        '{"version":1,"source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'encrypt_create rejects missing required secret_version_id'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000137',
+        '00000000-0000-4000-8000-000000000137',
+        null,
+        null,
+        'auth_failure',
+        null,
+        'failure',
+        null,
+        '{"source_event_at":"2026-04-08T12:00:00Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'auth_failure rejects missing required error_code'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000138',
+        '00000000-0000-4000-8000-000000000138',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'restore_test',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'phase', 'verify',
+            'sample_count', 1,
+            'trigger', 'cli',
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'restore_test rejects missing required duration_ms'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000139',
+        '00000000-0000-4000-8000-000000000139',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'integrity_check',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'check_name', 'mvp_integrity_check',
+            'checked_secret_count', 0,
+            'checked_secret_version_count', 0,
+            'checked_audit_event_count', 0,
+            'duration_ms', 0,
+            'violation_count', 0,
+            'violation_summary', jsonb_build_object(
+                'current_version_invalid', 0,
+                'version_invalid', 0
+            ),
+            'trigger', 'startup',
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'integrity_check rejects missing required violation_summary keys'
+);
+
+select is(
     has_function_privilege(
         'anon',
-        'public.audit_metadata_has_invalid_value_for_action(text, jsonb)',
+        'public.audit_metadata_has_invalid_value_for_action(text, text, jsonb)',
         'EXECUTE'
     ),
     false,
@@ -885,11 +982,21 @@ select is(
 select is(
     has_function_privilege(
         'authenticated',
-        'public.audit_metadata_has_invalid_value_for_action(text, jsonb)',
+        'public.audit_metadata_has_invalid_value_for_action(text, text, jsonb)',
         'EXECUTE'
     ),
     false,
     'authenticated cannot execute audit metadata invalid value helper'
+);
+
+select is(
+    has_function_privilege(
+        'anon',
+        'public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean)',
+        'EXECUTE'
+    ),
+    false,
+    'anon cannot execute audit metadata schema violation helper'
 );
 
 

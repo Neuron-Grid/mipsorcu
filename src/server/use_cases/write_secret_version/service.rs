@@ -1,8 +1,6 @@
 use crate::audit::{AuditAction, RequestId};
 use crate::auth::{RawJwt, VerifiedJwtClaims};
-use crate::server::audit_reporter::{
-    FailureAuditContext, failure_audit_metadata_for_attempted_secret,
-};
+use crate::server::audit_reporter::FailureAuditContext;
 use crate::server::errors::ApiError;
 use crate::server::read_model::{self, FetchCurrentSecretVersionError};
 use crate::server::state::AppState;
@@ -61,19 +59,7 @@ pub(in crate::server) async fn create_secret(
                 return Err(error);
             }
         };
-    let attempted_secret_metadata = Some(failure_audit_metadata_for_attempted_secret(
-        prepared.secret_id(),
-    ));
-
-    submit_prepared_secret_version(
-        state,
-        request_id,
-        &failure,
-        prepared,
-        attempted_secret_metadata,
-        None,
-    )
-    .await
+    submit_prepared_secret_version(state, request_id, &failure, prepared, None).await
 }
 
 pub(in crate::server) async fn rotate_secret(
@@ -183,7 +169,6 @@ pub(in crate::server) async fn rotate_secret(
         request_id,
         &failure,
         prepared,
-        None,
         Some(retention_snapshot),
     )
     .await

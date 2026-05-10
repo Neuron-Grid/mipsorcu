@@ -1,3 +1,11 @@
+-- T04 audit metadata validation.
+-- 時刻源と責務:
+-- - audit_events.occurred_at は DB 側で発生時刻として now() を記録する既存責務を維持する。
+-- - metadata_json.source_event_at は producer である SBC がイベント生成時に一度だけ決定し、
+--   fallback / 再送 / sent マーカーでも同じ値を保持する。SQL 側は canonical UTC RFC3339（末尾 Z）
+--   であることを検証し、値を再生成しない。
+-- - secret_versions.created_at は SBC が決定した p_created_at を保存し、DB now() で置き換えない。
+
 create or replace function public.audit_metadata_allowlist_mode()
 returns text
 language sql
@@ -40,7 +48,6 @@ begin
             v_allowed_keys := array[
                 'version',
                 'secret_version_id',
-                'attempted_secret_id',
                 'source_event_at'
             ];
         when 'decrypt' then
@@ -158,12 +165,119 @@ $$;
 comment on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb) is
     'Returns true if metadata_json contains keys not in the allowlist for the given action and result. Enforces the action-specific schema from docs/audit_metadata_schema.md. Coexists with audit_metadata_has_forbidden_key as defense-in-depth.';
 
+create or replace function public.audit_metadata_has_missing_required_key_for_action(
+    p_action text,
+    p_result text,
+    p_metadata_json jsonb,
+    p_require_source_event_at boolean default true
+)
+returns boolean
+language plpgsql
+stable
+set search_path = public, pg_temp
+as $$
+declare
+    v_required_keys text[];
+    v_summary_required_keys text[];
+begin
+    if jsonb_typeof(p_metadata_json) <> 'object' then
+        return true;
+    end if;
+
+    case p_action
+        when 'encrypt_create', 'encrypt_rotate', 'version_purge' then
+            v_required_keys := array['version', 'secret_version_id'];
+        when 'decrypt' then
+            v_required_keys := array[]::text[];
+        when 'integrity_check' then
+            v_required_keys := array[
+                'check_name',
+                'checked_secret_count',
+                'checked_secret_version_count',
+                'checked_audit_event_count',
+                'duration_ms',
+                'violation_count',
+                'violation_summary',
+                'trigger'
+            ];
+            v_summary_required_keys := array[
+                'current_version_invalid',
+                'version_invalid',
+                'retention_exceeded',
+                'ciphertext_empty',
+                'encrypted_data_key_empty',
+                'nonce_length_invalid',
+                'algorithm_invalid',
+                'nonce_duplicate',
+                'aad_keys_invalid',
+                'aad_row_mismatch',
+                'created_at_mismatch',
+                'audit_action_invalid',
+                'audit_result_invalid',
+                'audit_metadata_not_object',
+                'audit_metadata_forbidden_key',
+                'audit_source_event_at_invalid'
+            ];
+        when 'restore_test' then
+            v_required_keys := array[
+                'phase',
+                'sample_count',
+                'trigger',
+                'duration_ms'
+            ];
+        when 'auth_failure' then
+            v_required_keys := array['error_code'];
+        when 'key_rotation_start' then
+            v_required_keys := array['old_key_version', 'new_key_version'];
+        when 'key_rotation_reencrypt' then
+            v_required_keys := array[
+                'old_key_version',
+                'new_key_version',
+                'batch_size',
+                'processed_count',
+                'remaining_count'
+            ];
+        when 'key_rotation_complete' then
+            v_required_keys := array[
+                'old_key_version',
+                'new_key_version',
+                'remaining_count'
+            ];
+        else
+            return true;
+    end case;
+
+    if p_require_source_event_at then
+        v_required_keys := v_required_keys || array['source_event_at'];
+    end if;
+
+    if not (p_metadata_json ?& v_required_keys) then
+        return true;
+    end if;
+
+    if p_action = 'integrity_check' then
+        if jsonb_typeof(p_metadata_json -> 'violation_summary') <> 'object' then
+            return true;
+        end if;
+        if not ((p_metadata_json -> 'violation_summary') ?& v_summary_required_keys) then
+            return true;
+        end if;
+    end if;
+
+    return false;
+end;
+$$;
+
+comment on function public.audit_metadata_has_missing_required_key_for_action(text, text, jsonb, boolean) is
+    'Returns true if metadata_json is missing action-specific required keys. The require_source_event_at flag distinguishes append-audit RPCs (producer time required) from write RPC internal success audit metadata (producer time optional unless ledger-linked).';
+
 -- ------------------------------------------------------------------------------
 -- 値型検証: count/duration 系, version/key_version 系, violation_summary values,
 -- trigger の enum 制約を検証する。
 -- ------------------------------------------------------------------------------
 create or replace function public.audit_metadata_has_invalid_value_for_action(
     p_action text,
+    p_result text,
     p_metadata_json jsonb
 )
 returns boolean
@@ -174,12 +288,13 @@ as $$
 declare
     v_key text;
     v_val jsonb;
+    v_text text;
 begin
     if jsonb_typeof(p_metadata_json) <> 'object' then
         return true;
     end if;
 
-    -- count 系: number かつ >= 0
+    -- count/duration 系: JSON integer かつ >= 0
     for v_key in select jsonb_object_keys(p_metadata_json)
     loop
         continue when not v_key = any(array[
@@ -189,7 +304,6 @@ begin
             'duration_ms',
             'violation_count',
             'sample_count',
-            'batch_size',
             'processed_count',
             'remaining_count'
         ]);
@@ -198,19 +312,20 @@ begin
         if jsonb_typeof(v_val) <> 'number' then
             return true;
         end if;
-        if (v_val::text)::numeric < 0 then
+        if v_val::text !~ '^(0|[1-9][0-9]*)$' then
             return true;
         end if;
     end loop;
 
-    -- version / key_version 系: number かつ > 0
+    -- version / key_version / batch_size 系: JSON integer かつ > 0
     for v_key in select jsonb_object_keys(p_metadata_json)
     loop
         continue when not v_key = any(array[
             'version',
             'old_key_version',
             'new_key_version',
-            'failed_version'
+            'failed_version',
+            'batch_size'
         ]);
 
         v_val := p_metadata_json -> v_key;
@@ -220,10 +335,77 @@ begin
         if jsonb_typeof(v_val) <> 'number' then
             return true;
         end if;
-        if (v_val::text)::numeric <= 0 then
+        if v_val::text !~ '^[1-9][0-9]*$' then
             return true;
         end if;
     end loop;
+
+    -- UUID v4 形式（ハイフン付き小文字）
+    for v_key in select jsonb_object_keys(p_metadata_json)
+    loop
+        continue when not v_key = any(array[
+            'secret_version_id',
+            'attempted_secret_id'
+        ]);
+
+        v_val := p_metadata_json -> v_key;
+        if jsonb_typeof(v_val) <> 'string' then
+            return true;
+        end if;
+        v_text := p_metadata_json ->> v_key;
+        if v_text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
+            return true;
+        end if;
+    end loop;
+
+    -- attempted_secret_id は decrypt failure metadata 専用の予約キー。
+    if p_metadata_json ? 'attempted_secret_id'
+        and not (p_action = 'decrypt' and p_result = 'failure')
+    then
+        return true;
+    end if;
+
+    -- error_code は failure metadata 専用。値は非空・最大64文字。
+    if p_metadata_json ? 'error_code' then
+        if p_result <> 'failure' then
+            return true;
+        end if;
+        if jsonb_typeof(p_metadata_json -> 'error_code') <> 'string' then
+            return true;
+        end if;
+        v_text := p_metadata_json ->> 'error_code';
+        if btrim(v_text) = '' or length(v_text) > 64 then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'check_name' then
+        if jsonb_typeof(p_metadata_json -> 'check_name') <> 'string'
+            or p_metadata_json ->> 'check_name' <> 'mvp_integrity_check'
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'phase' then
+        if jsonb_typeof(p_metadata_json -> 'phase') <> 'string'
+            or p_metadata_json ->> 'phase' <> 'verify'
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'reason' then
+        if jsonb_typeof(p_metadata_json -> 'reason') <> 'string'
+            or p_metadata_json ->> 'reason' <> 'no_current_secret_versions'
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_result = 'success' and p_metadata_json ? 'failed_version' then
+        return true;
+    end if;
 
     -- trigger: enum validation
     if p_metadata_json ? 'trigger' then
@@ -235,7 +417,7 @@ begin
         end if;
     end if;
 
-    -- violation_summary values: number かつ >= 0
+    -- violation_summary values: JSON integer かつ >= 0
     if p_action = 'integrity_check' and p_metadata_json ? 'violation_summary' then
         if jsonb_typeof(p_metadata_json -> 'violation_summary') <> 'object' then
             return true;
@@ -246,7 +428,7 @@ begin
             if jsonb_typeof(v_val) <> 'number' then
                 return true;
             end if;
-            if (v_val::text)::numeric < 0 then
+            if v_val::text !~ '^(0|[1-9][0-9]*)$' then
                 return true;
             end if;
         end loop;
@@ -256,8 +438,32 @@ begin
 end;
 $$;
 
-comment on function public.audit_metadata_has_invalid_value_for_action(text, jsonb) is
-    'Returns true if metadata_json contains values with invalid types or out-of-range values per action schema. Checks count/duration non-negative, version/key_version positive, trigger enum, and violation_summary value types.';
+comment on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) is
+    'Returns true if metadata_json contains values with invalid types, formats, or out-of-range values per action schema. Checks integers, UUID v4 strings, fixed values, trigger enum, error_code placement, attempted_secret_id reservation, and violation_summary value types.';
+
+create or replace function public.audit_metadata_has_schema_violation_for_action(
+    p_action text,
+    p_result text,
+    p_metadata_json jsonb,
+    p_require_source_event_at boolean default true
+)
+returns boolean
+language sql
+stable
+set search_path = public, pg_temp
+as $$
+    select public.audit_metadata_has_unknown_key_for_action(p_action, p_result, p_metadata_json)
+        or public.audit_metadata_has_missing_required_key_for_action(
+            p_action,
+            p_result,
+            p_metadata_json,
+            p_require_source_event_at
+        )
+        or public.audit_metadata_has_invalid_value_for_action(p_action, p_result, p_metadata_json);
+$$;
+
+comment on function public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean) is
+    'Action-specific audit metadata schema validation wrapper. In warning mode callers log violations only; in strict mode callers reject them as invalid_rpc_input.';
 
 -- ------------------------------------------------------------------------------
 -- RPC: rpc_append_audit_event
@@ -346,19 +552,18 @@ begin
 
     if public.audit_metadata_has_forbidden_key(p_metadata_json)
         or not public.audit_metadata_source_event_at_is_valid(p_metadata_json)
-        or public.audit_metadata_has_invalid_value_for_action(p_action, p_metadata_json)
     then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
-    -- allowlist validation (段階的移行対応)
+    -- allowlist / schema validation (段階的移行対応)
     v_allowlist_mode := public.audit_metadata_allowlist_mode();
 
-    if public.audit_metadata_has_unknown_key_for_action(p_action, p_result, p_metadata_json) then
+    if public.audit_metadata_has_schema_violation_for_action(p_action, p_result, p_metadata_json, true) then
         if v_allowlist_mode = 'strict' then
             raise exception 'invalid_rpc_input' using errcode = '22023';
         else
-            raise notice 'audit_metadata_allowlist_warning: action=%, result=%, unknown_keys_present',
+            raise notice 'audit_metadata_schema_warning: action=%, result=%, schema_violation_present',
                 p_action, p_result;
         end if;
     end if;
@@ -739,19 +944,19 @@ begin
     end if;
 
     if public.audit_metadata_has_forbidden_key(v_audit_metadata)
-        or public.audit_metadata_has_invalid_value_for_action(p_action, v_audit_metadata)
+        or not public.audit_metadata_source_event_at_is_valid(v_audit_metadata)
     then
         raise exception 'invalid_audit_metadata' using errcode = '22023';
     end if;
 
-    -- allowlist validation for internal audit metadata (段階的移行対応)
+    -- allowlist / schema validation for internal audit metadata (段階的移行対応)
     v_allowlist_mode := public.audit_metadata_allowlist_mode();
 
-    if public.audit_metadata_has_unknown_key_for_action(p_action, 'success', v_audit_metadata) then
+    if public.audit_metadata_has_schema_violation_for_action(p_action, 'success', v_audit_metadata, false) then
         if v_allowlist_mode = 'strict' then
             raise exception 'invalid_audit_metadata' using errcode = '22023';
         else
-            raise notice 'audit_metadata_allowlist_warning: action=%, result=success, unknown_keys_present',
+            raise notice 'audit_metadata_schema_warning: action=%, result=success, schema_violation_present',
                 p_action;
         end if;
     end if;
@@ -844,17 +1049,17 @@ begin
         end if;
 
         if public.audit_metadata_has_forbidden_key(v_audit_metadata)
-            or public.audit_metadata_has_invalid_value_for_action('version_purge', v_audit_metadata)
+            or not public.audit_metadata_source_event_at_is_valid(v_audit_metadata)
         then
             raise exception 'invalid_audit_metadata' using errcode = '22023';
         end if;
 
-        -- allowlist validation for purge audit metadata (段階的移行対応)
-        if public.audit_metadata_has_unknown_key_for_action('version_purge', 'success', v_audit_metadata) then
+        -- allowlist / schema validation for purge audit metadata (段階的移行対応)
+        if public.audit_metadata_has_schema_violation_for_action('version_purge', 'success', v_audit_metadata, false) then
             if v_allowlist_mode = 'strict' then
                 raise exception 'invalid_audit_metadata' using errcode = '22023';
             else
-                raise notice 'audit_metadata_allowlist_warning: action=version_purge, result=success, unknown_keys_present';
+                raise notice 'audit_metadata_schema_warning: action=version_purge, result=success, schema_violation_present';
             end if;
         end if;
 
@@ -922,12 +1127,20 @@ revoke execute on function public.audit_metadata_allowlist_mode() from public;
 revoke execute on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb) from public, anon, authenticated;
 revoke execute on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb) from public;
 
-revoke execute on function public.audit_metadata_has_invalid_value_for_action(text, jsonb) from public, anon, authenticated;
-revoke execute on function public.audit_metadata_has_invalid_value_for_action(text, jsonb) from public;
+revoke execute on function public.audit_metadata_has_missing_required_key_for_action(text, text, jsonb, boolean) from public, anon, authenticated;
+revoke execute on function public.audit_metadata_has_missing_required_key_for_action(text, text, jsonb, boolean) from public;
+
+revoke execute on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) from public, anon, authenticated;
+revoke execute on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) from public;
+
+revoke execute on function public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean) from public, anon, authenticated;
+revoke execute on function public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean) from public;
 
 grant execute on function public.audit_metadata_allowlist_mode() to service_role;
 grant execute on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb) to service_role;
-grant execute on function public.audit_metadata_has_invalid_value_for_action(text, jsonb) to service_role;
+grant execute on function public.audit_metadata_has_missing_required_key_for_action(text, text, jsonb, boolean) to service_role;
+grant execute on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) to service_role;
+grant execute on function public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean) to service_role;
 
 revoke execute on function public.rpc_append_audit_event(
     uuid, uuid, uuid, text, text, uuid, text, integer, jsonb

@@ -242,7 +242,10 @@ mod tests {
 
     #[test]
     fn build_with_current_source_event_at_auth_failure_preserves_null_fields() {
-        let metadata = AuditMetadata::empty();
+        let metadata = AuditMetadata::new(serde_json::json!({
+            "error_code": "authorization_header_missing"
+        }))
+        .unwrap();
         let event = AuditEvent::build_with_current_source_event_at(
             nil_request_id(),
             None,
@@ -274,9 +277,10 @@ mod tests {
             target_secret_id: Some(valid_secret()),
             result: AuditResult::Success,
             key_version: Some(valid_key_version()),
-            metadata_json: AuditMetadata::empty()
-                .with_current_source_event_at()
-                .unwrap(),
+            metadata_json: AuditMetadata::new(serde_json::json!({
+                "source_event_at": "2026-04-08T12:00:00Z"
+            }))
+            .unwrap(),
         };
 
         let from_parts = AuditEvent::new(parts.clone());
@@ -288,7 +292,10 @@ mod tests {
             parts.target_secret_id.clone(),
             parts.result,
             parts.key_version,
-            AuditMetadata::empty(),
+            AuditMetadata::new(serde_json::json!({
+                "source_event_at": "2026-04-08T12:00:00Z"
+            }))
+            .unwrap(),
         );
 
         assert!(

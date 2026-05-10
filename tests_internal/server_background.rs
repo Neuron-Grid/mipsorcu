@@ -37,6 +37,7 @@ type TestServerHandle = (
 );
 
 async fn recv_captured_request(
+    label: &str,
     receiver: &mpsc::Receiver<CapturedRequest>,
 ) -> Result<CapturedRequest, Box<dyn std::error::Error>> {
     for _ in 0..10_000 {
@@ -55,7 +56,7 @@ async fn recv_captured_request(
 
     Err(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
-        "timed out waiting for captured request",
+        format!("timed out waiting for captured request: {label}"),
     )
     .into())
 }
@@ -377,9 +378,9 @@ async fn background_restore_and_integrity_startup_offsets_are_phased()
 
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
-    let restore_request = recv_captured_request(&receiver).await?;
-    let restore_chain_request = recv_captured_request(&receiver).await?;
-    let restore_audit_request = recv_captured_request(&receiver).await?;
+    let restore_request = recv_captured_request("restore RPC", &receiver).await?;
+    let restore_chain_request = recv_captured_request("restore ledger chain", &receiver).await?;
+    let restore_audit_request = recv_captured_request("restore audit ledger", &receiver).await?;
     assert_eq!(restore_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
     assert!(
         restore_chain_request
@@ -416,9 +417,11 @@ async fn background_restore_and_integrity_startup_offsets_are_phased()
 
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
-    let integrity_request = recv_captured_request(&receiver).await?;
-    let integrity_chain_request = recv_captured_request(&receiver).await?;
-    let integrity_audit_request = recv_captured_request(&receiver).await?;
+    let integrity_request = recv_captured_request("integrity RPC", &receiver).await?;
+    let integrity_chain_request =
+        recv_captured_request("integrity ledger chain", &receiver).await?;
+    let integrity_audit_request =
+        recv_captured_request("integrity audit ledger", &receiver).await?;
     assert_eq!(integrity_request.path, "/rest/v1/rpc/rpc_integrity_check");
     assert!(
         integrity_chain_request

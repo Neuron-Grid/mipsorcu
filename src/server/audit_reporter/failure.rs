@@ -1,21 +1,31 @@
 use crate::audit::{
     AuditAction, AuditEvent, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditResult,
-    DecryptMetadata, RequestId,
+    EncryptCreateMetadata, EncryptRotateMetadata, RequestId,
 };
 use crate::server::state::AppState;
-use crate::{OwnerUserId, SecretId};
+use crate::{OwnerUserId, PreparedSecretVersion, SecretId};
 
-pub fn failure_audit_metadata_for_attempted_secret(secret_id: &SecretId) -> AuditMetadata {
-    DecryptMetadata::failure()
-        .with_attempted_secret_id(secret_id.clone())
-        .build()
-        .unwrap_or_else(|error| {
-            tracing::error!(
-                error = %error,
-                "failed to construct attempted secret audit metadata"
-            );
-            AuditMetadata::empty()
-        })
+pub fn write_failure_audit_metadata_for_prepared_secret(
+    prepared: &PreparedSecretVersion,
+) -> AuditMetadata {
+    let result = match prepared.write_action() {
+        crate::SecretWriteAction::EncryptCreate => {
+            EncryptCreateMetadata::new(prepared.version(), prepared.secret_version_id().clone())
+                .build()
+        }
+        crate::SecretWriteAction::EncryptRotate => {
+            EncryptRotateMetadata::new(prepared.version(), prepared.secret_version_id().clone())
+                .build()
+        }
+    };
+
+    result.unwrap_or_else(|error| {
+        tracing::error!(
+            error = %error,
+            "failed to construct write failure audit metadata"
+        );
+        AuditMetadata::empty()
+    })
 }
 
 pub(super) async fn record_failure_audit_with_metadata(

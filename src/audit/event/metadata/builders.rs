@@ -330,7 +330,7 @@ pub struct RestoreTestMetadata {
     phase: &'static str,
     sample_count: u64,
     trigger: AuditTrigger,
-    duration_ms: Option<u64>,
+    duration_ms: u64,
     error_code: Option<&'static str>,
     failed_version: Option<SecretVersion>,
     reason: Option<&'static str>,
@@ -343,7 +343,7 @@ impl RestoreTestMetadata {
             phase: "verify",
             sample_count,
             trigger,
-            duration_ms: None,
+            duration_ms: 0,
             error_code: None,
             failed_version: None,
             reason: None,
@@ -352,12 +352,14 @@ impl RestoreTestMetadata {
     }
 
     pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
-        self.duration_ms = Some(duration_ms);
+        self.duration_ms = duration_ms;
         self
     }
 
     pub fn with_duration_ms_opt(mut self, duration_ms: Option<u64>) -> Self {
-        self.duration_ms = duration_ms;
+        if let Some(duration_ms) = duration_ms {
+            self.duration_ms = duration_ms;
+        }
         self
     }
 
@@ -407,9 +409,10 @@ impl RestoreTestMetadata {
             "trigger".to_owned(),
             Value::String(self.trigger.as_str().to_owned()),
         );
-        if let Some(duration_ms) = self.duration_ms {
-            object.insert("duration_ms".to_owned(), Value::Number(duration_ms.into()));
-        }
+        object.insert(
+            "duration_ms".to_owned(),
+            Value::Number(self.duration_ms.into()),
+        );
         if let Some(error_code) = self.error_code {
             object.insert(
                 "error_code".to_owned(),

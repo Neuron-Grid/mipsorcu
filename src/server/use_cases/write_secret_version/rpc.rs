@@ -1,5 +1,7 @@
-use crate::audit::{AuditMetadata, RequestId};
-use crate::server::audit_reporter::FailureAuditContext;
+use crate::audit::RequestId;
+use crate::server::audit_reporter::{
+    FailureAuditContext, write_failure_audit_metadata_for_prepared_secret,
+};
 use crate::server::errors::ApiError;
 use crate::server::state::AppState;
 use crate::types::supabase::{SecretVersionRetentionSnapshot, WriteSecretVersionOutcome};
@@ -13,7 +15,6 @@ pub(super) async fn submit_prepared_secret_version(
     request_id: &RequestId,
     failure: &FailureAuditContext<'_>,
     prepared: PreparedSecretVersion,
-    upstream_failure_metadata: Option<AuditMetadata>,
     retention_snapshot: Option<Vec<SecretVersionRetentionSnapshot>>,
 ) -> Result<WriteSecretVersionOutput, ApiError> {
     let action = prepared.write_action();
@@ -50,10 +51,9 @@ pub(super) async fn submit_prepared_secret_version(
         }
         Err(rpc_error) => {
             failure.log_upstream_failure(&rpc_error, "call_write_secret_version");
-            let audit_result = match upstream_failure_metadata {
-                Some(metadata) => failure.record_with_metadata(metadata).await,
-                None => failure.record().await,
-            };
+            let audit_result = failure
+                .record_with_metadata(write_failure_audit_metadata_for_prepared_secret(&prepared))
+                .await;
             if let Err(audit_err) = audit_result {
                 tracing::error!(
                     request_id = %request_id.as_canonical_string(),

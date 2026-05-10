@@ -76,7 +76,7 @@ struct TestClaims {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() -> TestResult<()> {
+async fn create_secret_write_rpc_failure_audit_uses_write_action_metadata() -> TestResult<()> {
     let (supabase_url, receiver, server_thread) = spawn_supabase_rpc_server()?;
     let state = test_app_state(&supabase_url)?;
     let auth = test_authenticated_user()?;
@@ -119,12 +119,14 @@ async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() 
             .ends_with("/rest/v1/rpc/rpc_append_audit_event")
     );
 
-    let attempted_secret_id = write_request.body["p_secret_id"].as_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "write RPC request should include p_secret_id",
-        )
-    })?;
+    let attempted_secret_version_id = write_request.body["p_secret_version_id"]
+        .as_str()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "write RPC request should include p_secret_version_id",
+            )
+        })?;
     let append_body = append_request.body.as_object().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -136,9 +138,15 @@ async fn create_secret_write_rpc_failure_audit_uses_attempted_secret_metadata() 
     assert_eq!(append_body["p_result"], "failure");
     assert!(append_body.contains_key("p_target_secret_id"));
     assert!(append_body["p_target_secret_id"].is_null());
+    assert_eq!(append_body["p_metadata_json"]["version"], 1);
     assert_eq!(
-        append_body["p_metadata_json"]["attempted_secret_id"],
-        attempted_secret_id
+        append_body["p_metadata_json"]["secret_version_id"],
+        attempted_secret_version_id
+    );
+    assert!(
+        append_body["p_metadata_json"]
+            .get("attempted_secret_id")
+            .is_none()
     );
     let source_event_at = append_body["p_metadata_json"]["source_event_at"]
         .as_str()
@@ -202,12 +210,14 @@ async fn create_secret_write_rpc_failure_writes_local_fallback_before_return() -
             .ends_with("/rest/v1/rpc/rpc_append_audit_event")
     );
 
-    let attempted_secret_id = write_request.body["p_secret_id"].as_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "write RPC request should include p_secret_id",
-        )
-    })?;
+    let attempted_secret_version_id = write_request.body["p_secret_version_id"]
+        .as_str()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "write RPC request should include p_secret_version_id",
+            )
+        })?;
     let fallback_contents = fs::read_to_string(&fallback_path)?;
     let fallback_records = fallback_contents
         .lines()
@@ -219,9 +229,15 @@ async fn create_secret_write_rpc_failure_writes_local_fallback_before_return() -
     assert_eq!(fallback_record["action"], "encrypt_create");
     assert_eq!(fallback_record["result"], "failure");
     assert!(fallback_record["target_secret_id"].is_null());
+    assert_eq!(fallback_record["metadata_json"]["version"], 1);
     assert_eq!(
-        fallback_record["metadata_json"]["attempted_secret_id"],
-        attempted_secret_id
+        fallback_record["metadata_json"]["secret_version_id"],
+        attempted_secret_version_id
+    );
+    assert!(
+        fallback_record["metadata_json"]
+            .get("attempted_secret_id")
+            .is_none()
     );
     let source_event_at = fallback_record["metadata_json"]["source_event_at"]
         .as_str()

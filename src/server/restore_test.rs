@@ -41,8 +41,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     key_version: None,
                     metadata: restore_test_metadata_with_duration(
                         0,
-                        Some("no_current_secret_versions"),
                         None,
+                        None,
+                        Some("no_current_secret_versions"),
                         trigger,
                         elapsed_ms(started_at),
                     ),
@@ -77,6 +78,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     metadata: restore_test_metadata_with_duration(
                         0,
                         Some("sample_fetch_failed"),
+                        None,
                         None,
                         trigger,
                         elapsed_ms(started_at),
@@ -127,6 +129,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                             sample_count,
                             Some("row_validation_failed"),
                             failure_context.failed_version,
+                            None,
                             trigger,
                             elapsed_ms(started_at),
                         ),
@@ -178,6 +181,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                         sample_count,
                         Some("decrypt_failed"),
                         failure_context.failed_version,
+                        None,
                         trigger,
                         elapsed_ms(started_at),
                     ),
@@ -222,6 +226,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                 sample_count,
                 None,
                 None,
+                None,
                 trigger,
                 elapsed_ms(started_at),
             ),
@@ -248,6 +253,7 @@ fn restore_test_metadata_with_duration(
     sample_count: u64,
     error_code: Option<&'static str>,
     failed_version: Option<u32>,
+    reason: Option<&'static str>,
     trigger: AuditTrigger,
     duration_ms: u64,
 ) -> AuditMetadata {
@@ -255,6 +261,7 @@ fn restore_test_metadata_with_duration(
         sample_count,
         error_code,
         failed_version,
+        reason,
         trigger,
         Some(duration_ms),
     )
@@ -264,17 +271,14 @@ fn restore_test_metadata_value(
     sample_count: u64,
     error_code: Option<&'static str>,
     failed_version: Option<u32>,
+    reason: Option<&'static str>,
     trigger: AuditTrigger,
     duration_ms: Option<u64>,
 ) -> AuditMetadata {
     let result = RestoreTestMetadata::new(sample_count, trigger)
         .with_error_code_opt(error_code)
         .with_failed_version_opt_u32(failed_version)
-        .with_reason_opt(if error_code == Some("no_current_secret_versions") {
-            Some("no_current_secret_versions")
-        } else {
-            None
-        })
+        .with_reason_opt(reason)
         .with_duration_ms_opt(duration_ms)
         .build();
 
