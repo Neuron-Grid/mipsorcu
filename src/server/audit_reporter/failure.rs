@@ -1,13 +1,14 @@
 use crate::audit::{
     AuditAction, AuditEvent, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditResult,
-    RequestId,
+    DecryptMetadata, RequestId,
 };
 use crate::server::state::AppState;
 use crate::{OwnerUserId, SecretId};
 
 pub fn failure_audit_metadata_for_attempted_secret(secret_id: &SecretId) -> AuditMetadata {
-    AuditMetadata::empty()
-        .with_attempted_secret_id(secret_id)
+    DecryptMetadata::failure()
+        .with_attempted_secret_id(secret_id.clone())
+        .build()
         .unwrap_or_else(|error| {
             tracing::error!(
                 error = %error,

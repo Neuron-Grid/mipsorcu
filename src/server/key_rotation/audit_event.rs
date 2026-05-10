@@ -1,7 +1,7 @@
-use serde_json::json;
-
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
+    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult,
+    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
+    RequestId,
 };
 use crate::types::KeyVersion;
 
@@ -12,12 +12,10 @@ pub(super) fn build_key_rotation_start_event(
     old_key_version: KeyVersion,
     new_key_version: KeyVersion,
 ) -> Result<AuditEvent, KeyRotationCliError> {
-    let metadata = AuditMetadata::new(json!({
-        "old_key_version": old_key_version.get(),
-        "new_key_version": new_key_version.get(),
-    }))
-    .and_then(AuditMetadata::with_current_source_event_at)
-    .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let metadata = KeyRotationStartMetadata::new(old_key_version, new_key_version)
+        .build()
+        .and_then(|m| m.with_current_source_event_at())
+        .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
     let audit_event_id =
         AuditEventId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
 
@@ -43,14 +41,15 @@ pub(super) fn build_key_rotation_reencrypt_event(
     processed_count: u64,
     remaining_count: u64,
 ) -> Result<AuditEvent, KeyRotationCliError> {
-    let metadata = AuditMetadata::new(json!({
-        "old_key_version": old_key_version.get(),
-        "new_key_version": new_key_version.get(),
-        "batch_size": batch_size,
-        "processed_count": processed_count,
-        "remaining_count": remaining_count,
-    }))
-    .and_then(AuditMetadata::with_current_source_event_at)
+    let metadata = KeyRotationReencryptMetadata::new(
+        old_key_version,
+        new_key_version,
+        batch_size,
+        processed_count,
+        remaining_count,
+    )
+    .build()
+    .and_then(|m| m.with_current_source_event_at())
     .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
     let audit_event_id =
         AuditEventId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
@@ -75,13 +74,10 @@ pub(super) fn build_key_rotation_complete_event(
     new_key_version: KeyVersion,
     remaining_count: u64,
 ) -> Result<AuditEvent, KeyRotationCliError> {
-    let metadata = AuditMetadata::new(json!({
-        "old_key_version": old_key_version.get(),
-        "new_key_version": new_key_version.get(),
-        "remaining_count": remaining_count,
-    }))
-    .and_then(AuditMetadata::with_current_source_event_at)
-    .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let metadata = KeyRotationCompleteMetadata::new(old_key_version, new_key_version, remaining_count)
+        .build()
+        .and_then(|m| m.with_current_source_event_at())
+        .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
     let audit_event_id =
         AuditEventId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
 

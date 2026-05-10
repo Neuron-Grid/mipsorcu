@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::audit::{AuditMetadata, AuditResult, AuditTrigger, RequestId};
+use crate::audit::{AuditMetadata, AuditResult, AuditTrigger, RequestId, RestoreTestMetadata};
 use crate::auth::VerifiedJwtClaims;
 use crate::decrypt_current_secret_version_with_keyring;
 use crate::server::audit_reporter::{self, RestoreTestAudit};
@@ -267,39 +267,29 @@ fn restore_test_metadata_value(
     trigger: AuditTrigger,
     duration_ms: Option<u64>,
 ) -> AuditMetadata {
-    let value = match error_code {
-        Some("no_current_secret_versions") => serde_json::json!({
-            "phase": "verify",
-            "sample_count": sample_count,
-            "reason": "no_current_secret_versions",
-            "trigger": trigger.as_str(),
-        }),
-        Some(code) => serde_json::json!({
-            "phase": "verify",
-            "sample_count": sample_count,
-            "error_code": code,
-            "failed_version": failed_version,
-            "trigger": trigger.as_str(),
-        }),
-        None => serde_json::json!({
-            "phase": "verify",
-            "sample_count": sample_count,
-            "trigger": trigger.as_str(),
-        }),
-    };
+    let result = RestoreTestMetadata::new(sample_count, trigger)
+        .with_error_code_opt(error_code)
+        .with_failed_version_opt_u32(failed_version)
+        .with_reason_opt(
+            if error_code == Some("no_current_secret_versions") {
+                Some("no_current_secret_versions")
+            } else {
+                None
+            },
+        )
+        .with_duration_ms_opt(duration_ms)
+        .build();
 
-    let value = match (value, duration_ms) {
-        (serde_json::Value::Object(mut object), Some(duration_ms)) => {
-            object.insert(
-                "duration_ms".to_owned(),
-                serde_json::Value::from(duration_ms),
-            );
-            serde_json::Value::Object(object)
-        }
-        (value, _) => value,
-    };
-
-    AuditMetadata::new(value).unwrap_or_else(|_| AuditMetadata::empty())
+    result.unwrap_or_else(|error| {
+        tracing::error!(
+            error = %error,
+            action = "restore_test",
+            result = "failure",
+            error_code = "audit_metadata_build_failed",
+            "failed to construct restore test audit metadata"
+        );
+        AuditMetadata::empty()
+    })
 }
 
 fn elapsed_ms(started_at: Instant) -> u64 {

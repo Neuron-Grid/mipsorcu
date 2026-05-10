@@ -17,6 +17,9 @@ pub use audit::{
     AuditRecordOutcome, AuditRecorder, AuditResult, AuditTrigger, FORBIDDEN_AUDIT_METADATA_KEYS,
     LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary, RolloverArchive,
     RolloverOutcome, SweptArchive,
+    AuthFailureMetadata, DecryptMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
+    IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
+    KeyRotationStartMetadata, RestoreTestMetadata, VersionPurgeMetadata,
 };
 pub use auth::{
     Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,

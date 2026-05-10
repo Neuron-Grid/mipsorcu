@@ -2,11 +2,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde_json::{Value, json};
-
 use crate::audit::{
     AuditEventError, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditResult,
-    AuditTrigger, RequestId,
+    AuditTrigger, IntegrityCheckMetadata, RequestId,
 };
 use crate::server::audit_reporter::{self, IntegrityCheckAudit};
 use crate::server::config::AppConfig;
@@ -192,25 +190,17 @@ fn build_integrity_check_metadata_with_duration(
     error_code: Option<&'static str>,
     duration_ms: u64,
 ) -> Result<AuditMetadata, AuditEventError> {
-    let mut value = json!({
-        "check_name": "mvp_integrity_check",
-        "checked_secret_count": summary.checked_secret_count,
-        "checked_secret_version_count": summary.checked_secret_version_count,
-        "checked_audit_event_count": summary.checked_audit_event_count,
-        "duration_ms": duration_ms,
-        "violation_count": summary.violation_count,
-        "violation_summary": &summary.violation_summary,
-        "trigger": trigger.as_str(),
-    });
-
-    if let (Some(error_code), Value::Object(object)) = (error_code, &mut value) {
-        object.insert(
-            "error_code".to_owned(),
-            Value::String(error_code.to_owned()),
-        );
-    }
-
-    AuditMetadata::new(value)
+    IntegrityCheckMetadata::new(
+        summary.checked_secret_count,
+        summary.checked_secret_version_count,
+        summary.checked_audit_event_count,
+        summary.violation_count,
+        summary.violation_summary.clone(),
+        trigger,
+    )
+    .with_duration_ms(duration_ms)
+    .with_error_code_opt(error_code)
+    .build()
 }
 
 async fn record_integrity_check_audit(

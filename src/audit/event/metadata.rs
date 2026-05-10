@@ -1,6 +1,14 @@
+mod builders;
+
 use std::fmt;
 
 use serde_json::{Map, Value, json};
+
+pub use builders::{
+    AuthFailureMetadata, DecryptMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
+    IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
+    KeyRotationStartMetadata, RestoreTestMetadata, VersionPurgeMetadata,
+};
 
 use crate::types::{SecretId, SourceEventAt};
 

@@ -11,10 +11,9 @@ use axum::extract::{FromRequest, FromRequestParts, Json, Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
-use serde_json::json;
 
 use crate::RequestId;
-use crate::audit::{AuditAction, AuditMetadata};
+use crate::audit::AuditAction;
 use crate::auth::{RawJwt, VerifiedJwtClaims};
 use crate::server::audit_reporter::FailureAuditContext;
 
@@ -251,7 +250,7 @@ fn is_rate_limit_exempt_path(path: &str) -> bool {
 }
 
 async fn record_auth_failure(state: &AppState, request_id: &RequestId, error_code: &'static str) {
-    let metadata = match AuditMetadata::new(json!({ "error_code": error_code })) {
+    let metadata = match crate::audit::AuthFailureMetadata::new(error_code).build() {
         Ok(metadata) => metadata,
         Err(error) => {
             state.readiness_state.mark_failure_audit_both_failed();
