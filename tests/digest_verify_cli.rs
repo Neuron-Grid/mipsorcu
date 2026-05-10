@@ -243,6 +243,107 @@ fn range_body(m: &ValidTestMaterials) -> String {
     .to_string()
 }
 
+/// chain export where entry_hash is zeros — triggers chain hash mismatch.
+fn chain_export_body_tampered_entry_hash(m: &ValidTestMaterials) -> String {
+    let zero_hash = "0".repeat(64);
+    json!([{
+        "sequence_no": 1i64,
+        "entry_hash": format!("\\x{zero_hash}"),
+        "previous_entry_hash": format!("\\x{}", m.entry_previous_hash_hex),
+        "signature": format!("\\x{}", m.entry_signature_hex),
+        "signature_key_version": 1i32,
+        "entry_type": "integrity_check_completed",
+        "source_event_at": CHAIN_SOURCE_EVENT_AT,
+        "canonicalization_version": 1i32,
+        "hash_algorithm": "sha-256",
+        "signature_algorithm": "ed25519",
+        "pk_key_version": 1i32,
+        "pk_public_key": format!("\\x{}", m.public_key_hex),
+        "pk_algorithm": "ed25519",
+        "pk_status": "active",
+        "pk_created_at": Value::Null,
+        "pk_retired_at": Value::Null,
+    }])
+    .to_string()
+}
+
+/// digest materials where end_entry_hash is zeros — triggers end hash mismatch.
+fn digest_materials_body_wrong_end_hash(m: &ValidTestMaterials) -> String {
+    let zero_hash = "0".repeat(64);
+    json!([{
+        "start_sequence_no": 1i64,
+        "end_sequence_no": 1i64,
+        "stored_entry_count": 1i64,
+        "stored_digest_hash": m.digest_hash_hex,
+        "target_year_month": TEST_YEAR_MONTH,
+        "digest_generated_at": DIGEST_GENERATED_AT,
+        "signature": format!("\\x{}", m.digest_signature_hex),
+        "signature_key_version": 1i32,
+        "public_key": format!("\\x{}", m.public_key_hex),
+        "start_entry_hash": format!("\\x{}", m.entry_hash_hex),
+        "end_entry_hash": format!("\\x{zero_hash}"),
+    }])
+    .to_string()
+}
+
+/// digest materials where public_key is null — triggers unknown signature key.
+fn digest_materials_body_null_key(m: &ValidTestMaterials) -> String {
+    json!([{
+        "start_sequence_no": 1i64,
+        "end_sequence_no": 1i64,
+        "stored_entry_count": 1i64,
+        "stored_digest_hash": m.digest_hash_hex,
+        "target_year_month": TEST_YEAR_MONTH,
+        "digest_generated_at": DIGEST_GENERATED_AT,
+        "signature": format!("\\x{}", m.digest_signature_hex),
+        "signature_key_version": 1i32,
+        "public_key": Value::Null,
+        "start_entry_hash": format!("\\x{}", m.entry_hash_hex),
+        "end_entry_hash": format!("\\x{}", m.entry_hash_hex),
+    }])
+    .to_string()
+}
+
+/// digest materials where stored_digest_hash is wrong — triggers hash mismatch.
+fn digest_materials_body_wrong_digest_hash(m: &ValidTestMaterials) -> String {
+    let wrong_hash = "cd".repeat(32);
+    json!([{
+        "start_sequence_no": 1i64,
+        "end_sequence_no": 1i64,
+        "stored_entry_count": 1i64,
+        "stored_digest_hash": wrong_hash,
+        "target_year_month": TEST_YEAR_MONTH,
+        "digest_generated_at": DIGEST_GENERATED_AT,
+        "signature": format!("\\x{}", m.digest_signature_hex),
+        "signature_key_version": 1i32,
+        "public_key": format!("\\x{}", m.public_key_hex),
+        "start_entry_hash": format!("\\x{}", m.entry_hash_hex),
+        "end_entry_hash": format!("\\x{}", m.entry_hash_hex),
+    }])
+    .to_string()
+}
+
+/// digest materials where signature has first byte flipped — triggers signature invalid.
+fn digest_materials_body_wrong_signature(m: &ValidTestMaterials) -> String {
+    let mut sig_bytes = hex::decode(&m.digest_signature_hex).expect("valid hex");
+    sig_bytes[0] ^= 0xff;
+    let wrong_sig = hex::encode(sig_bytes);
+    json!([{
+        "start_sequence_no": 1i64,
+        "end_sequence_no": 1i64,
+        "stored_entry_count": 1i64,
+        "stored_digest_hash": m.digest_hash_hex,
+        "target_year_month": TEST_YEAR_MONTH,
+        "digest_generated_at": DIGEST_GENERATED_AT,
+        "signature": format!("\\x{wrong_sig}"),
+        "signature_key_version": 1i32,
+        "public_key": format!("\\x{}", m.public_key_hex),
+        "start_entry_hash": format!("\\x{}", m.entry_hash_hex),
+        "end_entry_hash": format!("\\x{}", m.entry_hash_hex),
+    }])
+    .to_string()
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -402,6 +503,156 @@ fn no_secret_material_in_output() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!combined.contains(PUBLISHABLE_KEY));
     assert!(!combined.contains("plaintext"));
     assert!(!combined.contains("master_key"));
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
+#[test]
+fn chain_broken_exit_2() -> Result<(), Box<dyn std::error::Error>> {
+    let m = make_valid_test_materials()?;
+
+    let (url, _receiver, server) = spawn_scripted_server(vec![
+        (200, digest_materials_body(&m)),
+        (200, chain_export_body_tampered_entry_hash(&m)),
+        (200, r#""ok""#.to_owned()),
+    ])?;
+
+    let run = run_digest_verify(&url, "chain-broken", TEST_YEAR_MONTH)?;
+    server
+        .join()
+        .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+    assert!(
+        !run.output.status.success(),
+        "expected exit non-zero when chain entry hash is tampered"
+    );
+    assert_eq!(run.output.status.code(), Some(2));
+
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed["valid"], false);
+    assert_eq!(parsed["error"]["code"], "monthly_digest_chain_continuity_error");
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
+#[test]
+fn end_hash_mismatch_exit_2() -> Result<(), Box<dyn std::error::Error>> {
+    let m = make_valid_test_materials()?;
+
+    let (url, _receiver, server) = spawn_scripted_server(vec![
+        (200, digest_materials_body_wrong_end_hash(&m)),
+        (200, chain_export_body(&m)),
+        (200, r#""ok""#.to_owned()),
+    ])?;
+
+    let run = run_digest_verify(&url, "end-hash-mismatch", TEST_YEAR_MONTH)?;
+    server
+        .join()
+        .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+    assert!(
+        !run.output.status.success(),
+        "expected exit non-zero when end_entry_hash in digest materials is wrong"
+    );
+    assert_eq!(run.output.status.code(), Some(2));
+
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed["valid"], false);
+    assert_eq!(parsed["error"]["code"], "monthly_digest_end_hash_mismatch");
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
+#[test]
+fn unknown_signature_key_exit_2() -> Result<(), Box<dyn std::error::Error>> {
+    let m = make_valid_test_materials()?;
+
+    let (url, _receiver, server) = spawn_scripted_server(vec![
+        (200, digest_materials_body_null_key(&m)),
+        (200, chain_export_body(&m)),
+        (200, r#""ok""#.to_owned()),
+    ])?;
+
+    let run = run_digest_verify(&url, "unknown-key", TEST_YEAR_MONTH)?;
+    server
+        .join()
+        .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+    assert!(
+        !run.output.status.success(),
+        "expected exit non-zero when public key is null (key not registered)"
+    );
+    assert_eq!(run.output.status.code(), Some(2));
+
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed["valid"], false);
+    assert_eq!(parsed["error"]["code"], "monthly_digest_unknown_signature_key");
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
+#[test]
+fn digest_hash_mismatch_exit_2() -> Result<(), Box<dyn std::error::Error>> {
+    let m = make_valid_test_materials()?;
+
+    let (url, _receiver, server) = spawn_scripted_server(vec![
+        (200, digest_materials_body_wrong_digest_hash(&m)),
+        (200, chain_export_body(&m)),
+        (200, r#""ok""#.to_owned()),
+    ])?;
+
+    let run = run_digest_verify(&url, "hash-mismatch", TEST_YEAR_MONTH)?;
+    server
+        .join()
+        .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+    assert!(
+        !run.output.status.success(),
+        "expected exit non-zero when stored_digest_hash does not match recomputed hash"
+    );
+    assert_eq!(run.output.status.code(), Some(2));
+
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed["valid"], false);
+    assert_eq!(parsed["error"]["code"], "monthly_digest_hash_mismatch");
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
+#[test]
+fn digest_signature_invalid_exit_2() -> Result<(), Box<dyn std::error::Error>> {
+    let m = make_valid_test_materials()?;
+
+    let (url, _receiver, server) = spawn_scripted_server(vec![
+        (200, digest_materials_body_wrong_signature(&m)),
+        (200, chain_export_body(&m)),
+        (200, r#""ok""#.to_owned()),
+    ])?;
+
+    let run = run_digest_verify(&url, "sig-invalid", TEST_YEAR_MONTH)?;
+    server
+        .join()
+        .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+    assert!(
+        !run.output.status.success(),
+        "expected exit non-zero when digest Ed25519 signature is corrupted"
+    );
+    assert_eq!(run.output.status.code(), Some(2));
+
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed["valid"], false);
+    assert_eq!(parsed["error"]["code"], "monthly_digest_signature_invalid");
 
     fs::remove_dir_all(run.temp_dir)?;
     Ok(())
