@@ -48,14 +48,14 @@ impl AuditAction {
         }
     }
 
-    pub(super) fn is_write_success_only(self) -> bool {
+    pub fn is_write_success_only(self) -> bool {
         matches!(
             self,
             Self::EncryptCreate | Self::EncryptRotate | Self::VersionPurge
         )
     }
 
-    pub(super) fn is_failure_only(self) -> bool {
+    pub fn is_failure_only(self) -> bool {
         matches!(self, Self::AuthFailure)
     }
 }

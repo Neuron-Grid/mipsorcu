@@ -115,12 +115,8 @@ fn temp_jsonl_path(test_name: &str) -> PathBuf {
 
 fn metadata() -> Result<AuditMetadata, AuditEventError> {
     AuditMetadata::new(json!({
-        "error_code": "decrypt_failed",
-        "elapsed_ms": 12,
-        "source_event_at": SOURCE_EVENT_AT,
-        "nested": {
-            "retryable": true
-        }
+        "attempted_secret_id": TARGET_SECRET_ID,
+        "source_event_at": SOURCE_EVENT_AT
     }))
 }
 
@@ -586,7 +582,7 @@ async fn fallback_json_keeps_null_target_and_attempted_secret_metadata() -> Test
         request_id: RequestId::parse(REQUEST_ID)?,
         actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
         actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
-        action: AuditAction::EncryptCreate,
+        action: AuditAction::Decrypt,
         target_secret_id: None,
         result: AuditResult::Failure,
         key_version: None,
@@ -1102,21 +1098,18 @@ async fn rollover_skips_after_partial_resend_leaves_pending_event() -> TestResul
 #[test]
 fn debug_and_error_messages_do_not_expose_secret_metadata_values() -> TestResult<()> {
     let metadata = AuditMetadata::new(json!({
-        "error_code": "safe",
-        "source_event_at": SOURCE_EVENT_AT,
-        "nested": {
-            "token_hint": "never-log-this-value"
-        }
+        "error_code": "never-log-this-value",
+        "source_event_at": SOURCE_EVENT_AT
     }))?;
     let event = AuditEvent::new(AuditEventParts {
         audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
         request_id: RequestId::parse(REQUEST_ID)?,
-        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
-        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
-        action: AuditAction::Decrypt,
-        target_secret_id: Some(SecretId::parse(TARGET_SECRET_ID)?),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::AuthFailure,
+        target_secret_id: None,
         result: AuditResult::Failure,
-        key_version: Some(KeyVersion::new(1)?),
+        key_version: None,
         metadata_json: metadata,
     })?;
     let debug_output = format!("{event:?}");

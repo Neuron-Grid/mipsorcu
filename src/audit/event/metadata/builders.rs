@@ -408,10 +408,7 @@ impl RestoreTestMetadata {
             Value::String(self.trigger.as_str().to_owned()),
         );
         if let Some(duration_ms) = self.duration_ms {
-            object.insert(
-                "duration_ms".to_owned(),
-                Value::Number(duration_ms.into()),
-            );
+            object.insert("duration_ms".to_owned(), Value::Number(duration_ms.into()));
         }
         if let Some(error_code) = self.error_code {
             object.insert(
@@ -607,7 +604,9 @@ mod tests {
     fn encrypt_create_metadata_builds_expected_keys() {
         let version = SecretVersion::new(3).unwrap();
         let svid = SecretVersionId::generate().unwrap();
-        let metadata = EncryptCreateMetadata::new(version, svid.clone()).build().unwrap();
+        let metadata = EncryptCreateMetadata::new(version, svid.clone())
+            .build()
+            .unwrap();
         let value = metadata.as_value();
         assert_eq!(value["version"], 3);
         assert_eq!(value["secret_version_id"], svid.as_canonical_string());
@@ -623,17 +622,16 @@ mod tests {
             .with_source_event_at(source_at.clone())
             .build()
             .unwrap();
-        assert_eq!(
-            metadata.as_value()[SOURCE_EVENT_AT_KEY],
-            source_at.as_str()
-        );
+        assert_eq!(metadata.as_value()[SOURCE_EVENT_AT_KEY], source_at.as_str());
     }
 
     #[test]
     fn encrypt_rotate_metadata_builds_expected_keys() {
         let version = SecretVersion::new(2).unwrap();
         let svid = SecretVersionId::generate().unwrap();
-        let metadata = EncryptRotateMetadata::new(version, svid.clone()).build().unwrap();
+        let metadata = EncryptRotateMetadata::new(version, svid.clone())
+            .build()
+            .unwrap();
         let value = metadata.as_value();
         assert_eq!(value["version"], 2);
         assert_eq!(value["secret_version_id"], svid.as_canonical_string());
@@ -643,7 +641,9 @@ mod tests {
     fn version_purge_metadata_builds_expected_keys() {
         let version = SecretVersion::new(1).unwrap();
         let svid = SecretVersionId::generate().unwrap();
-        let metadata = VersionPurgeMetadata::new(version, svid.clone()).build().unwrap();
+        let metadata = VersionPurgeMetadata::new(version, svid.clone())
+            .build()
+            .unwrap();
         let value = metadata.as_value();
         assert_eq!(value["version"], 1);
         assert_eq!(value["secret_version_id"], svid.as_canonical_string());
@@ -658,8 +658,7 @@ mod tests {
 
     #[test]
     fn decrypt_failure_metadata_with_attempted_secret_id() {
-        let secret_id =
-            SecretId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let secret_id = SecretId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let metadata = DecryptMetadata::failure()
             .with_attempted_secret_id(secret_id.clone())
             .build()
@@ -751,7 +750,9 @@ mod tests {
     fn key_rotation_start_metadata_builds_expected_keys() {
         let old_kv = KeyVersion::new(1).unwrap();
         let new_kv = KeyVersion::new(2).unwrap();
-        let metadata = KeyRotationStartMetadata::new(old_kv, new_kv).build().unwrap();
+        let metadata = KeyRotationStartMetadata::new(old_kv, new_kv)
+            .build()
+            .unwrap();
         let value = metadata.as_value();
         assert_eq!(value["old_key_version"], 1);
         assert_eq!(value["new_key_version"], 2);

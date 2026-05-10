@@ -1,5 +1,6 @@
 mod builders;
 
+use std::collections::HashSet;
 use std::fmt;
 
 use serde_json::{Map, Value, json};
@@ -13,6 +14,7 @@ pub use builders::{
 use crate::types::{SecretId, SourceEventAt};
 
 use super::super::error::AuditEventError;
+use super::action::{AuditAction, AuditResult};
 use super::validation::canonicalize_source_event_at;
 
 pub(super) const SOURCE_EVENT_AT_KEY: &str = "source_event_at";
@@ -176,6 +178,128 @@ impl AuditMetadata {
     fn key_count(&self) -> usize {
         self.0.as_object().map_or(0, Map::len)
     }
+
+    /// Validates that all top-level keys in this metadata are in the allowlist
+    /// for the given action and result. Also checks `violation_summary` sub-object
+    /// keys for `integrity_check` action.
+    pub fn validate_allowlist_for_action(
+        &self,
+        action: AuditAction,
+        result: AuditResult,
+    ) -> Result<(), AuditEventError> {
+        let object = self
+            .0
+            .as_object()
+            .ok_or(AuditEventError::MetadataMustBeObject)?;
+
+        let allowed_keys: HashSet<&str> = match action {
+            AuditAction::EncryptCreate | AuditAction::EncryptRotate | AuditAction::VersionPurge => {
+                [
+                    "version",
+                    "secret_version_id",
+                    "attempted_secret_id",
+                    SOURCE_EVENT_AT_KEY,
+                ]
+                .iter()
+                .cloned()
+                .collect()
+            }
+            AuditAction::Decrypt => {
+                if result == AuditResult::Failure {
+                    ["attempted_secret_id", SOURCE_EVENT_AT_KEY]
+                        .iter()
+                        .cloned()
+                        .collect()
+                } else {
+                    [SOURCE_EVENT_AT_KEY].iter().cloned().collect()
+                }
+            }
+            AuditAction::IntegrityCheck => {
+                if let Some(summary) = object.get("violation_summary")
+                    && let Some(summary_obj) = summary.as_object()
+                {
+                    let allowed_summary_keys: HashSet<&str> =
+                        INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST
+                            .iter()
+                            .cloned()
+                            .collect();
+                    for key in summary_obj.keys() {
+                        if !allowed_summary_keys.contains(key.as_str()) {
+                            return Err(AuditEventError::UnknownMetadataKey { key: key.clone() });
+                        }
+                    }
+                } else if object.get("violation_summary").is_some() {
+                    return Err(AuditEventError::ViolationSummaryMustBeObject);
+                }
+                [
+                    "check_name",
+                    "checked_secret_count",
+                    "checked_secret_version_count",
+                    "checked_audit_event_count",
+                    "duration_ms",
+                    "violation_count",
+                    "violation_summary",
+                    TRIGGER_KEY,
+                    "error_code",
+                    SOURCE_EVENT_AT_KEY,
+                ]
+                .iter()
+                .cloned()
+                .collect()
+            }
+            AuditAction::RestoreTest => [
+                "phase",
+                "sample_count",
+                TRIGGER_KEY,
+                "duration_ms",
+                "error_code",
+                "failed_version",
+                "reason",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            AuditAction::AuthFailure => ["error_code", SOURCE_EVENT_AT_KEY]
+                .iter()
+                .cloned()
+                .collect(),
+            AuditAction::KeyRotationStart => {
+                ["old_key_version", "new_key_version", SOURCE_EVENT_AT_KEY]
+                    .iter()
+                    .cloned()
+                    .collect()
+            }
+            AuditAction::KeyRotationReencrypt => [
+                "old_key_version",
+                "new_key_version",
+                "batch_size",
+                "processed_count",
+                "remaining_count",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            AuditAction::KeyRotationComplete => [
+                "old_key_version",
+                "new_key_version",
+                "remaining_count",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+        };
+
+        for key in object.keys() {
+            if !allowed_keys.contains(key.as_str()) {
+                return Err(AuditEventError::UnknownMetadataKey { key: key.clone() });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl fmt::Debug for AuditMetadata {
@@ -217,6 +341,25 @@ fn reject_forbidden_metadata_keys(value: &Value) -> Result<(), AuditEventError> 
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Ok(()),
     }
 }
+
+pub const INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST: &[&str] = &[
+    "current_version_invalid",
+    "version_invalid",
+    "retention_exceeded",
+    "ciphertext_empty",
+    "encrypted_data_key_empty",
+    "nonce_length_invalid",
+    "algorithm_invalid",
+    "nonce_duplicate",
+    "aad_keys_invalid",
+    "aad_row_mismatch",
+    "created_at_mismatch",
+    "audit_action_invalid",
+    "audit_result_invalid",
+    "audit_metadata_not_object",
+    "audit_metadata_forbidden_key",
+    "audit_source_event_at_invalid",
+];
 
 fn is_forbidden_metadata_key(key: &str) -> bool {
     let normalized = key.trim().to_ascii_lowercase();

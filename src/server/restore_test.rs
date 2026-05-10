@@ -270,13 +270,11 @@ fn restore_test_metadata_value(
     let result = RestoreTestMetadata::new(sample_count, trigger)
         .with_error_code_opt(error_code)
         .with_failed_version_opt_u32(failed_version)
-        .with_reason_opt(
-            if error_code == Some("no_current_secret_versions") {
-                Some("no_current_secret_versions")
-            } else {
-                None
-            },
-        )
+        .with_reason_opt(if error_code == Some("no_current_secret_versions") {
+            Some("no_current_secret_versions")
+        } else {
+            None
+        })
         .with_duration_ms_opt(duration_ms)
         .build();
 

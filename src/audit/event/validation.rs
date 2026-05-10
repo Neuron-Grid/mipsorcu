@@ -23,6 +23,9 @@ pub(super) fn validate_event_parts(parts: &AuditEventParts) -> Result<(), AuditE
     }
 
     parts.metadata_json.require_source_event_at()?;
+    parts
+        .metadata_json
+        .validate_allowlist_for_action(parts.action, parts.result)?;
 
     Ok(())
 }

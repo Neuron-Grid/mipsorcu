@@ -1,7 +1,6 @@
 use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult,
-    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
-    RequestId,
+    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata, RequestId,
 };
 use crate::types::KeyVersion;
 
@@ -74,10 +73,11 @@ pub(super) fn build_key_rotation_complete_event(
     new_key_version: KeyVersion,
     remaining_count: u64,
 ) -> Result<AuditEvent, KeyRotationCliError> {
-    let metadata = KeyRotationCompleteMetadata::new(old_key_version, new_key_version, remaining_count)
-        .build()
-        .and_then(|m| m.with_current_source_event_at())
-        .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let metadata =
+        KeyRotationCompleteMetadata::new(old_key_version, new_key_version, remaining_count)
+            .build()
+            .and_then(|m| m.with_current_source_event_at())
+            .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
     let audit_event_id =
         AuditEventId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
 

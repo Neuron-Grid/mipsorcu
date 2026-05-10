@@ -13,6 +13,8 @@ pub enum AuditEventError {
     AuthFailureFieldMustBeNull { field: &'static str },
     MetadataMustBeObject,
     ForbiddenMetadataKey { key: String },
+    UnknownMetadataKey { key: String },
+    ViolationSummaryMustBeObject,
     InvalidTrigger { value: String },
     InvalidSourceEventAt,
     MissingSourceEventAt,
@@ -53,6 +55,18 @@ impl fmt::Display for AuditEventError {
             }
             Self::ForbiddenMetadataKey { key } => {
                 write!(formatter, "audit metadata contains forbidden key: {key}")
+            }
+            Self::UnknownMetadataKey { key } => {
+                write!(
+                    formatter,
+                    "audit metadata contains unknown key for action: {key}"
+                )
+            }
+            Self::ViolationSummaryMustBeObject => {
+                write!(
+                    formatter,
+                    "integrity_check violation_summary must be a JSON object"
+                )
             }
             Self::InvalidTrigger { value } => {
                 write!(

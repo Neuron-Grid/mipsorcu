@@ -496,7 +496,7 @@ fn sample_audit_event() -> AuditEvent {
         result: AuditResult::Failure,
         key_version: Some(KeyVersion::new(1).expect("key version must be valid")),
         metadata_json: AuditMetadata::new(json!({
-            "error_code": "decrypt_failed",
+            "attempted_secret_id": TARGET_SECRET_ID,
             "source_event_at": SOURCE_EVENT_AT
         }))
         .expect("metadata must be valid"),
