@@ -11,6 +11,7 @@ pub use metadata::{
     DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
     FORBIDDEN_AUDIT_METADATA_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
     IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
-    KeyRotationStartMetadata, RestoreTestMetadata, VersionPurgeMetadata,
+    KeyRotationStartMetadata, RestoreTestMetadata, SiemForwardFailureMetadata,
+    VersionPurgeMetadata,
 };
 pub use model::{AuditEvent, AuditEventAppender, AuditEventParts};

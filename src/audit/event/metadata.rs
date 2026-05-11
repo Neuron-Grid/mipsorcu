@@ -9,7 +9,7 @@ pub use builders::{
     ArchiveExportMetadata, AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata,
     EncryptCreateMetadata, EncryptRotateMetadata, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
-    RestoreTestMetadata, VersionPurgeMetadata,
+    RestoreTestMetadata, SiemForwardFailureMetadata, VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
@@ -326,6 +326,15 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            // SIEM への監査イベント転送失敗（failure-only）。
+            // event_type は転送しようとした監査の audit_action 文字列、
+            // event_count はバッチ送信時の件数。
+            AuditAction::SiemForwardFailure => {
+                ["error_code", "event_type", "event_count", SOURCE_EVENT_AT_KEY]
+                    .iter()
+                    .cloned()
+                    .collect()
+            }
         };
 
         for key in object.keys() {
@@ -381,6 +390,8 @@ fn validate_required_metadata_keys(
         AuditAction::ArchiveExport => vec!["target_year_month"],
         // digest timestamping も target_year_month が常に必須。
         AuditAction::DigestTimestamping => vec!["target_year_month"],
+        // SIEM forward failure は error_code が常に必須（failure-only）。
+        AuditAction::SiemForwardFailure => vec!["error_code"],
     };
 
     if require_source_event_at {

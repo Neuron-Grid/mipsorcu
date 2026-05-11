@@ -8,6 +8,7 @@ pub mod error;
 pub mod ledger;
 pub mod read;
 pub mod server;
+pub mod siem;
 pub mod timestamping;
 pub mod types;
 pub mod write;
@@ -28,7 +29,8 @@ pub use audit::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
     LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
-    RestoreTestMetadata, RolloverArchive, RolloverOutcome, SweptArchive, VersionPurgeMetadata,
+    RestoreTestMetadata, RolloverArchive, RolloverOutcome, SiemForwardFailureMetadata,
+    SweptArchive, VersionPurgeMetadata,
 };
 pub use auth::{
     Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,
@@ -69,6 +71,12 @@ pub use server::use_cases::export_digest_to_archive::{
 pub use server::use_cases::request_timestamping_for_digest::{
     RequestTimestampingError, record_digest_timestamping_failure_audit,
     request_timestamping_for_digest,
+};
+pub use siem::{
+    FailingSiemSink, InMemorySiemSink, LocalSiemBufferError, LocalSiemFallbackBuffer,
+    SIEM_EVENT_SCHEMA_VERSION, SIEM_EVENT_TOP_LEVEL_KEYS, SiemEvent, SiemForwardOutcome,
+    SiemForwarder, SiemForwarderStatus, SiemResendSummary, SiemSink, SiemSinkError,
+    build_siem_forward_failure_audit_event,
 };
 pub use timestamping::{
     FailingTimestampingService, InMemoryTimestampingService, TimestampingService,

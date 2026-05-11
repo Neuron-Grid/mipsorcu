@@ -48,6 +48,13 @@ fn allowlist_parity_between_rust_and_sql() {
                 continue;
             }
 
+            // SIEM integration: Rust 側 enum のみ追加し、Supabase migration は
+            // 後続タスクで投入する。migration 投入後にこの skip を削除し、SQL
+            // allowlist と parity させること。
+            if action == AuditAction::SiemForwardFailure {
+                continue;
+            }
+
             // SQL 側: decrypt 以外は result で区別しない。decrypt だけ decrypt:success / decrypt:failure
             let sql_key = if action == AuditAction::Decrypt {
                 format!("{}:{}", action.as_str(), result.as_str())
@@ -506,6 +513,7 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::MonthlyDigestVerify,
         AuditAction::ArchiveExport,
         AuditAction::DigestTimestamping,
+        AuditAction::SiemForwardFailure,
     ]
 }
 
@@ -599,6 +607,10 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "target_year_month",
                 "timestamp_token_hash",
             ]
+        }
+        // SIEM forward failure（failure-only）
+        AuditAction::SiemForwardFailure => {
+            vec!["error_code", "event_count", "event_type", "source_event_at"]
         }
     };
     keys.sort();

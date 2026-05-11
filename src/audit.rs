@@ -10,7 +10,8 @@ pub use event::{
     DecryptMetadata, DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
     FORBIDDEN_AUDIT_METADATA_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
     IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
-    KeyRotationStartMetadata, RequestId, RestoreTestMetadata, VersionPurgeMetadata,
+    KeyRotationStartMetadata, RequestId, RestoreTestMetadata, SiemForwardFailureMetadata,
+    VersionPurgeMetadata,
 };
 pub use fallback::{
     ArchiveSweepOutcome, LocalAuditFallbackStore, RolloverArchive, RolloverOutcome, SweptArchive,
