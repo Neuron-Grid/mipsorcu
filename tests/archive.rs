@@ -62,14 +62,20 @@ fn make_key() -> ArchiveObjectKey {
 #[test]
 fn archive_object_key_rejects_empty_string() {
     let result = ArchiveObjectKey::new("");
-    assert!(matches!(result, Err(ArchiveBackendError::InvalidKey { .. })));
+    assert!(matches!(
+        result,
+        Err(ArchiveBackendError::InvalidKey { .. })
+    ));
 }
 
 #[test]
 fn archive_object_key_rejects_257_char_key() {
     let long_key = "a".repeat(257);
     let result = ArchiveObjectKey::new(long_key);
-    assert!(matches!(result, Err(ArchiveBackendError::InvalidKey { .. })));
+    assert!(matches!(
+        result,
+        Err(ArchiveBackendError::InvalidKey { .. })
+    ));
 }
 
 #[test]
@@ -101,8 +107,7 @@ fn archive_export_package_builds_from_test_digest() {
 fn archive_export_package_to_json_contains_schema_version() {
     let package = make_package();
     let bytes = package.to_json_bytes().expect("to_json_bytes must succeed");
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("must be valid JSON");
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("must be valid JSON");
     assert_eq!(
         value["archive_schema_version"].as_u64(),
         Some(u64::from(ARCHIVE_SCHEMA_VERSION)),
@@ -113,8 +118,7 @@ fn archive_export_package_to_json_contains_schema_version() {
 fn archive_export_package_to_json_digest_is_object() {
     let package = make_package();
     let bytes = package.to_json_bytes().expect("to_json_bytes must succeed");
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("must be valid JSON");
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("must be valid JSON");
     assert!(
         value["digest"].is_object(),
         "digest field must be a JSON object, not a string"
@@ -125,9 +129,10 @@ fn archive_export_package_to_json_digest_is_object() {
 fn archive_export_package_to_json_sbc_signature_is_hex() {
     let package = make_package();
     let bytes = package.to_json_bytes().expect("to_json_bytes must succeed");
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("must be valid JSON");
-    let sig = value["sbc_signature"].as_str().expect("sbc_signature must be a string");
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("must be valid JSON");
+    let sig = value["sbc_signature"]
+        .as_str()
+        .expect("sbc_signature must be a string");
     assert_eq!(sig.len(), 128, "sbc_signature must be 128-char hex");
     assert!(
         sig.chars().all(|c| c.is_ascii_hexdigit()),

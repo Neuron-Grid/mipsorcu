@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mipsorcu::{
     DigestHash, LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerEntryDraft, LedgerEntryDraftParts,
     LedgerEntryId, LedgerEntryType, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo,
-    LedgerSignatureKeyVersion, LedgerSigningKey, MASTER_KEY_LENGTH, MonthlyDigestPeriod,
-    RequestId, SourceEventAt, build_monthly_digest_canonical_form,
+    LedgerSignatureKeyVersion, LedgerSigningKey, MASTER_KEY_LENGTH, MonthlyDigestPeriod, RequestId,
+    SourceEventAt, build_monthly_digest_canonical_form,
 };
 use serde_json::{Value, json};
 
@@ -118,7 +118,14 @@ fn run_digest_verify(
         .env("MIPSORCU_JWKS_URL", "http://127.0.0.1:1/jwks")
         .env("MIPSORCU_AUDIT_FALLBACK_PATH", &fallback_path)
         .env("MIPSORCU_AUDIT_FALLBACK_ARCHIVE_DIR", &fallback_archive_dir)
-        .args(["digest", "verify", "--year-month", year_month, "--format", "json"])
+        .args([
+            "digest",
+            "verify",
+            "--year-month",
+            year_month,
+            "--format",
+            "json",
+        ])
         .output()?;
 
     Ok(DigestCliRun { output, temp_dir })
@@ -350,10 +357,8 @@ fn digest_materials_body_wrong_signature(m: &ValidTestMaterials) -> String {
 fn digest_not_found_exit_2() -> Result<(), Box<dyn std::error::Error>> {
     // fetch_monthly_digest_for_verification returns empty → DigestNotFound
     // then audit event is recorded (failure path)
-    let (url, _receiver, server) = spawn_scripted_server(vec![
-        (200, "[]".to_owned()),
-        (200, r#""ok""#.to_owned()),
-    ])?;
+    let (url, _receiver, server) =
+        spawn_scripted_server(vec![(200, "[]".to_owned()), (200, r#""ok""#.to_owned())])?;
 
     let run = run_digest_verify(&url, "not-found", TEST_YEAR_MONTH)?;
     server
@@ -532,7 +537,10 @@ fn chain_broken_exit_2() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = String::from_utf8_lossy(&run.output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)?;
     assert_eq!(parsed["valid"], false);
-    assert_eq!(parsed["error"]["code"], "monthly_digest_chain_continuity_error");
+    assert_eq!(
+        parsed["error"]["code"],
+        "monthly_digest_chain_continuity_error"
+    );
 
     fs::remove_dir_all(run.temp_dir)?;
     Ok(())
@@ -592,7 +600,10 @@ fn unknown_signature_key_exit_2() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = String::from_utf8_lossy(&run.output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)?;
     assert_eq!(parsed["valid"], false);
-    assert_eq!(parsed["error"]["code"], "monthly_digest_unknown_signature_key");
+    assert_eq!(
+        parsed["error"]["code"],
+        "monthly_digest_unknown_signature_key"
+    );
 
     fs::remove_dir_all(run.temp_dir)?;
     Ok(())

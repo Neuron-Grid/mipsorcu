@@ -1,14 +1,14 @@
-//! Supabase RPC クライアント拡張: 月次 digest 検証サポート（Ledger Phase 2 §7.4）。
+//! Supabase RPC クライアント拡張: 月次 digest 検証サポート。
 //!
 //! 信頼境界ノート: 本モジュールは非秘密メタデータ（digest fields, hashes, public key）
 //! のみを Supabase から取得する。秘密情報（平文・鍵・JWT）を送受しない。
 
 use serde::{Deserialize, Serialize};
 
+use crate::ledger::MonthlyDigestPeriod;
 use crate::ledger::{
     LedgerHash, LedgerSequenceNo, LedgerSignature, LedgerSignatureKeyVersion, LedgerVerifyingKey,
 };
-use crate::ledger::MonthlyDigestPeriod;
 use crate::types::SourceEventAt;
 
 use super::response::{ensure_success, response_contains_marker};
@@ -92,12 +92,11 @@ impl TryFrom<DigestForVerificationResponse> for MonthlyDigestVerificationMateria
     type Error = SupabaseRpcError;
 
     fn try_from(r: DigestForVerificationResponse) -> Result<Self, Self::Error> {
-        let start_sequence_no =
-            LedgerSequenceNo::from_i64(r.start_sequence_no).map_err(|_| {
-                SupabaseRpcError::InvalidResponse(
-                    "digest verification RPC returned invalid start_sequence_no".to_owned(),
-                )
-            })?;
+        let start_sequence_no = LedgerSequenceNo::from_i64(r.start_sequence_no).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "digest verification RPC returned invalid start_sequence_no".to_owned(),
+            )
+        })?;
         let end_sequence_no = LedgerSequenceNo::from_i64(r.end_sequence_no).map_err(|_| {
             SupabaseRpcError::InvalidResponse(
                 "digest verification RPC returned invalid end_sequence_no".to_owned(),
@@ -114,19 +113,17 @@ impl TryFrom<DigestForVerificationResponse> for MonthlyDigestVerificationMateria
             ));
         }
 
-        let target_year_month =
-            MonthlyDigestPeriod::parse(&r.target_year_month).map_err(|_| {
-                SupabaseRpcError::InvalidResponse(
-                    "digest verification RPC returned invalid target_year_month".to_owned(),
-                )
-            })?;
+        let target_year_month = MonthlyDigestPeriod::parse(&r.target_year_month).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "digest verification RPC returned invalid target_year_month".to_owned(),
+            )
+        })?;
 
-        let digest_generated_at =
-            SourceEventAt::parse(&r.digest_generated_at).map_err(|_| {
-                SupabaseRpcError::InvalidResponse(
-                    "digest verification RPC returned invalid digest_generated_at".to_owned(),
-                )
-            })?;
+        let digest_generated_at = SourceEventAt::parse(&r.digest_generated_at).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "digest verification RPC returned invalid digest_generated_at".to_owned(),
+            )
+        })?;
 
         let signature = LedgerSignature::from_bytea_hex(&r.signature).map_err(|_| {
             SupabaseRpcError::InvalidResponse(
@@ -134,8 +131,8 @@ impl TryFrom<DigestForVerificationResponse> for MonthlyDigestVerificationMateria
             )
         })?;
 
-        let signature_key_version =
-            LedgerSignatureKeyVersion::new(r.signature_key_version as u32).map_err(|_| {
+        let signature_key_version = LedgerSignatureKeyVersion::new(r.signature_key_version as u32)
+            .map_err(|_| {
                 SupabaseRpcError::InvalidResponse(
                     "digest verification RPC returned invalid signature_key_version".to_owned(),
                 )
@@ -146,12 +143,11 @@ impl TryFrom<DigestForVerificationResponse> for MonthlyDigestVerificationMateria
             .map(|hex| decode_public_key_bytes(&hex, signature_key_version))
             .transpose()?;
 
-        let start_entry_hash =
-            LedgerHash::from_bytea_hex(&r.start_entry_hash).map_err(|_| {
-                SupabaseRpcError::InvalidResponse(
-                    "digest verification RPC returned invalid start_entry_hash".to_owned(),
-                )
-            })?;
+        let start_entry_hash = LedgerHash::from_bytea_hex(&r.start_entry_hash).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "digest verification RPC returned invalid start_entry_hash".to_owned(),
+            )
+        })?;
         let end_entry_hash = LedgerHash::from_bytea_hex(&r.end_entry_hash).map_err(|_| {
             SupabaseRpcError::InvalidResponse(
                 "digest verification RPC returned invalid end_entry_hash".to_owned(),

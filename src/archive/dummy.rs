@@ -57,9 +57,12 @@ impl ArchiveBackend for InMemoryArchiveBackend {
         package: &ArchiveExportPackage,
     ) -> Result<(), ArchiveBackendError> {
         let bytes = package.to_json_bytes()?;
-        let mut guard = self.store.lock().map_err(|_| ArchiveBackendError::BackendFailed {
-            code: "mutex_poisoned".into(),
-        })?;
+        let mut guard = self
+            .store
+            .lock()
+            .map_err(|_| ArchiveBackendError::BackendFailed {
+                code: "mutex_poisoned".into(),
+            })?;
         guard.insert(key.as_str().to_owned(), bytes);
         Ok(())
     }
@@ -70,9 +73,12 @@ impl ArchiveBackend for InMemoryArchiveBackend {
         package: &ArchiveExportPackage,
     ) -> Result<ArchiveVerifyOutcome, ArchiveBackendError> {
         let expected = package.to_json_bytes()?;
-        let guard = self.store.lock().map_err(|_| ArchiveBackendError::BackendFailed {
-            code: "mutex_poisoned".into(),
-        })?;
+        let guard = self
+            .store
+            .lock()
+            .map_err(|_| ArchiveBackendError::BackendFailed {
+                code: "mutex_poisoned".into(),
+            })?;
         match guard.get(key.as_str()) {
             None => Ok(ArchiveVerifyOutcome::NotFound),
             Some(stored) if *stored == expected => Ok(ArchiveVerifyOutcome::Valid),
@@ -81,9 +87,12 @@ impl ArchiveBackend for InMemoryArchiveBackend {
     }
 
     async fn list_objects(&self) -> Result<Vec<ArchiveObjectKey>, ArchiveBackendError> {
-        let guard = self.store.lock().map_err(|_| ArchiveBackendError::BackendFailed {
-            code: "mutex_poisoned".into(),
-        })?;
+        let guard = self
+            .store
+            .lock()
+            .map_err(|_| ArchiveBackendError::BackendFailed {
+                code: "mutex_poisoned".into(),
+            })?;
         guard
             .keys()
             .map(|k| ArchiveObjectKey::new(k.clone()))
@@ -244,7 +253,10 @@ mod tests {
         let key = make_key();
         let package = make_package();
 
-        backend.put_object(&key, &package).await.expect("put must succeed");
+        backend
+            .put_object(&key, &package)
+            .await
+            .expect("put must succeed");
         let outcome = backend
             .verify_object(&key, &package)
             .await

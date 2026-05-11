@@ -152,7 +152,7 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         "classification" => validate_classification_value(key, value),
         "trigger" => validate_trigger_value(key, value),
         "error_code" | "reason_code" | "archive_key" => validate_non_blank_short_string(key, value),
-        // ADR 0037: monthly_digest 専用フィールド
+        // monthly_digest 専用フィールド
         "target_year_month" => validate_year_month_value(key, value),
         "digest_hash" => validate_digest_hash_value(key, value),
         _ => Err(LedgerError::UnknownPayloadKey {
@@ -191,7 +191,7 @@ fn validate_year_month_value(key: &str, value: &Value) -> Result<(), LedgerError
     Ok(())
 }
 
-/// 64文字の小文字 hex 文字列を検証する（ADR 0037 の digest_hash フィールド用）。
+/// 64文字の小文字 hex 文字列を検証する（digest_hash フィールド用）。
 fn validate_digest_hash_value(key: &str, value: &Value) -> Result<(), LedgerError> {
     let Some(text) = value.as_str() else {
         return Err(LedgerError::InvalidPayloadField {
@@ -200,7 +200,11 @@ fn validate_digest_hash_value(key: &str, value: &Value) -> Result<(), LedgerErro
         });
     };
 
-    if text.len() != 64 || !text.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()) {
+    if text.len() != 64
+        || !text
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+    {
         return Err(LedgerError::InvalidPayloadField {
             key: key.to_owned(),
             expected: "a 64-character lowercase hex string",

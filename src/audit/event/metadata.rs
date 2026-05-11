@@ -286,7 +286,7 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
-            // Ledger Phase 2 §7.3: 月次 digest 生成失敗時の監査記録。
+            // 月次 digest 生成失敗時の監査記録。
             // error_code は failure result 時のみ記録する。
             AuditAction::MonthlyDigestGenerate => {
                 ["error_code", "target_year_month", SOURCE_EVENT_AT_KEY]
@@ -294,21 +294,25 @@ impl AuditMetadata {
                     .cloned()
                     .collect()
             }
-            // Ledger Phase 2 §7.4: 月次 digest 検証失敗時の監査記録。
+            // 月次 digest 検証失敗時の監査記録。
             AuditAction::MonthlyDigestVerify => {
                 ["error_code", "target_year_month", SOURCE_EVENT_AT_KEY]
                     .iter()
                     .cloned()
                     .collect()
             }
-            // Ledger Phase 2 §6: 外部アーカイブ export（成功・失敗両方を記録）。
+            // 外部アーカイブ export（成功・失敗両方を記録）。
             // archive_key は success 時のみ有効（validate_metadata_values で検証）。
-            AuditAction::ArchiveExport => {
-                ["archive_key", "digest_hash", "target_year_month", "error_code", SOURCE_EVENT_AT_KEY]
-                    .iter()
-                    .cloned()
-                    .collect()
-            }
+            AuditAction::ArchiveExport => [
+                "archive_key",
+                "digest_hash",
+                "target_year_month",
+                "error_code",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
         };
 
         for key in object.keys() {
@@ -360,7 +364,7 @@ fn validate_required_metadata_keys(
         // monthly_digest_generate / verify は failure 時のみ記録されるが、
         // error_code は必須ではなく、source_event_at のみが必須。
         AuditAction::MonthlyDigestGenerate | AuditAction::MonthlyDigestVerify => Vec::new(),
-        // Ledger Phase 2 §6: archive export は target_year_month が常に必須。
+        // archive export は target_year_month が常に必須。
         AuditAction::ArchiveExport => vec!["target_year_month"],
     };
 

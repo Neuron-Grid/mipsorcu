@@ -1,9 +1,9 @@
-//! 月次 digest 生成 use case（Ledger Phase 2 §7.3）。
+//! 月次 digest 生成 use case。
 //!
 //! SBC 内で完結する処理:
 //! 1. 重複チェック（同一年月の digest が既に存在しないか確認）
 //! 2. 対象月の `ledger_entries` 範囲情報を Supabase から取得
-//! 3. ADR 0037 の canonical form を生成（単一関数）
+//! 3. 定義済み canonical form を生成（単一関数）
 //! 4. digest hash を計算
 //! 5. Ed25519 署名
 //! 6. `monthly_digest` ledger entry として `rpc_append_ledger_entry` 経由で記録
@@ -27,7 +27,7 @@ use crate::types::SourceEventAt;
 pub struct GenerateMonthlyDigestInput {
     /// 対象年月（YYYY-MM 形式）。
     pub period: MonthlyDigestPeriod,
-    /// digest 生成時刻。SBC が決定（ADR 0037 §2）。
+    /// digest 生成時刻。SBC が決定。
     pub generated_at: SourceEventAt,
     /// 生成元を示すリクエスト ID。
     pub request_id: RequestId,
@@ -36,7 +36,7 @@ pub struct GenerateMonthlyDigestInput {
 /// 月次 digest 生成失敗の原因分類。
 ///
 /// 注意: 監査記録の失敗（`record_monthly_digest_failure_audit` RPC 失敗）は
-/// エラーとして伝播せず、ログに記録するのみとする（AGENTS.md §監査追記失敗時のフォールバック参照）。
+/// エラーとして伝播せず、ログに記録するのみとする。
 /// CLI 実行者にはログを確認するよう促す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerateMonthlyDigestError {
@@ -67,26 +67,17 @@ impl GenerateMonthlyDigestError {
 impl std::fmt::Display for GenerateMonthlyDigestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DuplicateDigest => write!(
-                formatter,
-                "monthly digest already exists for this period"
-            ),
-            Self::NoEntriesForPeriod => write!(
-                formatter,
-                "no ledger entries found for the target period"
-            ),
-            Self::FetchFailed { code } => write!(
-                formatter,
-                "monthly digest fetch failed: {code}"
-            ),
-            Self::BuildFailed { code } => write!(
-                formatter,
-                "monthly digest build failed: {code}"
-            ),
-            Self::AppendFailed { code } => write!(
-                formatter,
-                "monthly digest ledger append failed: {code}"
-            ),
+            Self::DuplicateDigest => {
+                write!(formatter, "monthly digest already exists for this period")
+            }
+            Self::NoEntriesForPeriod => {
+                write!(formatter, "no ledger entries found for the target period")
+            }
+            Self::FetchFailed { code } => write!(formatter, "monthly digest fetch failed: {code}"),
+            Self::BuildFailed { code } => write!(formatter, "monthly digest build failed: {code}"),
+            Self::AppendFailed { code } => {
+                write!(formatter, "monthly digest ledger append failed: {code}")
+            }
         }
     }
 }
@@ -95,7 +86,7 @@ impl std::error::Error for GenerateMonthlyDigestError {}
 
 /// 月次 digest を生成し `ledger_entries` に記録する。
 ///
-/// 失敗時は `audit_events` に同期で記録する（AGENTS.md §監査追記失敗時のフォールバック参照）。
+/// 失敗時は `audit_events` に同期で記録する。
 ///
 /// # 返り値
 /// 成功時: `Ok(SignedMonthlyDigest)` — 署名済み digest 情報
@@ -272,11 +263,10 @@ async fn append_digest_ledger_entry(
         }
     })?;
 
-    let ledger_entry_id = LedgerEntryId::generate().map_err(|error| {
-        GenerateMonthlyDigestError::BuildFailed {
+    let ledger_entry_id =
+        LedgerEntryId::generate().map_err(|error| GenerateMonthlyDigestError::BuildFailed {
             code: error.to_string(),
-        }
-    })?;
+        })?;
 
     let draft = LedgerAppendDraft::new(LedgerAppendDraftParts {
         ledger_entry_id,
@@ -313,7 +303,7 @@ async fn append_digest_ledger_entry(
 
 /// 月次 digest 生成失敗を `audit_events` に同期記録するヘルパー。
 ///
-/// AGENTS.md §8 フェイルクローズ: 失敗時は `audit_events` への記録を試みる。
+/// 失敗時は `audit_events` への記録を試みる。
 /// 監査記録自体の失敗はログに記録するが、元の失敗を上書きしない。
 pub async fn record_monthly_digest_failure_audit(
     supabase_client: &Arc<SupabaseClient>,

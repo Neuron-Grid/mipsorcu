@@ -1,4 +1,4 @@
-//! 月次 digest canonical form（ADR 0037）。
+//! 月次 digest canonical form。
 //!
 //! **`build_monthly_digest_canonical_form` が canonical form 生成の唯一の実装である。**
 //! 呼び出し側で独自に JSON を組み立てることは禁止されている。
@@ -20,11 +20,11 @@ use super::ids::LedgerSequenceNo;
 use super::signature::{LedgerSignature, LedgerSignatureKeyVersion};
 use crate::types::SourceEventAt;
 
-/// digest canonical form の schema version（ADR 0037 §1）。
-/// Phase 1 の `canonicalization_version` とは独立した系統。
+/// digest canonical form の schema version。
+/// 既存の `canonicalization_version` とは独立した系統。
 pub const DIGEST_SCHEMA_VERSION_V1: u32 = 1;
 
-/// digest 生成主体の固定識別子（ADR 0037 §2 `generated_by`）。
+/// digest 生成主体の固定識別子（`generated_by`）。
 pub const DIGEST_GENERATED_BY: &str = "mipsorcu-sbc";
 
 /// 月次 digest の対象年月。`YYYY-MM` 形式で検証済み。
@@ -63,7 +63,7 @@ fn validate_year_month_format(value: &str) -> Result<(), LedgerError> {
     Ok(())
 }
 
-/// ADR 0037 §3 に従った digest canonical form のバイト列。
+/// digest canonical form のバイト列。
 ///
 /// SHA-256 digest hash および Ed25519 署名の入力。
 /// `serde_json` compact 出力（余分な空白・改行なし）を UTF-8 として保持する。
@@ -87,7 +87,7 @@ impl fmt::Debug for DigestCanonicalBytes {
 
 /// digest canonical form の SHA-256 hash（32 バイト）。
 ///
-/// ADR 0037 §4: `LedgerHash::from_canonical_payload` と同一方式（SHA-256）を
+/// `LedgerHash::from_canonical_payload` と同一方式（SHA-256）を
 /// digest canonical form に適用する。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DigestHash([u8; LEDGER_HASH_LENGTH]);
@@ -103,7 +103,7 @@ impl DigestHash {
         Self(hash)
     }
 
-    /// 小文字 hex 文字列（64 文字）に変換する。Phase 1 の `LedgerHash::to_hex()` と互換。
+    /// 小文字 hex 文字列（64 文字）に変換する。既存の `LedgerHash::to_hex()` と互換。
     pub fn to_hex(self) -> String {
         hex::encode(self.0)
     }
@@ -144,7 +144,7 @@ pub struct SignedMonthlyDigest {
     pub digest_generated_at: SourceEventAt,
     /// 署名に使用した Ed25519 鍵のバージョン。
     pub signature_key_version: LedgerSignatureKeyVersion,
-    /// ADR 0037 §3 の canonical JSON バイト列（署名対象）。
+    /// canonical JSON バイト列（署名対象）。
     pub canonical_bytes: DigestCanonicalBytes,
     /// canonical bytes の SHA-256 hash（外部アーカイブ・timestamping 用）。
     pub digest_hash: DigestHash,
@@ -167,15 +167,15 @@ impl fmt::Debug for SignedMonthlyDigest {
     }
 }
 
-/// ADR 0037 §2 で定義された 12 フィールドを含む canonical JSON を生成する。
+/// 定義済みの 12 フィールドを含む canonical JSON を生成する。
 ///
 /// **この関数が monthly digest canonical form 生成の唯一の実装である。**
 /// 呼び出し側が独自に JSON を組み立てることは禁止されている。
 ///
-/// フィールドはアルファベット順（辞書順）に固定されており（ADR 0037 §3）、
+/// フィールドはアルファベット順（辞書順）に固定されている。
 /// 構造変更時は `DIGEST_SCHEMA_VERSION_V1` をインクリメントする。
 ///
-/// 引数が多い理由: ADR 0037 §2 で規定された 12 フィールドのうち呼び出し側が決定する
+/// 引数が多い理由: 定義済み 12 フィールドのうち呼び出し側が決定する
 /// 全フィールドを受け取る必要があり、構造体でラップすることはしない。
 #[allow(clippy::too_many_arguments)]
 pub fn build_monthly_digest_canonical_form(
@@ -192,7 +192,7 @@ pub fn build_monthly_digest_canonical_form(
     let start_hash_hex = start_entry_hash.to_hex();
     let end_hash_hex = end_entry_hash.to_hex();
 
-    // フィールド宣言順 == アルファベット順（ADR 0037 §3 参照）
+    // フィールド宣言順 == アルファベット順
     let document = DigestCanonicalDocument {
         digest_generated_at: digest_generated_at.as_str(),
         digest_schema_version: DIGEST_SCHEMA_VERSION_V1,
@@ -214,11 +214,11 @@ pub fn build_monthly_digest_canonical_form(
     Ok(DigestCanonicalBytes(bytes))
 }
 
-/// ADR 0037 §2 のフィールド一覧（アルファベット順固定）。
+/// 定義済みフィールド一覧（アルファベット順固定）。
 ///
 /// `serde_json::to_vec` はフィールド宣言順で JSON を生成するため、
 /// 宣言順がアルファベット順と一致していることが canonical 性の保証となる。
-/// フィールドの追加・並び替えは ADR のスキーマバージョンアップを要する。
+/// フィールドの追加・並び替えはスキーマバージョンアップを要する。
 #[derive(Serialize)]
 struct DigestCanonicalDocument<'a> {
     // 1. digest_generated_at
@@ -366,10 +366,7 @@ mod tests {
     fn canonical_form_contains_correct_generated_by() {
         let bytes = make_canonical_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(bytes.as_bytes()).unwrap();
-        assert_eq!(
-            parsed["generated_by"].as_str(),
-            Some(DIGEST_GENERATED_BY)
-        );
+        assert_eq!(parsed["generated_by"].as_str(), Some(DIGEST_GENERATED_BY));
     }
 
     #[test]
@@ -399,7 +396,7 @@ mod tests {
 
     #[test]
     fn canonical_form_matches_adr_sample_structure() {
-        // ADR 0037 §7 のサンプル JSON との構造的整合性を確認する
+        // サンプル JSON との構造的整合性を確認する
         let bytes = build_monthly_digest_canonical_form(
             &MonthlyDigestPeriod::parse("2026-05").unwrap(),
             LedgerSequenceNo::new(109).unwrap(),

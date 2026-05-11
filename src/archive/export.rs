@@ -39,8 +39,8 @@ impl ArchiveExportPackage {
     /// `Plaintext`・`MasterKey`・`DataKey`・`RawJwt` が含まれないため、
     /// 秘密情報除外の保証が型レベルで成立する。
     pub fn from_digest(digest: &SignedMonthlyDigest) -> Result<Self, ArchiveBackendError> {
-        let digest_canonical: Value =
-            serde_json::from_slice(digest.canonical_bytes.as_bytes()).map_err(|error| {
+        let digest_canonical: Value = serde_json::from_slice(digest.canonical_bytes.as_bytes())
+            .map_err(|error| {
                 ArchiveBackendError::SerializationFailed(format!(
                     "failed to parse digest canonical bytes: {error}"
                 ))
@@ -60,7 +60,7 @@ impl ArchiveExportPackage {
     /// ```json
     /// {
     ///   "archive_schema_version": 1,
-    ///   "digest": { ...ADR 0037 の 12 フィールド... },
+    ///   "digest": { ...定義済みの 12 フィールド... },
     ///   "digest_hash": "<64文字小文字 hex>",
     ///   "sbc_signature": "<128文字小文字 hex>",
     ///   "signature_key_version": 1
@@ -169,7 +169,8 @@ mod tests {
     #[test]
     fn from_digest_produces_valid_package() {
         let digest = make_test_digest();
-        let package = ArchiveExportPackage::from_digest(&digest).expect("package build must succeed");
+        let package =
+            ArchiveExportPackage::from_digest(&digest).expect("package build must succeed");
         assert_eq!(package.digest_hash_hex(), digest.digest_hash.to_hex());
     }
 
@@ -222,7 +223,9 @@ mod tests {
         let package = ArchiveExportPackage::from_digest(&digest).unwrap();
         let bytes = package.to_json_bytes().unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let sig = parsed["sbc_signature"].as_str().expect("sbc_signature must be string");
+        let sig = parsed["sbc_signature"]
+            .as_str()
+            .expect("sbc_signature must be string");
         assert_eq!(
             sig.len(),
             128,

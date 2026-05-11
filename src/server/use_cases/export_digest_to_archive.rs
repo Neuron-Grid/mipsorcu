@@ -1,4 +1,4 @@
-//! 月次 digest 外部アーカイブ export use case（Ledger Phase 2 §6）。
+//! 月次 digest 外部アーカイブ export use case。
 //!
 //! SBC 内で完結する処理:
 //! 1. `ArchiveExportPackage::from_digest` — 型安全パッケージ構築
@@ -96,20 +96,18 @@ pub async fn export_digest_to_archive<B: ArchiveBackend>(
             request_id = %request_id.as_canonical_string(),
             period = period.as_str(),
             error = %error,
-            error_code = error_code,
+            error_code = %error_code,
             "archive export PUT failed"
         );
         record_archive_export_failure_audit(
             supabase_client,
             &request_id,
             period,
-            error_code,
+            &error_code,
             &exported_at,
         )
         .await;
-        return Err(ExportDigestToArchiveError::BackendFailed {
-            code: error_code.to_owned(),
-        });
+        return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
     }
 
     // ── 4. ledger entry を追記 ──
@@ -157,12 +155,27 @@ pub async fn export_digest_to_archive<B: ArchiveBackend>(
     }
 }
 
-fn backend_error_code(error: &ArchiveBackendError) -> &'static str {
+/// `ArchiveBackendError` を `audit_events.metadata_json.error_code` 用の
+/// 文字列に変換する。
+///
+/// `BackendFailed { code }` の `code` が `archive_export_*` プレフィクスで
+/// 始まる場合は backend 固有の細粒度コードとして透過する（S3 backend が
+/// 返す `archive_export_unauthenticated` / `archive_export_overwrite_rejected`
+/// 等を audit にそのまま記録するため）。それ以外は固定文字列に丸める。
+fn backend_error_code(error: &ArchiveBackendError) -> String {
     match error {
-        ArchiveBackendError::InvalidKey { .. } => "archive_export_invalid_key",
-        ArchiveBackendError::SerializationFailed(_) => "archive_export_serialization_failed",
-        ArchiveBackendError::BackendFailed { .. } => "archive_export_backend_failed",
-        ArchiveBackendError::IoError(_) => "archive_export_io_error",
+        ArchiveBackendError::InvalidKey { .. } => "archive_export_invalid_key".to_owned(),
+        ArchiveBackendError::SerializationFailed(_) => {
+            "archive_export_serialization_failed".to_owned()
+        }
+        ArchiveBackendError::BackendFailed { code } => {
+            if code.starts_with("archive_export_") {
+                code.clone()
+            } else {
+                "archive_export_backend_failed".to_owned()
+            }
+        }
+        ArchiveBackendError::IoError(_) => "archive_export_io_error".to_owned(),
     }
 }
 
@@ -191,8 +204,8 @@ async fn append_archive_exported_ledger_entry(
         "archive_exported_payload_build_failed"
     })?;
 
-    let ledger_entry_id = LedgerEntryId::generate()
-        .map_err(|_| "archive_exported_id_generate_failed")?;
+    let ledger_entry_id =
+        LedgerEntryId::generate().map_err(|_| "archive_exported_id_generate_failed")?;
 
     let draft = LedgerAppendDraft::new(LedgerAppendDraftParts {
         ledger_entry_id,
@@ -356,9 +369,9 @@ mod tests {
     use crate::archive::dummy::InMemoryArchiveBackend;
     use crate::archive::export::ArchiveExportPackage;
     use crate::ledger::{
-        DigestHash, LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerHash, LedgerSequenceNo, LedgerSignature,
-        LedgerSignatureKeyVersion, LedgerSigningKey, MonthlyDigestPeriod, SignedMonthlyDigest,
-        build_monthly_digest_canonical_form,
+        DigestHash, LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerHash, LedgerSequenceNo,
+        LedgerSignature, LedgerSignatureKeyVersion, LedgerSigningKey, MonthlyDigestPeriod,
+        SignedMonthlyDigest, build_monthly_digest_canonical_form,
     };
 
     // ─────────────────────────────── Fixtures ───────────────────────────────
@@ -491,6 +504,25 @@ mod tests {
     }
 
     #[test]
+    fn backend_error_code_passes_through_archive_export_prefix() {
+        let error = ArchiveBackendError::BackendFailed {
+            code: "archive_export_overwrite_rejected".to_owned(),
+        };
+        assert_eq!(
+            backend_error_code(&error),
+            "archive_export_overwrite_rejected"
+        );
+    }
+
+    #[test]
+    fn backend_error_code_passes_through_unauthenticated() {
+        let error = ArchiveBackendError::BackendFailed {
+            code: "archive_export_unauthenticated".to_owned(),
+        };
+        assert_eq!(backend_error_code(&error), "archive_export_unauthenticated");
+    }
+
+    #[test]
     fn backend_error_code_maps_io_error() {
         let error = ArchiveBackendError::IoError(std::io::Error::other("disk full"));
         assert_eq!(backend_error_code(&error), "archive_export_io_error");
@@ -612,9 +644,8 @@ mod tests {
         let body = if content_length == 0 {
             Value::Null
         } else {
-            serde_json::from_slice(&buffer[body_start..body_end]).map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-            })?
+            serde_json::from_slice(&buffer[body_start..body_end])
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
         };
 
         Ok(CapturedRequest { path, body })

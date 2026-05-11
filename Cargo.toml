@@ -7,15 +7,12 @@ publish = false
 [dependencies]
 axum = { version = "0.8", features = ["json"] }
 chacha20poly1305 = "0.10.1"
-# Ledger Phase 1 の Ed25519 署名用。暗号プリミティブを自作せず、canonical payload
-# への署名・検証に監査済み実装を使い、秘密鍵 drop 時の zeroize を有効化する。
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["fast", "std", "zeroize"] }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.4.2"
 hex = "0.4"
+hmac = "0.13"
 http = "1"
-# rust_crypto feature pulls in rsa crate (RUSTSEC-2023-0071). See .cargo/audit.toml
-# for suppression justification. Only RS256 verification (public key) is used.
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 libc = "0.2"
 reqwest = { version = "0.13", features = ["rustls", "json"] }

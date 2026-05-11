@@ -69,12 +69,9 @@ impl LedgerAppender {
 
     /// digest canonical bytes（任意の &[u8]）に対して Ed25519 署名を生成する。
     ///
-    /// ADR 0037 §5 に従い、Phase 1 の `LedgerSigningKey` を再利用する。
+    /// 既存の `LedgerSigningKey` を再利用して digest bytes に署名する。
     /// ledger entry canonical payload への署名とは別の操作。
-    pub fn sign_digest_bytes(
-        &self,
-        bytes: &[u8],
-    ) -> Result<LedgerSignature, LedgerError> {
+    pub fn sign_digest_bytes(&self, bytes: &[u8]) -> Result<LedgerSignature, LedgerError> {
         self.signing_key
             .sign_raw_bytes(self.signing_key.key_version(), bytes)
     }

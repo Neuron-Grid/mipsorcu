@@ -1,4 +1,4 @@
-//! 月次 digest CLI コマンド（Ledger Phase 2 §7.3 / §7.4）。
+//! 月次 digest CLI コマンド。
 //!
 //! 使い方:
 //!   mipsorcu digest generate --year-month YYYY-MM --format json
@@ -20,8 +20,8 @@ use crate::server::use_cases::generate_monthly_digest::{
     record_monthly_digest_failure_audit,
 };
 use crate::server::use_cases::verify_monthly_digest::{
-    VerifyMonthlyDigestError, VerifyMonthlyDigestInput, verify_monthly_digest,
-    record_monthly_digest_verify_failure_audit,
+    VerifyMonthlyDigestError, VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit,
+    verify_monthly_digest,
 };
 use crate::types::SourceEventAt;
 
@@ -158,15 +158,16 @@ async fn run_generate_command(
     ));
 
     let signing_key = config.ledger_signing_key.clone();
-    let ledger_appender = Arc::new(
-        crate::server::ledger_appender::LedgerAppender::new(supabase_client.clone(), signing_key),
-    );
+    let ledger_appender = Arc::new(crate::server::ledger_appender::LedgerAppender::new(
+        supabase_client.clone(),
+        signing_key,
+    ));
 
-    let generated_at = SourceEventAt::now_utc()
-        .map_err(|error| DigestCliError::Config(error.to_string()))?;
+    let generated_at =
+        SourceEventAt::now_utc().map_err(|error| DigestCliError::Config(error.to_string()))?;
 
-    let request_id = RequestId::generate()
-        .map_err(|error| DigestCliError::Config(error.to_string()))?;
+    let request_id =
+        RequestId::generate().map_err(|error| DigestCliError::Config(error.to_string()))?;
 
     let input = GenerateMonthlyDigestInput {
         period: period.clone(),
@@ -185,7 +186,7 @@ async fn run_generate_command(
             digest_generated_at: signed_digest.digest_generated_at.as_str().to_owned(),
         }),
         Err(error) => {
-            // 生成失敗を audit_events に同期記録（AGENTS.md §8 フェイルクローズ）
+            // 生成失敗を audit_events に同期記録する
             record_monthly_digest_failure_audit(
                 &supabase_client,
                 &request_id,
@@ -232,11 +233,11 @@ async fn run_verify_command(
         config.supabase_publishable_key.clone(),
     ));
 
-    let verified_at = SourceEventAt::now_utc()
-        .map_err(|error| DigestCliError::Config(error.to_string()))?;
+    let verified_at =
+        SourceEventAt::now_utc().map_err(|error| DigestCliError::Config(error.to_string()))?;
 
-    let request_id = RequestId::generate()
-        .map_err(|error| DigestCliError::Config(error.to_string()))?;
+    let request_id =
+        RequestId::generate().map_err(|error| DigestCliError::Config(error.to_string()))?;
 
     let input = VerifyMonthlyDigestInput {
         period: period.clone(),
@@ -254,7 +255,7 @@ async fn run_verify_command(
             error_variant: None,
         }),
         Err(error) => {
-            // 検証失敗を audit_events に同期記録（AGENTS.md §8 フェイルクローズ）
+            // 検証失敗を audit_events に同期記録する
             record_monthly_digest_verify_failure_audit(
                 &supabase_client,
                 &request_id,

@@ -1,4 +1,4 @@
-//! 月次 digest 検証 use case（Ledger Phase 2 §7.4）。
+//! 月次 digest 検証 use case。
 //!
 //! 検証フロー（fail-close — 不明な場合は成功扱いしない）:
 //! 1. digest 検証マテリアルを取得（RPC）
@@ -16,10 +16,12 @@
 
 use std::sync::Arc;
 
-use crate::audit::{AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId};
+use crate::audit::{
+    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
+};
 use crate::ledger::{
-    LedgerChainHead, LedgerError, LedgerSequenceNo, LedgerVerifyingKey,
-    MonthlyDigestPeriod, build_monthly_digest_canonical_form, verify_ledger_chain, DigestHash,
+    DigestHash, LedgerChainHead, LedgerError, LedgerSequenceNo, LedgerVerifyingKey,
+    MonthlyDigestPeriod, build_monthly_digest_canonical_form, verify_ledger_chain,
 };
 use crate::server::supabase::SupabaseClient;
 use crate::types::SourceEventAt;
@@ -69,7 +71,10 @@ impl std::fmt::Display for VerifyMonthlyDigestError {
                 "chain end hash does not match digest end_entry_hash"
             ),
             Self::UnknownSignatureKey => {
-                write!(formatter, "signing public key not registered for this key version")
+                write!(
+                    formatter,
+                    "signing public key not registered for this key version"
+                )
             }
             Self::DigestHashMismatch => write!(
                 formatter,
@@ -136,7 +141,10 @@ pub async fn verify_monthly_digest(
 
     // ── 2. 対象範囲の chain エントリを取得 ──
     let rows = match supabase_client
-        .export_ledger_verification_materials(materials.start_sequence_no, materials.end_sequence_no)
+        .export_ledger_verification_materials(
+            materials.start_sequence_no,
+            materials.end_sequence_no,
+        )
         .await
     {
         Ok(rows) => rows,
@@ -215,8 +223,8 @@ pub async fn verify_monthly_digest(
     // ── 4. initial_head を構築（最初のエントリの previous_entry_hash を使用） ──
     let first_previous_hash = rows[0].previous_entry_hash;
     let initial_head =
-        LedgerChainHead::new(materials.start_sequence_no.get() - 1, first_previous_hash)
-            .map_err(|error| {
+        LedgerChainHead::new(materials.start_sequence_no.get() - 1, first_previous_hash).map_err(
+            |error| {
                 tracing::error!(
                     request_id = %input.request_id.as_canonical_string(),
                     period = period.as_str(),
@@ -227,7 +235,8 @@ pub async fn verify_monthly_digest(
                 VerifyMonthlyDigestError::FetchFailed {
                     code: "monthly_digest_chain_head_build_failed",
                 }
-            })?;
+            },
+        )?;
 
     // ── 5. chain 連続性を検証 ──
     let final_head = match verify_ledger_chain(&entries, initial_head, &verification_keys) {
@@ -386,7 +395,7 @@ pub async fn verify_monthly_digest(
 
 /// 月次 digest 検証失敗を `audit_events` に同期記録するヘルパー。
 ///
-/// AGENTS.md §8 フェイルクローズ: 失敗時は `audit_events` への記録を試みる。
+/// 失敗時は `audit_events` への記録を試みる。
 /// 監査記録自体の失敗はログに記録するが、元の失敗を上書きしない。
 pub async fn record_monthly_digest_verify_failure_audit(
     supabase_client: &Arc<SupabaseClient>,
@@ -474,4 +483,3 @@ fn map_ledger_error_to_code(error: &LedgerError) -> &'static str {
         _ => "chain_verification_error",
     }
 }
-

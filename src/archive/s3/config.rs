@@ -1,0 +1,506 @@
+//! `S3ArchiveBackendConfig` の env 読み出しとバリデーション。
+//!
+//! credentials は `Debug` で必ず `<redacted>` 化される。ログに `Authorization`
+//! ヘッダ・`secret_access_key` を出さないため、本構造体を直接 `tracing` へ
+//! 流す経路があっても秘密情報が漏れない。
+
+use std::fmt;
+
+use super::error::S3BackendError;
+use super::object_lock::S3ObjectLockMode;
+
+// Env keys（独自スコープ）
+
+pub const ENV_S3_ENDPOINT_URL: &str = "MIPSORCU_ARCHIVE_S3_ENDPOINT_URL";
+pub const ENV_S3_REGION: &str = "MIPSORCU_ARCHIVE_S3_REGION";
+pub const ENV_S3_BUCKET: &str = "MIPSORCU_ARCHIVE_S3_BUCKET";
+pub const ENV_S3_ACCESS_KEY_ID: &str = "MIPSORCU_ARCHIVE_S3_ACCESS_KEY_ID";
+pub const ENV_S3_SECRET_ACCESS_KEY: &str = "MIPSORCU_ARCHIVE_S3_SECRET_ACCESS_KEY";
+pub const ENV_S3_SESSION_TOKEN: &str = "MIPSORCU_ARCHIVE_S3_SESSION_TOKEN";
+pub const ENV_S3_OBJECT_LOCK_MODE: &str = "MIPSORCU_ARCHIVE_S3_OBJECT_LOCK_MODE";
+pub const ENV_S3_RETENTION_DAYS: &str = "MIPSORCU_ARCHIVE_S3_RETENTION_DAYS";
+pub const ENV_S3_PATH_STYLE: &str = "MIPSORCU_ARCHIVE_S3_PATH_STYLE";
+pub const ENV_S3_FORBID_OVERWRITE: &str = "MIPSORCU_ARCHIVE_S3_FORBID_OVERWRITE";
+pub const ENV_S3_MAX_RETRIES: &str = "MIPSORCU_ARCHIVE_S3_MAX_RETRIES";
+pub const ENV_S3_RETRY_BASE_MILLIS: &str = "MIPSORCU_ARCHIVE_S3_RETRY_BASE_MILLIS";
+
+const DEFAULT_PATH_STYLE: bool = true;
+const DEFAULT_FORBID_OVERWRITE: bool = true;
+const DEFAULT_MAX_RETRIES: u32 = 4;
+const DEFAULT_RETRY_BASE_MILLIS: u64 = 250;
+
+// SecretString — `Debug` で `<redacted>` 化される簡易ラッパ
+
+#[derive(Clone)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+// S3ArchiveBackendConfigError — env load 失敗の分類
+
+#[derive(Debug)]
+pub enum S3ArchiveBackendConfigError {
+    MissingVar { name: &'static str },
+    InvalidValue { name: &'static str, reason: String },
+}
+
+impl fmt::Display for S3ArchiveBackendConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingVar { name } => {
+                write!(formatter, "missing required env var: {name}")
+            }
+            Self::InvalidValue { name, reason } => {
+                write!(formatter, "invalid env var {name}: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for S3ArchiveBackendConfigError {}
+
+// S3ArchiveBackendConfig
+
+#[derive(Clone)]
+pub struct S3ArchiveBackendConfig {
+    endpoint_url: String,
+    region: String,
+    bucket: String,
+    access_key_id: String,
+    secret_access_key: SecretString,
+    session_token: Option<SecretString>,
+    object_lock_mode: S3ObjectLockMode,
+    retention_days: u32,
+    path_style: bool,
+    forbid_overwrite: bool,
+    max_retries: u32,
+    retry_base_millis: u64,
+}
+
+impl S3ArchiveBackendConfig {
+    /// テスト・統合テスト用の直接コンストラクタ。env 読み出し本体は
+    /// `from_env` を使用する。
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        endpoint_url: String,
+        region: String,
+        bucket: String,
+        access_key_id: String,
+        secret_access_key: String,
+        session_token: Option<String>,
+        object_lock_mode: S3ObjectLockMode,
+        retention_days: u32,
+    ) -> Result<Self, S3BackendError> {
+        if endpoint_url.trim().is_empty() {
+            return Err(S3BackendError::InvalidConfig("endpoint_url is empty"));
+        }
+        if region.trim().is_empty() {
+            return Err(S3BackendError::InvalidConfig("region is empty"));
+        }
+        if bucket.trim().is_empty() {
+            return Err(S3BackendError::InvalidConfig("bucket is empty"));
+        }
+        if access_key_id.trim().is_empty() {
+            return Err(S3BackendError::InvalidConfig("access_key_id is empty"));
+        }
+        if secret_access_key.trim().is_empty() {
+            return Err(S3BackendError::InvalidConfig("secret_access_key is empty"));
+        }
+        if retention_days == 0 {
+            return Err(S3BackendError::InvalidConfig("retention_days must be > 0"));
+        }
+        Ok(Self {
+            endpoint_url,
+            region,
+            bucket,
+            access_key_id,
+            secret_access_key: SecretString::new(secret_access_key),
+            session_token: session_token.map(SecretString::new),
+            object_lock_mode,
+            retention_days,
+            path_style: DEFAULT_PATH_STYLE,
+            forbid_overwrite: DEFAULT_FORBID_OVERWRITE,
+            max_retries: DEFAULT_MAX_RETRIES,
+            retry_base_millis: DEFAULT_RETRY_BASE_MILLIS,
+        })
+    }
+
+    pub fn with_path_style(mut self, path_style: bool) -> Self {
+        self.path_style = path_style;
+        self
+    }
+
+    pub fn with_forbid_overwrite(mut self, forbid_overwrite: bool) -> Self {
+        self.forbid_overwrite = forbid_overwrite;
+        self
+    }
+
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    pub fn with_retry_base_millis(mut self, retry_base_millis: u64) -> Self {
+        self.retry_base_millis = retry_base_millis;
+        self
+    }
+
+    pub fn endpoint_url(&self) -> &str {
+        &self.endpoint_url
+    }
+
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    pub fn access_key_id(&self) -> &str {
+        &self.access_key_id
+    }
+
+    pub fn secret_access_key(&self) -> &SecretString {
+        &self.secret_access_key
+    }
+
+    pub fn session_token(&self) -> Option<&SecretString> {
+        self.session_token.as_ref()
+    }
+
+    pub fn object_lock_mode(&self) -> S3ObjectLockMode {
+        self.object_lock_mode
+    }
+
+    pub fn retention_days(&self) -> u32 {
+        self.retention_days
+    }
+
+    pub fn path_style(&self) -> bool {
+        self.path_style
+    }
+
+    pub fn forbid_overwrite(&self) -> bool {
+        self.forbid_overwrite
+    }
+
+    pub fn max_retries(&self) -> u32 {
+        self.max_retries
+    }
+
+    pub fn retry_base_millis(&self) -> u64 {
+        self.retry_base_millis
+    }
+
+    /// env から構成を読む。`get_var(name) -> Option<String>` を受けることで
+    /// テスト時に `HashMap` 由来の値を注入できる。
+    pub fn from_env<F>(get_var: F) -> Result<Self, S3ArchiveBackendConfigError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let endpoint_url = required(&get_var, ENV_S3_ENDPOINT_URL)?;
+        let region = required(&get_var, ENV_S3_REGION)?;
+        let bucket = required(&get_var, ENV_S3_BUCKET)?;
+        let access_key_id = required(&get_var, ENV_S3_ACCESS_KEY_ID)?;
+        let secret_access_key = required(&get_var, ENV_S3_SECRET_ACCESS_KEY)?;
+        let session_token = optional(&get_var, ENV_S3_SESSION_TOKEN);
+
+        let object_lock_mode_raw = required(&get_var, ENV_S3_OBJECT_LOCK_MODE)?;
+        let object_lock_mode = S3ObjectLockMode::parse(&object_lock_mode_raw).map_err(|error| {
+            S3ArchiveBackendConfigError::InvalidValue {
+                name: ENV_S3_OBJECT_LOCK_MODE,
+                reason: error.to_string(),
+            }
+        })?;
+
+        let retention_days_raw = required(&get_var, ENV_S3_RETENTION_DAYS)?;
+        let retention_days: u32 = retention_days_raw.trim().parse().map_err(|_| {
+            S3ArchiveBackendConfigError::InvalidValue {
+                name: ENV_S3_RETENTION_DAYS,
+                reason: "must be a non-negative integer".to_owned(),
+            }
+        })?;
+        if retention_days == 0 {
+            return Err(S3ArchiveBackendConfigError::InvalidValue {
+                name: ENV_S3_RETENTION_DAYS,
+                reason: "must be greater than 0".to_owned(),
+            });
+        }
+
+        let path_style =
+            parse_bool_optional(&get_var, ENV_S3_PATH_STYLE)?.unwrap_or(DEFAULT_PATH_STYLE);
+        let forbid_overwrite = parse_bool_optional(&get_var, ENV_S3_FORBID_OVERWRITE)?
+            .unwrap_or(DEFAULT_FORBID_OVERWRITE);
+        let max_retries =
+            parse_u32_optional(&get_var, ENV_S3_MAX_RETRIES)?.unwrap_or(DEFAULT_MAX_RETRIES);
+        let retry_base_millis = parse_u64_optional(&get_var, ENV_S3_RETRY_BASE_MILLIS)?
+            .unwrap_or(DEFAULT_RETRY_BASE_MILLIS);
+
+        Ok(Self {
+            endpoint_url,
+            region,
+            bucket,
+            access_key_id,
+            secret_access_key: SecretString::new(secret_access_key),
+            session_token: session_token.map(SecretString::new),
+            object_lock_mode,
+            retention_days,
+            path_style,
+            forbid_overwrite,
+            max_retries,
+            retry_base_millis,
+        })
+    }
+}
+
+impl fmt::Debug for S3ArchiveBackendConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("S3ArchiveBackendConfig")
+            .field("endpoint_url", &self.endpoint_url)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("object_lock_mode", &self.object_lock_mode)
+            .field("retention_days", &self.retention_days)
+            .field("path_style", &self.path_style)
+            .field("forbid_overwrite", &self.forbid_overwrite)
+            .field("max_retries", &self.max_retries)
+            .field("retry_base_millis", &self.retry_base_millis)
+            .finish()
+    }
+}
+
+// helpers
+
+fn required<F>(get_var: &F, name: &'static str) -> Result<String, S3ArchiveBackendConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let value = get_var(name).ok_or(S3ArchiveBackendConfigError::MissingVar { name })?;
+    if value.trim().is_empty() {
+        return Err(S3ArchiveBackendConfigError::InvalidValue {
+            name,
+            reason: "value must not be empty".to_owned(),
+        });
+    }
+    Ok(value.trim().to_owned())
+}
+
+fn optional<F>(get_var: &F, name: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get_var(name)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_bool_optional<F>(
+    get_var: &F,
+    name: &'static str,
+) -> Result<Option<bool>, S3ArchiveBackendConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(raw) = optional(get_var, name) else {
+        return Ok(None);
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(Some(true)),
+        "false" | "0" | "no" => Ok(Some(false)),
+        _ => Err(S3ArchiveBackendConfigError::InvalidValue {
+            name,
+            reason: "must be 'true' or 'false'".to_owned(),
+        }),
+    }
+}
+
+fn parse_u32_optional<F>(
+    get_var: &F,
+    name: &'static str,
+) -> Result<Option<u32>, S3ArchiveBackendConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(raw) = optional(get_var, name) else {
+        return Ok(None);
+    };
+    raw.parse::<u32>()
+        .map(Some)
+        .map_err(|_| S3ArchiveBackendConfigError::InvalidValue {
+            name,
+            reason: "must be a u32".to_owned(),
+        })
+}
+
+fn parse_u64_optional<F>(
+    get_var: &F,
+    name: &'static str,
+) -> Result<Option<u64>, S3ArchiveBackendConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(raw) = optional(get_var, name) else {
+        return Ok(None);
+    };
+    raw.parse::<u64>()
+        .map(Some)
+        .map_err(|_| S3ArchiveBackendConfigError::InvalidValue {
+            name,
+            reason: "must be a u64".to_owned(),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn base_env() -> HashMap<String, String> {
+        let mut env = HashMap::new();
+        env.insert(
+            ENV_S3_ENDPOINT_URL.to_owned(),
+            "https://s3.example".to_owned(),
+        );
+        env.insert(ENV_S3_REGION.to_owned(), "us-east-1".to_owned());
+        env.insert(ENV_S3_BUCKET.to_owned(), "mipsorcu-archive".to_owned());
+        env.insert(ENV_S3_ACCESS_KEY_ID.to_owned(), "AKIA".to_owned());
+        env.insert(
+            ENV_S3_SECRET_ACCESS_KEY.to_owned(),
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
+        );
+        env.insert(ENV_S3_OBJECT_LOCK_MODE.to_owned(), "compliance".to_owned());
+        env.insert(ENV_S3_RETENTION_DAYS.to_owned(), "30".to_owned());
+        env
+    }
+
+    fn get_var(env: &HashMap<String, String>) -> impl Fn(&str) -> Option<String> + '_ {
+        move |name: &str| env.get(name).cloned()
+    }
+
+    #[test]
+    fn from_env_loads_required_vars() {
+        let env = base_env();
+        let config = S3ArchiveBackendConfig::from_env(get_var(&env)).expect("config must load");
+        assert_eq!(config.endpoint_url(), "https://s3.example");
+        assert_eq!(config.region(), "us-east-1");
+        assert_eq!(config.bucket(), "mipsorcu-archive");
+        assert_eq!(config.access_key_id(), "AKIA");
+        assert_eq!(config.object_lock_mode(), S3ObjectLockMode::Compliance);
+        assert_eq!(config.retention_days(), 30);
+        assert!(config.path_style());
+        assert!(config.forbid_overwrite());
+    }
+
+    #[test]
+    fn from_env_rejects_missing_required() {
+        let mut env = base_env();
+        env.remove(ENV_S3_BUCKET);
+        let result = S3ArchiveBackendConfig::from_env(get_var(&env));
+        assert!(matches!(
+            result,
+            Err(S3ArchiveBackendConfigError::MissingVar { name }) if name == ENV_S3_BUCKET
+        ));
+    }
+
+    #[test]
+    fn from_env_rejects_blank_required() {
+        let mut env = base_env();
+        env.insert(ENV_S3_REGION.to_owned(), "   ".to_owned());
+        let result = S3ArchiveBackendConfig::from_env(get_var(&env));
+        assert!(matches!(
+            result,
+            Err(S3ArchiveBackendConfigError::InvalidValue { name, .. }) if name == ENV_S3_REGION
+        ));
+    }
+
+    #[test]
+    fn from_env_rejects_zero_retention() {
+        let mut env = base_env();
+        env.insert(ENV_S3_RETENTION_DAYS.to_owned(), "0".to_owned());
+        let result = S3ArchiveBackendConfig::from_env(get_var(&env));
+        assert!(matches!(
+            result,
+            Err(S3ArchiveBackendConfigError::InvalidValue { name, .. }) if name == ENV_S3_RETENTION_DAYS
+        ));
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_object_lock_mode() {
+        let mut env = base_env();
+        env.insert(ENV_S3_OBJECT_LOCK_MODE.to_owned(), "none".to_owned());
+        let result = S3ArchiveBackendConfig::from_env(get_var(&env));
+        assert!(matches!(
+            result,
+            Err(S3ArchiveBackendConfigError::InvalidValue { name, .. }) if name == ENV_S3_OBJECT_LOCK_MODE
+        ));
+    }
+
+    #[test]
+    fn debug_redacts_credentials() {
+        let env = base_env();
+        let config = S3ArchiveBackendConfig::from_env(get_var(&env)).unwrap();
+        let formatted = format!("{config:?}");
+        assert!(formatted.contains("<redacted>"));
+        assert!(
+            !formatted.contains("wJalrXUtnFEMI"),
+            "secret_access_key must not appear in Debug: {formatted}"
+        );
+        assert!(
+            !formatted.contains("AKIA"),
+            "access_key_id must not appear in Debug: {formatted}"
+        );
+    }
+
+    #[test]
+    fn secret_string_debug_is_redacted() {
+        let secret = SecretString::new("sensitive".to_owned());
+        let formatted = format!("{secret:?}");
+        assert_eq!(formatted, "<redacted>");
+        assert_eq!(secret.expose(), "sensitive");
+    }
+
+    #[test]
+    fn path_style_defaults_to_true() {
+        let env = base_env();
+        let config = S3ArchiveBackendConfig::from_env(get_var(&env)).unwrap();
+        assert!(config.path_style());
+    }
+
+    #[test]
+    fn path_style_override_to_false() {
+        let mut env = base_env();
+        env.insert(ENV_S3_PATH_STYLE.to_owned(), "false".to_owned());
+        let config = S3ArchiveBackendConfig::from_env(get_var(&env)).unwrap();
+        assert!(!config.path_style());
+    }
+
+    #[test]
+    fn forbid_overwrite_override() {
+        let mut env = base_env();
+        env.insert(ENV_S3_FORBID_OVERWRITE.to_owned(), "no".to_owned());
+        let config = S3ArchiveBackendConfig::from_env(get_var(&env)).unwrap();
+        assert!(!config.forbid_overwrite());
+    }
+}
