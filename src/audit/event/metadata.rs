@@ -6,9 +6,10 @@ use std::fmt;
 use serde_json::{Map, Value, json};
 
 pub use builders::{
-    AuthFailureMetadata, DecryptMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
-    IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
-    KeyRotationStartMetadata, RestoreTestMetadata, VersionPurgeMetadata,
+    ArchiveExportMetadata, AuthFailureMetadata, DecryptMetadata, EncryptCreateMetadata,
+    EncryptRotateMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
+    KeyRotationReencryptMetadata, KeyRotationStartMetadata, RestoreTestMetadata,
+    VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
@@ -300,6 +301,14 @@ impl AuditMetadata {
                     .cloned()
                     .collect()
             }
+            // Ledger Phase 2 §6: 外部アーカイブ export（成功・失敗両方を記録）。
+            // archive_key は success 時のみ有効（validate_metadata_values で検証）。
+            AuditAction::ArchiveExport => {
+                ["archive_key", "digest_hash", "target_year_month", "error_code", SOURCE_EVENT_AT_KEY]
+                    .iter()
+                    .cloned()
+                    .collect()
+            }
         };
 
         for key in object.keys() {
@@ -351,6 +360,8 @@ fn validate_required_metadata_keys(
         // monthly_digest_generate / verify は failure 時のみ記録されるが、
         // error_code は必須ではなく、source_event_at のみが必須。
         AuditAction::MonthlyDigestGenerate | AuditAction::MonthlyDigestVerify => Vec::new(),
+        // Ledger Phase 2 §6: archive export は target_year_month が常に必須。
+        AuditAction::ArchiveExport => vec!["target_year_month"],
     };
 
     if require_source_event_at {
@@ -443,6 +454,13 @@ fn validate_metadata_values(
             return Err(AuditEventError::InvalidMetadataValue { key: "error_code" });
         }
         validate_non_blank_short_string("error_code", value, 64)?;
+    }
+
+    if let Some(value) = object.get("archive_key") {
+        if result == AuditResult::Failure {
+            return Err(AuditEventError::InvalidMetadataValue { key: "archive_key" });
+        }
+        validate_non_blank_short_string("archive_key", value, 256)?;
     }
 
     if let Some(value) = object.get("check_name") {

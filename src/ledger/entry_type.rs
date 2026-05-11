@@ -16,6 +16,8 @@ pub enum LedgerEntryType {
     LedgerVerificationFailed,
     AuditFallbackResent,
     MonthlyDigest,
+    /// 外部アーカイブへの export 完了（Ledger Phase 2 §6）。
+    ArchiveExported,
 }
 
 impl LedgerEntryType {
@@ -35,6 +37,7 @@ impl LedgerEntryType {
             "ledger_verification_failed" => Ok(Self::LedgerVerificationFailed),
             "audit_fallback_resent" => Ok(Self::AuditFallbackResent),
             "monthly_digest" => Ok(Self::MonthlyDigest),
+            "archive_exported" => Ok(Self::ArchiveExported),
             _ => Err(LedgerError::UnknownEntryType {
                 value: value.to_owned(),
             }),
@@ -57,6 +60,7 @@ impl LedgerEntryType {
             Self::LedgerVerificationFailed => "ledger_verification_failed",
             Self::AuditFallbackResent => "audit_fallback_resent",
             Self::MonthlyDigest => "monthly_digest",
+            Self::ArchiveExported => "archive_exported",
         }
     }
 
@@ -114,6 +118,8 @@ impl LedgerEntryType {
                 "start_sequence_no",
                 "target_year_month",
             ],
+            // Ledger Phase 2 §6: archive_exported payload keys（アルファベット順）
+            Self::ArchiveExported => &["archive_key", "digest_hash", "target_year_month"],
         }
     }
 }

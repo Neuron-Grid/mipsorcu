@@ -151,7 +151,7 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         "algorithm" => require_string_value(key, value, "xchacha20-poly1305"),
         "classification" => validate_classification_value(key, value),
         "trigger" => validate_trigger_value(key, value),
-        "error_code" | "reason_code" => validate_non_blank_short_string(key, value),
+        "error_code" | "reason_code" | "archive_key" => validate_non_blank_short_string(key, value),
         // ADR 0037: monthly_digest 専用フィールド
         "target_year_month" => validate_year_month_value(key, value),
         "digest_hash" => validate_digest_hash_value(key, value),

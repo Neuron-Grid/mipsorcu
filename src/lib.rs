@@ -1,4 +1,5 @@
 pub mod aad;
+pub mod archive;
 pub mod audit;
 pub mod auth;
 pub mod authorization;
@@ -11,15 +12,20 @@ pub mod types;
 pub mod write;
 
 pub use aad::AadV1;
+pub use archive::{
+    ARCHIVE_SCHEMA_VERSION, ArchiveBackend, ArchiveBackendError, ArchiveExportPackage,
+    ArchiveObjectKey, ArchiveVerifyOutcome, InMemoryArchiveBackend, LocalFileArchiveBackend,
+};
 pub use audit::{
-    ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent, AuditEventAppender,
-    AuditEventError, AuditEventId, AuditEventParts, AuditMetadata, AuditRecordError,
-    AuditRecordOutcome, AuditRecorder, AuditResult, AuditTrigger, AuthFailureMetadata,
-    DecryptMetadata, EncryptCreateMetadata, EncryptRotateMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
-    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IntegrityCheckMetadata,
-    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
-    LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
-    RestoreTestMetadata, RolloverArchive, RolloverOutcome, SweptArchive, VersionPurgeMetadata,
+    ArchiveExportMetadata, ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent,
+    AuditEventAppender, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
+    AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditResult, AuditTrigger,
+    AuthFailureMetadata, DecryptMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
+    FORBIDDEN_AUDIT_METADATA_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
+    IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
+    KeyRotationStartMetadata, LocalAuditFallbackStore, LocalAuditStoreError, RequestId,
+    ResendAuditSummary, RestoreTestMetadata, RolloverArchive, RolloverOutcome, SweptArchive,
+    VersionPurgeMetadata,
 };
 pub use auth::{
     Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,
