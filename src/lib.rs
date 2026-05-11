@@ -60,6 +60,9 @@ pub use read::{
     DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts,
     decrypt_current_secret_version, decrypt_current_secret_version_with_keyring,
 };
+pub use server::use_cases::export_digest_to_archive::{
+    ExportDigestToArchiveError, export_digest_to_archive, record_archive_export_failure_audit,
+};
 pub use types::{
     Ciphertext, Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,
     ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH, ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_TAG_LENGTH,
