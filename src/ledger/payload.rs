@@ -154,7 +154,7 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         "error_code" | "reason_code" | "archive_key" => validate_non_blank_short_string(key, value),
         // monthly_digest 専用フィールド
         "target_year_month" => validate_year_month_value(key, value),
-        "digest_hash" => validate_digest_hash_value(key, value),
+        "digest_hash" | "timestamp_token_hash" => validate_digest_hash_value(key, value),
         _ => Err(LedgerError::UnknownPayloadKey {
             key: key.to_owned(),
             entry_type: LedgerEntryType::SecretCreated,

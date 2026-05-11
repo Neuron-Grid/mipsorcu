@@ -6,10 +6,10 @@ use std::fmt;
 use serde_json::{Map, Value, json};
 
 pub use builders::{
-    ArchiveExportMetadata, AuthFailureMetadata, DecryptMetadata, EncryptCreateMetadata,
-    EncryptRotateMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
-    KeyRotationReencryptMetadata, KeyRotationStartMetadata, RestoreTestMetadata,
-    VersionPurgeMetadata,
+    ArchiveExportMetadata, AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata,
+    EncryptCreateMetadata, EncryptRotateMetadata, IntegrityCheckMetadata,
+    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
+    RestoreTestMetadata, VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
@@ -313,6 +313,19 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            // 月次 digest 外部 timestamping（成功・失敗両方を記録）。
+            // timestamp_token_hash は success 時のみ有効
+            // （validate_metadata_values で検証）。
+            AuditAction::DigestTimestamping => [
+                "digest_hash",
+                "error_code",
+                "target_year_month",
+                "timestamp_token_hash",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
         };
 
         for key in object.keys() {
@@ -366,6 +379,8 @@ fn validate_required_metadata_keys(
         AuditAction::MonthlyDigestGenerate | AuditAction::MonthlyDigestVerify => Vec::new(),
         // archive export は target_year_month が常に必須。
         AuditAction::ArchiveExport => vec!["target_year_month"],
+        // digest timestamping も target_year_month が常に必須。
+        AuditAction::DigestTimestamping => vec!["target_year_month"],
     };
 
     if require_source_event_at {

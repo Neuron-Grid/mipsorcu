@@ -806,7 +806,7 @@ mod tests {
 // ArchiveExportMetadata
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `archive_export` action metadata builder（Ledger Phase 2 §6）。
+/// `archive_export` action metadata builder。
 ///
 /// `target_year_month` と `source_event_at` は構築時に必須。
 /// 成功時: `.with_archive_key(key)` を呼ぶ（`archive_key` フィールドを追加）。
@@ -938,5 +938,143 @@ mod archive_export_metadata_tests {
         let value = metadata.as_value();
         assert!(value.get("target_year_month").is_some());
         assert!(value.get("source_event_at").is_some());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DigestTimestampingMetadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `digest_timestamping` action metadata builder。
+///
+/// `target_year_month` と `source_event_at` は構築時に必須。
+/// 成功時: `.with_timestamp_token_hash(hex)` を呼ぶ。
+/// 失敗時: `.with_error_code(code)` を呼ぶ。
+/// `digest_hash` は相関 ID として成功・失敗どちらでも記録できる。
+#[derive(Debug, Clone)]
+pub struct DigestTimestampingMetadata {
+    target_year_month: String,
+    digest_hash: Option<String>,
+    timestamp_token_hash: Option<String>,
+    error_code: Option<String>,
+    source_event_at: SourceEventAt,
+}
+
+impl DigestTimestampingMetadata {
+    /// 新しい builder を作成する。
+    ///
+    /// `period` に `MonthlyDigestPeriod` を要求することで、`target_year_month` の
+    /// `YYYY-MM` 形式が型レベルで保証される。
+    pub fn new(period: &MonthlyDigestPeriod, source_event_at: SourceEventAt) -> Self {
+        Self {
+            target_year_month: period.as_str().to_owned(),
+            digest_hash: None,
+            timestamp_token_hash: None,
+            error_code: None,
+            source_event_at,
+        }
+    }
+
+    /// digest hash の hex 文字列を追加する（成功・失敗両方で相関 ID として使用）。
+    pub fn with_digest_hash(mut self, hex: &str) -> Self {
+        self.digest_hash = Some(hex.to_owned());
+        self
+    }
+
+    /// timestamping token hash の hex 文字列を追加する（成功時）。
+    pub fn with_timestamp_token_hash(mut self, hex: &str) -> Self {
+        self.timestamp_token_hash = Some(hex.to_owned());
+        self
+    }
+
+    /// エラーコードを追加する（失敗時）。
+    pub fn with_error_code(mut self, code: &str) -> Self {
+        self.error_code = Some(code.to_owned());
+        self
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert(
+            "target_year_month".to_owned(),
+            Value::String(self.target_year_month),
+        );
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
+        if let Some(digest_hash) = self.digest_hash {
+            object.insert("digest_hash".to_owned(), Value::String(digest_hash));
+        }
+        if let Some(token_hash) = self.timestamp_token_hash {
+            object.insert("timestamp_token_hash".to_owned(), Value::String(token_hash));
+        }
+        if let Some(error_code) = self.error_code {
+            object.insert("error_code".to_owned(), Value::String(error_code));
+        }
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+#[cfg(test)]
+mod digest_timestamping_metadata_tests {
+    use super::*;
+    use crate::ledger::MonthlyDigestPeriod;
+    use crate::types::SourceEventAt;
+
+    fn make_period() -> MonthlyDigestPeriod {
+        MonthlyDigestPeriod::parse("2026-05").unwrap()
+    }
+
+    fn make_source_event_at() -> SourceEventAt {
+        SourceEventAt::parse("2026-06-01T00:00:00Z").unwrap()
+    }
+
+    #[test]
+    fn success_metadata_contains_timestamp_token_hash() {
+        let metadata = DigestTimestampingMetadata::new(&make_period(), make_source_event_at())
+            .with_digest_hash(&"a".repeat(64))
+            .with_timestamp_token_hash(&"b".repeat(64))
+            .build()
+            .expect("build must succeed");
+        let value = metadata.as_value();
+        assert_eq!(
+            value["timestamp_token_hash"].as_str(),
+            Some(&*"b".repeat(64))
+        );
+        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
+        assert!(value.get("error_code").is_none());
+    }
+
+    #[test]
+    fn failure_metadata_contains_error_code() {
+        let metadata = DigestTimestampingMetadata::new(&make_period(), make_source_event_at())
+            .with_error_code("backend_failed")
+            .build()
+            .expect("build must succeed");
+        let value = metadata.as_value();
+        assert_eq!(value["error_code"].as_str(), Some("backend_failed"));
+        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
+        assert!(value.get("timestamp_token_hash").is_none());
+    }
+
+    #[test]
+    fn required_target_year_month_always_present() {
+        let metadata = DigestTimestampingMetadata::new(&make_period(), make_source_event_at())
+            .build()
+            .expect("build must succeed");
+        let value = metadata.as_value();
+        assert!(value.get("target_year_month").is_some());
+        assert!(value.get("source_event_at").is_some());
+    }
+
+    #[test]
+    fn digest_hash_is_optional_and_set_when_provided() {
+        let metadata = DigestTimestampingMetadata::new(&make_period(), make_source_event_at())
+            .with_digest_hash(&"c".repeat(64))
+            .build()
+            .expect("build must succeed");
+        let value = metadata.as_value();
+        assert_eq!(value["digest_hash"].as_str(), Some(&*"c".repeat(64)));
     }
 }

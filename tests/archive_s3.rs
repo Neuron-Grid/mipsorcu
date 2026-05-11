@@ -27,9 +27,7 @@ use mipsorcu::{
 };
 use time::OffsetDateTime;
 
-
 // Fixtures
-
 
 fn make_test_digest() -> SignedMonthlyDigest {
     let period = MonthlyDigestPeriod::parse("2026-05").expect("valid period");
@@ -103,9 +101,7 @@ fn make_backend(config: S3ArchiveBackendConfig) -> S3ImmutableArchiveBackend {
     S3ImmutableArchiveBackend::new_with_clock(config, reqwest::Client::new(), fixed_now)
 }
 
-
 // Mock S3 server
-
 
 #[derive(Debug, Clone)]
 struct CapturedRequest {
@@ -281,9 +277,7 @@ fn assert_no_secrets(buffer: &str) {
     }
 }
 
-
 // Tests
-
 
 #[tokio::test(flavor = "multi_thread")]
 async fn put_object_sends_signed_request_with_object_lock_headers()

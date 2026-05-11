@@ -12,12 +12,14 @@ pub enum AuditAction {
     KeyRotationStart,
     KeyRotationReencrypt,
     KeyRotationComplete,
-    /// 月次 digest 生成操作（失敗時の監査記録用、Ledger Phase 2 §7.3）。
+    /// 月次 digest 生成操作（失敗時の監査記録用）。
     MonthlyDigestGenerate,
-    /// 月次 digest 検証操作（失敗時の監査記録用、Ledger Phase 2 §7.4）。
+    /// 月次 digest 検証操作（失敗時の監査記録用）。
     MonthlyDigestVerify,
-    /// 外部アーカイブ export 操作（成功・失敗両方の監査記録用、Ledger Phase 2 §6）。
+    /// 外部アーカイブ export 操作（成功・失敗両方の監査記録用）。
     ArchiveExport,
+    /// 月次 digest 外部 timestamping 操作（成功・失敗両方の監査記録用）。
+    DigestTimestamping,
 }
 
 impl AuditAction {
@@ -36,6 +38,7 @@ impl AuditAction {
             "monthly_digest_generate" => Ok(Self::MonthlyDigestGenerate),
             "monthly_digest_verify" => Ok(Self::MonthlyDigestVerify),
             "archive_export" => Ok(Self::ArchiveExport),
+            "digest_timestamping" => Ok(Self::DigestTimestamping),
             _ => Err(AuditEventError::UnknownAction {
                 value: value.to_owned(),
             }),
@@ -57,6 +60,7 @@ impl AuditAction {
             Self::MonthlyDigestGenerate => "monthly_digest_generate",
             Self::MonthlyDigestVerify => "monthly_digest_verify",
             Self::ArchiveExport => "archive_export",
+            Self::DigestTimestamping => "digest_timestamping",
         }
     }
 

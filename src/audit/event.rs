@@ -8,9 +8,9 @@ pub use action::{AuditAction, AuditResult};
 pub use id::{AuditEventId, RequestId};
 pub use metadata::{
     ArchiveExportMetadata, AuditMetadata, AuditTrigger, AuthFailureMetadata, DecryptMetadata,
-    EncryptCreateMetadata, EncryptRotateMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
-    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IntegrityCheckMetadata,
-    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
-    RestoreTestMetadata, VersionPurgeMetadata,
+    DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
+    FORBIDDEN_AUDIT_METADATA_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
+    IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
+    KeyRotationStartMetadata, RestoreTestMetadata, VersionPurgeMetadata,
 };
 pub use model::{AuditEvent, AuditEventAppender, AuditEventParts};

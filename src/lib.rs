@@ -8,6 +8,7 @@ pub mod error;
 pub mod ledger;
 pub mod read;
 pub mod server;
+pub mod timestamping;
 pub mod types;
 pub mod write;
 
@@ -22,12 +23,12 @@ pub use audit::{
     ArchiveExportMetadata, ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent,
     AuditEventAppender, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
     AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditResult, AuditTrigger,
-    AuthFailureMetadata, DecryptMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
-    FORBIDDEN_AUDIT_METADATA_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
-    IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
-    KeyRotationStartMetadata, LocalAuditFallbackStore, LocalAuditStoreError, RequestId,
-    ResendAuditSummary, RestoreTestMetadata, RolloverArchive, RolloverOutcome, SweptArchive,
-    VersionPurgeMetadata,
+    AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata, EncryptCreateMetadata,
+    EncryptRotateMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
+    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IntegrityCheckMetadata,
+    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
+    LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
+    RestoreTestMetadata, RolloverArchive, RolloverOutcome, SweptArchive, VersionPurgeMetadata,
 };
 pub use auth::{
     Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,
@@ -64,6 +65,14 @@ pub use read::{
 };
 pub use server::use_cases::export_digest_to_archive::{
     ExportDigestToArchiveError, export_digest_to_archive, record_archive_export_failure_audit,
+};
+pub use server::use_cases::request_timestamping_for_digest::{
+    RequestTimestampingError, record_digest_timestamping_failure_audit,
+    request_timestamping_for_digest,
+};
+pub use timestamping::{
+    FailingTimestampingService, InMemoryTimestampingService, TimestampingService,
+    TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
 };
 pub use types::{
     Ciphertext, Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,

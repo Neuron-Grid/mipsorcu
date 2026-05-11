@@ -7,10 +7,10 @@ use mipsorcu::{
 };
 
 const MIGRATION_300_PATH: &str = "supabase/migrations/300_create_audit_event_guards_and_rpc.sql";
-// T08 以降の allowlist 正本: 全 action を含む更新版の函数定義を持つ。
+// allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity および violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
-const MIGRATION_997_PATH: &str = "supabase/migrations/997_add_archive_exported.sql";
+const LATEST_ALLOWLIST_MIGRATION_PATH: &str = "supabase/migrations/998_add_digest_timestamped.sql";
 const FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_START";
 const FORBIDDEN_END_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_END";
 const ALLOWLIST_START_MARKER: &str = "-- ACTION_ALLOWLIST_START";
@@ -31,11 +31,11 @@ fn forbidden_keys_parity_between_rust_and_sql() {
 
 #[test]
 fn allowlist_parity_between_rust_and_sql() {
-    // T08 以降は 997 migration が audit_metadata_has_unknown_key_for_action の最新定義を持つ。
-    // 新 action を追加する場合は 997（または後続 migration）の ACTION_ALLOWLIST_START/END 内と
+    // 最新の allowlist migration が audit_metadata_has_unknown_key_for_action の最新定義を持つ。
+    // 新 action を追加する場合は最新 migration の ACTION_ALLOWLIST_START/END 内と
     // rust_allowlist_for_action_result（このファイル内）の両方を更新すること。
-    let migration =
-        fs::read_to_string(MIGRATION_997_PATH).expect("allowlist migration 997 should be readable");
+    let migration = fs::read_to_string(LATEST_ALLOWLIST_MIGRATION_PATH)
+        .expect("allowlist migration should be readable");
     let sql_allowlist = extract_sql_allowlist(&migration);
 
     // Rust 側 allowlist を action+result ごとに構成
@@ -69,9 +69,9 @@ fn allowlist_parity_between_rust_and_sql() {
 
 #[test]
 fn integrity_check_violation_summary_allowlist_parity() {
-    // 997 migration は完全な関数定義（violation_summary キーを含む）を保持する。
-    let migration =
-        fs::read_to_string(MIGRATION_997_PATH).expect("allowlist migration 997 should be readable");
+    // 最新 migration は完全な関数定義（violation_summary キーを含む）を保持する。
+    let migration = fs::read_to_string(LATEST_ALLOWLIST_MIGRATION_PATH)
+        .expect("allowlist migration should be readable");
     let sql_summary = extract_sql_violation_summary_keys(&migration);
     let rust_summary = INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST
         .iter()
@@ -505,6 +505,7 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::MonthlyDigestGenerate,
         AuditAction::MonthlyDigestVerify,
         AuditAction::ArchiveExport,
+        AuditAction::DigestTimestamping,
     ]
 }
 
@@ -571,15 +572,15 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "source_event_at",
             ]
         }
-        // Ledger Phase 2 §7.3: 月次 digest 生成失敗時の監査記録
+        // 月次 digest 生成失敗時の監査記録
         AuditAction::MonthlyDigestGenerate => {
             vec!["error_code", "target_year_month", "source_event_at"]
         }
-        // Ledger Phase 2 §7.4: 月次 digest 検証失敗時の監査記録
+        // 月次 digest 検証失敗時の監査記録
         AuditAction::MonthlyDigestVerify => {
             vec!["error_code", "target_year_month", "source_event_at"]
         }
-        // Ledger Phase 2 §6: archive export（成功・失敗両方を記録、allowlist は result 共通）
+        // archive export（成功・失敗両方を記録、allowlist は result 共通）
         AuditAction::ArchiveExport => {
             vec![
                 "archive_key",
@@ -587,6 +588,16 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "error_code",
                 "source_event_at",
                 "target_year_month",
+            ]
+        }
+        // digest timestamping（成功・失敗両方を記録、allowlist は result 共通）
+        AuditAction::DigestTimestamping => {
+            vec![
+                "digest_hash",
+                "error_code",
+                "source_event_at",
+                "target_year_month",
+                "timestamp_token_hash",
             ]
         }
     };

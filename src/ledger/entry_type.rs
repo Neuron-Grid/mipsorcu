@@ -16,8 +16,10 @@ pub enum LedgerEntryType {
     LedgerVerificationFailed,
     AuditFallbackResent,
     MonthlyDigest,
-    /// 外部アーカイブへの export 完了（Ledger Phase 2 §6）。
+    /// 外部アーカイブへの export 完了。
     ArchiveExported,
+    /// 外部 timestamping への要求が完了し token を取得。
+    DigestTimestamped,
 }
 
 impl LedgerEntryType {
@@ -38,6 +40,7 @@ impl LedgerEntryType {
             "audit_fallback_resent" => Ok(Self::AuditFallbackResent),
             "monthly_digest" => Ok(Self::MonthlyDigest),
             "archive_exported" => Ok(Self::ArchiveExported),
+            "digest_timestamped" => Ok(Self::DigestTimestamped),
             _ => Err(LedgerError::UnknownEntryType {
                 value: value.to_owned(),
             }),
@@ -61,6 +64,7 @@ impl LedgerEntryType {
             Self::AuditFallbackResent => "audit_fallback_resent",
             Self::MonthlyDigest => "monthly_digest",
             Self::ArchiveExported => "archive_exported",
+            Self::DigestTimestamped => "digest_timestamped",
         }
     }
 
@@ -110,7 +114,7 @@ impl LedgerEntryType {
                 "start_sequence_no",
             ],
             Self::AuditFallbackResent => &["duration_ms", "failed_count", "resent_count"],
-            // ADR 0037: monthly_digest payload keys（アルファベット順）
+            // monthly_digest payload keys（アルファベット順）
             Self::MonthlyDigest => &[
                 "digest_hash",
                 "end_sequence_no",
@@ -118,8 +122,12 @@ impl LedgerEntryType {
                 "start_sequence_no",
                 "target_year_month",
             ],
-            // Ledger Phase 2 §6: archive_exported payload keys（アルファベット順）
+            // archive_exported payload keys（アルファベット順）
             Self::ArchiveExported => &["archive_key", "digest_hash", "target_year_month"],
+            // digest_timestamped payload keys（アルファベット順）
+            Self::DigestTimestamped => {
+                &["digest_hash", "target_year_month", "timestamp_token_hash"]
+            }
         }
     }
 }
