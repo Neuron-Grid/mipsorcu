@@ -12,7 +12,7 @@ use crate::server::supabase::{
 };
 use crate::server::{
     audit_report, auditor, background, config, digest, integrity_check, key_rotation, restore_test,
-    router,
+    router, scheduler,
 };
 use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
 
@@ -209,13 +209,15 @@ async fn run_server_with_config(config: config::AppConfig) {
         http_rate_limit_requests: config.http_rate_limit_requests,
         http_rate_limit_window: config.http_rate_limit_window,
     };
-    tokio::spawn(background::run_restore_test_loop(
-        state.clone(),
-        config.restore_test_interval,
-        config.restore_test_startup_delay,
-        config.restore_test_sample_limit,
-        shutdown_sender.subscribe(),
-    ));
+    if !config.scheduler_enabled {
+        tokio::spawn(background::run_restore_test_loop(
+            state.clone(),
+            config.restore_test_interval,
+            config.restore_test_startup_delay,
+            config.restore_test_sample_limit,
+            shutdown_sender.subscribe(),
+        ));
+    }
     tokio::spawn(background::run_integrity_check_loop(
         state.clone(),
         config.integrity_check_interval,
@@ -228,6 +230,21 @@ async fn run_server_with_config(config: config::AppConfig) {
         config.siem_long_failure_threshold,
         shutdown_sender.subscribe(),
     ));
+    if config.scheduler_enabled {
+        tokio::spawn(scheduler::run_scheduler_loop(
+            state.clone(),
+            scheduler::SchedulerConfig {
+                startup_delay: config.scheduler_startup_delay,
+                poll_interval: config.scheduler_poll_interval,
+                monthly_day: config.scheduler_monthly_day,
+                monthly_hour_utc: config.scheduler_monthly_hour_utc,
+                quarterly_hour_utc: config.scheduler_quarterly_hour_utc,
+                restore_test_sample_limit: config.restore_test_sample_limit,
+                local_archive_dir: config.scheduler_local_archive_dir.clone(),
+            },
+            shutdown_sender.subscribe(),
+        ));
+    }
 
     serve_app(state, listen_addr, shutdown_sender).await;
 }

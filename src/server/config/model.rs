@@ -40,6 +40,13 @@ pub struct AppConfig {
     pub restore_test_sample_limit: u32,
     pub integrity_check_interval: Duration,
     pub integrity_check_startup_delay: Duration,
+    pub scheduler_enabled: bool,
+    pub scheduler_startup_delay: Duration,
+    pub scheduler_poll_interval: Duration,
+    pub scheduler_monthly_day: u8,
+    pub scheduler_monthly_hour_utc: u8,
+    pub scheduler_quarterly_hour_utc: u8,
+    pub scheduler_local_archive_dir: PathBuf,
 }
 
 impl fmt::Debug for AppConfig {
@@ -130,6 +137,28 @@ impl fmt::Debug for AppConfig {
             .field(
                 "integrity_check_startup_delay_seconds",
                 &self.integrity_check_startup_delay.as_secs(),
+            )
+            .field("scheduler_enabled", &self.scheduler_enabled)
+            .field(
+                "scheduler_startup_delay_seconds",
+                &self.scheduler_startup_delay.as_secs(),
+            )
+            .field(
+                "scheduler_poll_interval_seconds",
+                &self.scheduler_poll_interval.as_secs(),
+            )
+            .field("scheduler_monthly_day", &self.scheduler_monthly_day)
+            .field(
+                "scheduler_monthly_hour_utc",
+                &self.scheduler_monthly_hour_utc,
+            )
+            .field(
+                "scheduler_quarterly_hour_utc",
+                &self.scheduler_quarterly_hour_utc,
+            )
+            .field(
+                "scheduler_local_archive_dir",
+                &self.scheduler_local_archive_dir,
             )
             .finish()
     }

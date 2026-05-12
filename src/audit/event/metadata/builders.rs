@@ -5,7 +5,7 @@ use crate::ledger::MonthlyDigestPeriod;
 use crate::types::supabase::IntegrityCheckViolationSummary;
 use crate::types::{KeyVersion, SecretId, SecretVersion, SecretVersionId, SourceEventAt};
 
-use super::{AuditEventError, AuditMetadata, AuditTrigger, SOURCE_EVENT_AT_KEY};
+use super::{AuditEventError, AuditMetadata, AuditTrigger, SOURCE_EVENT_AT_KEY, TRIGGER_KEY};
 
 /// `encrypt_create` action metadata builder.
 #[derive(Debug, Clone)]
@@ -436,6 +436,82 @@ impl RestoreTestMetadata {
                 Value::String(source_event_at.as_str().to_owned()),
             );
         }
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+/// `scheduler_job` action metadata builder.
+#[derive(Debug, Clone)]
+pub struct SchedulerJobMetadata {
+    job_name: &'static str,
+    trigger: AuditTrigger,
+    duration_ms: u64,
+    error_code: Option<&'static str>,
+    target_year_month: Option<String>,
+    source_event_at: SourceEventAt,
+}
+
+impl SchedulerJobMetadata {
+    pub fn new(
+        job_name: &'static str,
+        trigger: AuditTrigger,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            job_name,
+            trigger,
+            duration_ms: 0,
+            error_code: None,
+            target_year_month: None,
+            source_event_at,
+        }
+    }
+
+    pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = duration_ms;
+        self
+    }
+
+    pub fn with_error_code(mut self, error_code: &'static str) -> Self {
+        self.error_code = Some(error_code);
+        self
+    }
+
+    pub fn with_target_year_month(mut self, target_year_month: impl Into<String>) -> Self {
+        self.target_year_month = Some(target_year_month.into());
+        self
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert(
+            "job_name".to_owned(),
+            Value::String(self.job_name.to_owned()),
+        );
+        object.insert(
+            TRIGGER_KEY.to_owned(),
+            Value::String(self.trigger.as_str().to_owned()),
+        );
+        object.insert(
+            "duration_ms".to_owned(),
+            Value::Number(self.duration_ms.into()),
+        );
+        if let Some(error_code) = self.error_code {
+            object.insert(
+                "error_code".to_owned(),
+                Value::String(error_code.to_owned()),
+            );
+        }
+        if let Some(target_year_month) = self.target_year_month {
+            object.insert(
+                "target_year_month".to_owned(),
+                Value::String(target_year_month),
+            );
+        }
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
         AuditMetadata::new(Value::Object(object))
     }
 }

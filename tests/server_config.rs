@@ -804,6 +804,13 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         restore_test_sample_limit: 3,
         integrity_check_interval: Duration::from_secs(24 * 60 * 60),
         integrity_check_startup_delay: Duration::from_secs(3900),
+        scheduler_enabled: true,
+        scheduler_startup_delay: Duration::from_secs(4500),
+        scheduler_poll_interval: Duration::from_secs(3600),
+        scheduler_monthly_day: 1,
+        scheduler_monthly_hour_utc: 3,
+        scheduler_quarterly_hour_utc: 4,
+        scheduler_local_archive_dir: PathBuf::from("/tmp/mipsorcu-scheduler-archive"),
     };
 
     let output = format!("{config:?}");
@@ -845,6 +852,12 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("9"));
     assert!(output.contains("http_rate_limit_window_seconds"));
     assert!(output.contains("10"));
+    assert!(output.contains("scheduler_enabled"));
+    assert!(output.contains("scheduler_startup_delay_seconds"));
+    assert!(output.contains("4500"));
+    assert!(output.contains("scheduler_poll_interval_seconds"));
+    assert!(output.contains("3600"));
+    assert!(output.contains("scheduler_local_archive_dir"));
     assert!(!output.contains("service-role-secret"));
     assert!(!output.contains("publishable-secret"));
 }

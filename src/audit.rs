@@ -12,7 +12,7 @@ pub use event::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
     MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RequestId, RestoreTestMetadata,
-    SiemForwardFailureMetadata, VersionPurgeMetadata,
+    SchedulerJobMetadata, SiemForwardFailureMetadata, VersionPurgeMetadata,
 };
 pub use fallback::{
     ArchiveSweepOutcome, LocalAuditFallbackStore, RolloverArchive, RolloverOutcome, SweptArchive,

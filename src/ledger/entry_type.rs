@@ -20,6 +20,8 @@ pub enum LedgerEntryType {
     ArchiveExported,
     /// 外部 timestamping への要求が完了し token を取得。
     DigestTimestamped,
+    /// 定期実行スケジューラ job の実行結果。
+    SchedulerJobCompleted,
 }
 
 impl LedgerEntryType {
@@ -41,6 +43,7 @@ impl LedgerEntryType {
             "monthly_digest" => Ok(Self::MonthlyDigest),
             "archive_exported" => Ok(Self::ArchiveExported),
             "digest_timestamped" => Ok(Self::DigestTimestamped),
+            "scheduler_job_completed" => Ok(Self::SchedulerJobCompleted),
             _ => Err(LedgerError::UnknownEntryType {
                 value: value.to_owned(),
             }),
@@ -65,6 +68,7 @@ impl LedgerEntryType {
             Self::MonthlyDigest => "monthly_digest",
             Self::ArchiveExported => "archive_exported",
             Self::DigestTimestamped => "digest_timestamped",
+            Self::SchedulerJobCompleted => "scheduler_job_completed",
         }
     }
 
@@ -127,6 +131,9 @@ impl LedgerEntryType {
             // digest_timestamped payload keys（アルファベット順）
             Self::DigestTimestamped => {
                 &["digest_hash", "target_year_month", "timestamp_token_hash"]
+            }
+            Self::SchedulerJobCompleted => {
+                &["duration_ms", "job_name", "target_year_month", "trigger"]
             }
         }
     }

@@ -10,7 +10,7 @@ pub use builders::{
     DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
     IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
     KeyRotationStartMetadata, MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata,
-    RestoreTestMetadata, SiemForwardFailureMetadata, VersionPurgeMetadata,
+    RestoreTestMetadata, SchedulerJobMetadata, SiemForwardFailureMetadata, VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
@@ -368,6 +368,17 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            AuditAction::SchedulerJob => [
+                "duration_ms",
+                "error_code",
+                "job_name",
+                "target_year_month",
+                TRIGGER_KEY,
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
         };
 
         for key in object.keys() {
@@ -427,6 +438,7 @@ fn validate_required_metadata_keys(
         AuditAction::SiemForwardFailure => vec!["error_code"],
         // audit_report_generate は対象期間と出力形式が常に必須。
         AuditAction::AuditReportGenerate => vec!["format", "period_end", "period_start"],
+        AuditAction::SchedulerJob => vec!["job_name", TRIGGER_KEY, "duration_ms"],
     };
 
     if require_source_event_at {
@@ -519,6 +531,23 @@ fn validate_metadata_values(
             return Err(AuditEventError::InvalidMetadataValue { key: "error_code" });
         }
         validate_non_blank_short_string("error_code", value, 64)?;
+    }
+
+    if let Some(value) = object.get("job_name") {
+        validate_non_blank_short_string("job_name", value, 96)?;
+    }
+
+    if let Some(value) = object.get("target_year_month") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue {
+                key: "target_year_month",
+            })?;
+        crate::ledger::MonthlyDigestPeriod::parse(text).map_err(|_| {
+            AuditEventError::InvalidMetadataValue {
+                key: "target_year_month",
+            }
+        })?;
     }
 
     if let Some(value) = object.get("format") {

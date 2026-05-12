@@ -9,6 +9,7 @@ mod load;
 mod model;
 mod operational_checks;
 mod parse;
+mod scheduler;
 mod siem;
 
 pub use audit_fallback::{
@@ -28,5 +29,10 @@ pub use model::AppConfig;
 pub use operational_checks::{
     parse_integrity_check_interval, parse_integrity_check_startup_delay,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
+};
+pub use scheduler::{
+    parse_scheduler_enabled, parse_scheduler_monthly_day, parse_scheduler_monthly_hour_utc,
+    parse_scheduler_poll_interval, parse_scheduler_quarterly_hour_utc,
+    parse_scheduler_startup_delay,
 };
 pub use siem::{parse_siem_long_failure_threshold, parse_siem_resend_interval};

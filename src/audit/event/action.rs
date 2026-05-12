@@ -24,6 +24,8 @@ pub enum AuditAction {
     SiemForwardFailure,
     /// 監査レポート生成操作（成功・失敗両方の監査記録用）。
     AuditReportGenerate,
+    /// 定期実行スケジューラ job の実行結果（成功・失敗両方の監査記録用）。
+    SchedulerJob,
 }
 
 impl AuditAction {
@@ -45,6 +47,7 @@ impl AuditAction {
             "digest_timestamping" => Ok(Self::DigestTimestamping),
             "siem_forward_failure" => Ok(Self::SiemForwardFailure),
             "audit_report_generate" => Ok(Self::AuditReportGenerate),
+            "scheduler_job" => Ok(Self::SchedulerJob),
             _ => Err(AuditEventError::UnknownAction {
                 value: value.to_owned(),
             }),
@@ -69,6 +72,7 @@ impl AuditAction {
             Self::DigestTimestamping => "digest_timestamping",
             Self::SiemForwardFailure => "siem_forward_failure",
             Self::AuditReportGenerate => "audit_report_generate",
+            Self::SchedulerJob => "scheduler_job",
         }
     }
 

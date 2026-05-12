@@ -15,6 +15,7 @@ mod read_model;
 mod restore_test;
 mod router;
 pub mod runtime;
+mod scheduler;
 pub mod siem_forwarding;
 pub mod state;
 pub mod supabase;
