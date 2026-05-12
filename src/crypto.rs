@@ -108,9 +108,11 @@ impl MasterKeyRing {
     }
 
     pub fn active(&self) -> (KeyVersion, &MasterKey) {
-        let master_key = self.keys.get(&self.active_key_version).expect(
-            "MasterKeyRing invariant violated: active key version must be present after construction",
-        );
+        let Some(master_key) = self.keys.get(&self.active_key_version) else {
+            unreachable!(
+                "MasterKeyRing invariant violated: active key version must be present after construction"
+            );
+        };
 
         (self.active_key_version, master_key)
     }
