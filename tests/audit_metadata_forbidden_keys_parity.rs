@@ -6,7 +6,8 @@ use mipsorcu::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
 };
 
-const LATEST_SIEM_MIGRATION_PATH: &str = "supabase/migrations/9999_add_audit_report_generation.sql";
+const LATEST_SIEM_MIGRATION_PATH: &str =
+    "supabase/migrations/999_add_siem_forward_failure_audit_action.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。

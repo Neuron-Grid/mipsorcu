@@ -1,7 +1,9 @@
--- T11: SIEM forward failure audit action and metadata guards.
+-- T11/T12: SIEM forward failure audit action, audit report generation support,
+-- and metadata guards.
 --
--- 信頼境界: SIEM 送信失敗を audit_events に記録するための非秘密 metadata のみを
--- 追加する。平文・鍵・JWT・Authorization header・request/response body は
+-- 信頼境界: SIEM 送信失敗および監査レポート生成を audit_events に記録するための
+-- 非秘密 metadata のみを追加する。レポート生成 RPC は read-only 集計のみを行い、
+-- 台帳を変更しない。平文・鍵・JWT・Authorization header・request/response body は
 -- audit_metadata_has_forbidden_key で再帰的に拒否する。
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -85,10 +87,10 @@ as $$
 $$;
 
 comment on function public.audit_metadata_has_forbidden_key(jsonb) is
-    'Recursive guard used by audit constraints and RPCs to reject metadata keys that could carry plaintext, keys, JWTs, Authorization headers, request/response bodies, or ciphertext material. Updated in T11 for SIEM forwarding.';
+    'Recursive guard used by audit constraints and RPCs to reject metadata keys that could carry plaintext, keys, JWTs, Authorization headers, request/response bodies, or ciphertext material. Updated in T11/T12 for SIEM forwarding and audit report generation.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 2. audit_events.action CHECK に siem_forward_failure を追加
+-- 2. audit_events.action CHECK に siem_forward_failure / audit_report_generate を追加
 -- ─────────────────────────────────────────────────────────────────────────────
 
 alter table public.audit_events
@@ -109,7 +111,8 @@ alter table public.audit_events
             'monthly_digest_verify',
             'archive_export',
             'digest_timestamping',
-            'siem_forward_failure'
+            'siem_forward_failure',
+            'audit_report_generate'
         )
     );
 
@@ -122,7 +125,7 @@ comment on constraint audit_events_siem_forward_failure_failure_only on public.a
     'siem_forward_failure audit events are emitted only when SIEM forwarding failed and must never use result=success.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 3. rpc_append_audit_event に siem_forward_failure を追加
+-- 3. rpc_append_audit_event に siem_forward_failure / audit_report_generate を追加
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create or replace function public.rpc_append_audit_event(
@@ -169,7 +172,8 @@ begin
         'monthly_digest_verify',
         'archive_export',
         'digest_timestamping',
-        'siem_forward_failure'
+        'siem_forward_failure',
+        'audit_report_generate'
     ) then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
@@ -286,10 +290,10 @@ $$;
 comment on function public.rpc_append_audit_event(
     uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
 ) is
-    'Audit append RPC for non-write-path audit events and failure events. Updated in T11 to add siem_forward_failure action.';
+    'Audit append RPC for non-write-path audit events and failure events. Updated in T11/T12 to add siem_forward_failure and audit_report_generate actions.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 4. metadata allowlist / required keys に siem_forward_failure を追加
+-- 4. metadata allowlist / required keys に siem_forward_failure / audit_report_generate を追加
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create or replace function public.audit_metadata_has_missing_required_key_for_action(
@@ -367,6 +371,8 @@ begin
             v_required_keys := array['target_year_month'];
         when 'siem_forward_failure' then
             v_required_keys := array['error_code'];
+        when 'audit_report_generate' then
+            v_required_keys := array['format', 'period_end', 'period_start'];
         else
             return true;
     end case;
@@ -509,6 +515,14 @@ begin
                 'event_count',
                 'source_event_at'
             ];
+        when 'audit_report_generate' then
+            v_allowed_keys := array[
+                'error_code',
+                'format',
+                'period_end',
+                'period_start',
+                'source_event_at'
+            ];
         else
             return true;
     end case;
@@ -538,4 +552,197 @@ end;
 $$;
 
 comment on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb)
-is 'Returns true when audit metadata contains a key outside the allowlist for the given action. Updated in T11 to include siem_forward_failure action.';
+is 'Returns true when audit metadata contains a key outside the allowlist for the given action. Updated in T11/T12 to include siem_forward_failure and audit_report_generate actions.';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 5. 期間指定レポート集計 RPC（read-only）
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function public.rpc_audit_report_summary(
+    p_period_start text,
+    p_period_end text
+)
+returns table (report_json jsonb)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_start timestamptz;
+    v_end timestamptz;
+    v_sequence_start bigint;
+    v_sequence_end bigint;
+    v_ledger_entry_count bigint;
+    v_audit_event_count bigint;
+    v_secret_count bigint;
+    v_hash_chain jsonb;
+    v_restore_tests jsonb;
+    v_integrity_checks jsonb;
+    v_verification_failures jsonb;
+    v_signature_keys jsonb;
+    v_monthly_digests jsonb;
+begin
+    if p_period_start is null
+        or p_period_end is null
+        or not public.ledger_source_event_at_is_valid(p_period_start)
+        or not public.ledger_source_event_at_is_valid(p_period_end)
+    then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    v_start := p_period_start::timestamptz;
+    v_end := p_period_end::timestamptz;
+
+    if v_start >= v_end then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    select min(le.sequence_no), max(le.sequence_no), count(*)::bigint
+    into v_sequence_start, v_sequence_end, v_ledger_entry_count
+    from public.ledger_entries le
+    where le.source_event_at::timestamptz >= v_start
+        and le.source_event_at::timestamptz < v_end;
+
+    select count(*)::bigint
+    into v_audit_event_count
+    from public.audit_events ae
+    where ae.occurred_at >= v_start
+        and ae.occurred_at < v_end;
+
+    select count(distinct s.id)::bigint
+    into v_secret_count
+    from public.secrets s
+    where s.created_at < v_end;
+
+    if v_sequence_start is null then
+        v_hash_chain := jsonb_build_object(
+            'checked_count', 0,
+            'detail', 'no ledger entries in period',
+            'valid', true
+        );
+    else
+        select jsonb_build_object(
+            'checked_count', vhc.entries_checked,
+            'detail', coalesce(vhc.first_gap_detail, vhc.first_hash_mismatch_detail),
+            'valid', vhc.chain_valid
+        )
+        into v_hash_chain
+        from public.rpc_verify_ledger_hash_chain(v_sequence_start, v_sequence_end) vhc;
+    end if;
+
+    select coalesce(jsonb_agg(item order by item ->> 'occurred_at'), '[]'::jsonb)
+    into v_restore_tests
+    from (
+        select jsonb_build_object(
+            'duration_ms', (ae.metadata_json ->> 'duration_ms')::bigint,
+            'occurred_at', to_char(ae.occurred_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+            'result', ae.result,
+            'sample_count', (ae.metadata_json ->> 'sample_count')::bigint,
+            'trigger', ae.metadata_json ->> 'trigger'
+        ) as item
+        from public.audit_events ae
+        where ae.action = 'restore_test'
+            and ae.occurred_at >= v_start
+            and ae.occurred_at < v_end
+    ) rows;
+
+    select coalesce(jsonb_agg(item order by item ->> 'occurred_at'), '[]'::jsonb)
+    into v_integrity_checks
+    from (
+        select jsonb_build_object(
+            'checked_audit_event_count', (ae.metadata_json ->> 'checked_audit_event_count')::bigint,
+            'checked_secret_count', (ae.metadata_json ->> 'checked_secret_count')::bigint,
+            'checked_secret_version_count', (ae.metadata_json ->> 'checked_secret_version_count')::bigint,
+            'duration_ms', (ae.metadata_json ->> 'duration_ms')::bigint,
+            'occurred_at', to_char(ae.occurred_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+            'result', ae.result,
+            'trigger', ae.metadata_json ->> 'trigger',
+            'violation_count', (ae.metadata_json ->> 'violation_count')::bigint
+        ) as item
+        from public.audit_events ae
+        where ae.action = 'integrity_check'
+            and ae.occurred_at >= v_start
+            and ae.occurred_at < v_end
+    ) rows;
+
+    select coalesce(jsonb_agg(item order by item ->> 'source', item ->> 'occurred_at'), '[]'::jsonb)
+    into v_verification_failures
+    from (
+        select jsonb_build_object(
+            'code', coalesce(le.error_code, 'ledger_failure'),
+            'occurred_at', le.source_event_at,
+            'sequence_no', le.sequence_no,
+            'source', 'ledger'
+        ) as item
+        from public.ledger_entries le
+        where le.source_event_at::timestamptz >= v_start
+            and le.source_event_at::timestamptz < v_end
+            and le.result = 'failure'
+            and le.entry_type in ('ledger_verification_failed', 'integrity_check_completed', 'restore_test_completed')
+        union all
+        select jsonb_build_object(
+            'code', coalesce(ae.metadata_json ->> 'error_code', ae.result),
+            'occurred_at', to_char(ae.occurred_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+            'sequence_no', null,
+            'source', 'audit_events.' || ae.action
+        ) as item
+        from public.audit_events ae
+        where ae.occurred_at >= v_start
+            and ae.occurred_at < v_end
+            and ae.result = 'failure'
+            and ae.action in ('integrity_check', 'restore_test', 'monthly_digest_verify')
+    ) rows;
+
+    select coalesce(jsonb_agg(item order by (item ->> 'key_version')::integer), '[]'::jsonb)
+    into v_signature_keys
+    from (
+        select jsonb_build_object(
+            'key_version', pk.key_version,
+            'status', pk.status
+        ) as item
+        from public.ledger_signing_public_keys pk
+    ) rows;
+
+    select coalesce(jsonb_agg(item order by item ->> 'target_year_month'), '[]'::jsonb)
+    into v_monthly_digests
+    from (
+        select jsonb_build_object(
+            'digest_hash', le.payload ->> 'digest_hash',
+            'end_sequence_no', (le.payload ->> 'end_sequence_no')::bigint,
+            'entry_count', (le.payload ->> 'entry_count')::bigint,
+            'sequence_no', le.sequence_no,
+            'start_sequence_no', (le.payload ->> 'start_sequence_no')::bigint,
+            'target_year_month', le.payload ->> 'target_year_month'
+        ) as item
+        from public.ledger_entries le
+        where le.entry_type = 'monthly_digest'
+            and le.source_event_at::timestamptz >= v_start
+            and le.source_event_at::timestamptz < v_end
+    ) rows;
+
+    report_json := jsonb_build_object(
+        'audit_event_count', v_audit_event_count,
+        'hash_chain_verification', v_hash_chain,
+        'integrity_checks', v_integrity_checks,
+        'ledger_entry_count', v_ledger_entry_count,
+        'monthly_digests', v_monthly_digests,
+        'period_end', p_period_end,
+        'period_start', p_period_start,
+        'restore_tests', v_restore_tests,
+        'secret_count', v_secret_count,
+        'sequence_end', v_sequence_end,
+        'sequence_start', v_sequence_start,
+        'signature_key_versions', v_signature_keys,
+        'verification_failures', v_verification_failures
+    );
+    return next;
+end;
+$$;
+
+comment on function public.rpc_audit_report_summary(text, text)
+is 'Returns a read-only JSONB summary for audit report generation over [period_start, period_end). Does not modify ledger_entries or audit_events.';
+
+revoke execute on function public.rpc_audit_report_summary(text, text) from public, anon, authenticated;
+revoke execute on function public.rpc_audit_report_summary(text, text) from public;
+grant execute on function public.rpc_audit_report_summary(text, text) to service_role;
