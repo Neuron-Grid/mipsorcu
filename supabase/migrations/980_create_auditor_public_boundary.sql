@@ -650,6 +650,7 @@ create or replace function public.rpc_export_ledger_verification_materials(
     p_end_sequence_no bigint default null
 )
 returns table (
+    ledger_entry_id uuid,
     sequence_no bigint,
     entry_hash bytea,
     previous_entry_hash bytea,
@@ -657,6 +658,15 @@ returns table (
     signature_key_version integer,
     entry_type text,
     source_event_at text,
+    request_id uuid,
+    source_event_id uuid,
+    target_secret_id uuid,
+    target_secret_version_id uuid,
+    actor_user_id uuid,
+    actor_device_id text,
+    result text,
+    error_code text,
+    payload jsonb,
     canonicalization_version integer,
     hash_algorithm text,
     signature_algorithm text,
@@ -685,6 +695,7 @@ begin
 
     return query
     select
+        le.id as ledger_entry_id,
         le.sequence_no,
         le.entry_hash,
         le.previous_entry_hash,
@@ -692,6 +703,15 @@ begin
         le.signature_key_version,
         le.entry_type,
         le.source_event_at,
+        le.request_id,
+        le.source_event_id,
+        le.target_secret_id,
+        le.target_secret_version_id,
+        le.actor_user_id,
+        le.actor_device_id,
+        le.result,
+        le.error_code,
+        le.payload,
         le.canonicalization_version,
         le.hash_algorithm,
         le.signature_algorithm,
@@ -717,7 +737,7 @@ end;
 $$;
 
 comment on function public.rpc_export_ledger_verification_materials(bigint, bigint)
-is 'Exports ledger entries with LEFT JOINed public key materials for independent auditor verification. Retired keys are included; missing keys produce pk_* IS NULL columns.';
+is 'Exports complete non-secret ledger canonical fields with LEFT JOINed public key materials for independent auditor verification. Retired keys are included; missing keys produce pk_* IS NULL columns.';
 
 -- GRANT / REVOKE
 

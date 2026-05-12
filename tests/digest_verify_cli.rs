@@ -217,14 +217,28 @@ fn digest_materials_body(m: &ValidTestMaterials) -> String {
 
 /// JSON body for `rpc_export_ledger_verification_materials` (1 valid chain entry).
 fn chain_export_body(m: &ValidTestMaterials) -> String {
+    chain_export_body_with_entry_hash(m, &m.entry_hash_hex)
+}
+
+fn chain_export_body_with_entry_hash(m: &ValidTestMaterials, entry_hash_hex: &str) -> String {
     json!([{
+        "ledger_entry_id": "00000000-0000-4000-8000-000000000000",
         "sequence_no": 1i64,
-        "entry_hash": format!("\\x{}", m.entry_hash_hex),
+        "entry_hash": format!("\\x{entry_hash_hex}"),
         "previous_entry_hash": format!("\\x{}", m.entry_previous_hash_hex),
         "signature": format!("\\x{}", m.entry_signature_hex),
         "signature_key_version": 1i32,
         "entry_type": "integrity_check_completed",
         "source_event_at": CHAIN_SOURCE_EVENT_AT,
+        "request_id": "00000000-0000-4000-8000-000000000000",
+        "source_event_id": Value::Null,
+        "target_secret_id": Value::Null,
+        "target_secret_version_id": Value::Null,
+        "actor_user_id": Value::Null,
+        "actor_device_id": Value::Null,
+        "result": "success",
+        "error_code": Value::Null,
+        "payload": {},
         "canonicalization_version": 1i32,
         "hash_algorithm": "sha-256",
         "signature_algorithm": "ed25519",
@@ -253,25 +267,7 @@ fn range_body(m: &ValidTestMaterials) -> String {
 /// chain export where entry_hash is zeros — triggers chain hash mismatch.
 fn chain_export_body_tampered_entry_hash(m: &ValidTestMaterials) -> String {
     let zero_hash = "0".repeat(64);
-    json!([{
-        "sequence_no": 1i64,
-        "entry_hash": format!("\\x{zero_hash}"),
-        "previous_entry_hash": format!("\\x{}", m.entry_previous_hash_hex),
-        "signature": format!("\\x{}", m.entry_signature_hex),
-        "signature_key_version": 1i32,
-        "entry_type": "integrity_check_completed",
-        "source_event_at": CHAIN_SOURCE_EVENT_AT,
-        "canonicalization_version": 1i32,
-        "hash_algorithm": "sha-256",
-        "signature_algorithm": "ed25519",
-        "pk_key_version": 1i32,
-        "pk_public_key": format!("\\x{}", m.public_key_hex),
-        "pk_algorithm": "ed25519",
-        "pk_status": "active",
-        "pk_created_at": Value::Null,
-        "pk_retired_at": Value::Null,
-    }])
-    .to_string()
+    chain_export_body_with_entry_hash(m, &zero_hash)
 }
 
 /// digest materials where end_entry_hash is zeros — triggers end hash mismatch.

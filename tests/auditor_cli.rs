@@ -147,6 +147,7 @@ fn run_auditor_verify(
 fn valid_single_entry_body() -> &'static str {
     Box::leak(
         json!([{
+            "ledger_entry_id": "00000000-0000-4000-8000-000000000000",
             "sequence_no": 1,
             "entry_hash": "\\x0000000000000000000000000000000000000000000000000000000000000000",
             "previous_entry_hash": "\\x0000000000000000000000000000000000000000000000000000000000000000",
@@ -154,6 +155,15 @@ fn valid_single_entry_body() -> &'static str {
             "signature_key_version": 1,
             "entry_type": "integrity_check_completed",
             "source_event_at": "2026-04-08T12:00:00Z",
+            "request_id": "00000000-0000-4000-8000-000000000000",
+            "source_event_id": null,
+            "target_secret_id": null,
+            "target_secret_version_id": null,
+            "actor_user_id": null,
+            "actor_device_id": null,
+            "result": "success",
+            "error_code": null,
+            "payload": {},
             "canonicalization_version": 1,
             "hash_algorithm": "sha-256",
             "signature_algorithm": "ed25519",
@@ -202,6 +212,7 @@ fn make_missing_key_test_body() -> &'static str {
     let entry_hash = LedgerHash::from_canonical_payload(&canonical);
 
     let body = json!([{
+        "ledger_entry_id": "00000000-0000-4000-8000-000000000000",
         "sequence_no": 1i64,
         "entry_hash": format!("\\x{}", entry_hash.to_hex()),
         "previous_entry_hash": format!("\\x{}", previous_hash.to_hex()),
@@ -209,6 +220,15 @@ fn make_missing_key_test_body() -> &'static str {
         "signature_key_version": 99,
         "entry_type": "integrity_check_completed",
         "source_event_at": "2026-04-08T12:00:00Z",
+        "request_id": "00000000-0000-4000-8000-000000000000",
+        "source_event_id": null,
+        "target_secret_id": null,
+        "target_secret_version_id": null,
+        "actor_user_id": null,
+        "actor_device_id": null,
+        "result": "success",
+        "error_code": null,
+        "payload": {},
         "canonicalization_version": 1,
         "hash_algorithm": "sha-256",
         "signature_algorithm": "ed25519",

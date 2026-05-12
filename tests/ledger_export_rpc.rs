@@ -90,6 +90,7 @@ fn make_dto_row(
     let pk_status = pk_status.map(str::to_owned);
 
     LedgerVerificationMaterialRow {
+        ledger_entry_id: signed.ledger_entry_id().clone(),
         sequence_no: signed.sequence_no(),
         entry_hash: signed.entry_hash(),
         previous_entry_hash: signed.previous_entry_hash(),
@@ -97,6 +98,25 @@ fn make_dto_row(
         signature_key_version: signed.signature_key_version(),
         entry_type: signed.entry_type().as_str().to_owned(),
         source_event_at: signed.source_event_at().as_str().to_owned(),
+        request_id: signed.request_id().as_canonical_string(),
+        source_event_id: signed
+            .source_event_id()
+            .map(|event_id| event_id.as_canonical_string()),
+        target_secret_id: signed
+            .target_secret_id()
+            .map(|secret_id| secret_id.as_canonical_string()),
+        target_secret_version_id: signed
+            .target_secret_version_id()
+            .map(|version_id| version_id.as_canonical_string()),
+        actor_user_id: signed
+            .actor_user_id()
+            .map(|user_id| user_id.as_canonical_string()),
+        actor_device_id: signed
+            .actor_device_id()
+            .map(|device_id| device_id.as_str().to_owned()),
+        result: signed.result().as_str().to_owned(),
+        error_code: signed.error_code().map(str::to_owned),
+        payload: signed.payload().as_value(),
         canonicalization_version: LEDGER_CANONICALIZATION_VERSION_V1 as i32,
         hash_algorithm: LEDGER_HASH_ALGORITHM_SHA256.to_owned(),
         signature_algorithm: LEDGER_SIGNATURE_ALGORITHM_ED25519.to_owned(),

@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::audit::{AuditEventId, RequestId};
 use crate::ledger::{
-    LedgerError, LedgerHash, LedgerSequenceNo, LedgerSignature, LedgerSignatureKeyVersion,
-    LedgerVerifyingKey, SignedLedgerEntry, SignedLedgerEntryParts,
+    LedgerEntryId, LedgerError, LedgerHash, LedgerPayload, LedgerResult, LedgerSequenceNo,
+    LedgerSignature, LedgerSignatureKeyVersion, LedgerTargetSecretVersionId, LedgerVerifyingKey,
+    SignedLedgerEntry, SignedLedgerEntryParts,
 };
+use crate::types::{DeviceId, OwnerUserId, SecretId, SourceEventAt};
 
 use super::response::ensure_success;
 use super::{SupabaseClient, SupabaseRpcError};
@@ -51,6 +55,7 @@ impl ExportLedgerVerificationMaterialsParams {
 // DTO
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerVerificationMaterialRow {
+    pub ledger_entry_id: LedgerEntryId,
     pub sequence_no: LedgerSequenceNo,
     pub entry_hash: LedgerHash,
     pub previous_entry_hash: LedgerHash,
@@ -58,6 +63,15 @@ pub struct LedgerVerificationMaterialRow {
     pub signature_key_version: LedgerSignatureKeyVersion,
     pub entry_type: String,
     pub source_event_at: String,
+    pub request_id: String,
+    pub source_event_id: Option<String>,
+    pub target_secret_id: Option<String>,
+    pub target_secret_version_id: Option<String>,
+    pub actor_user_id: Option<String>,
+    pub actor_device_id: Option<String>,
+    pub result: String,
+    pub error_code: Option<String>,
+    pub payload: Value,
     pub canonicalization_version: i32,
     pub hash_algorithm: String,
     pub signature_algorithm: String,
@@ -93,17 +107,17 @@ impl LedgerVerificationMaterialRow {
             }
         };
 
-        // Reject non-ed25519 algorithm
+        // Reject non-ed25519 algorithm.
         if pk_algorithm != "ed25519" {
             return Err(LedgerError::InvalidVerificationKey);
         }
 
-        // Accept both active and retired keys
+        // Accept both active and retired keys.
         if pk_status != "active" && pk_status != "retired" {
             return Err(LedgerError::InvalidVerificationKey);
         }
 
-        // key_version must match
+        // key_version must match.
         let key_version = LedgerSignatureKeyVersion::new(pk_key_version as u32)?;
         if key_version != self.signature_key_version {
             return Err(LedgerError::SignatureKeyVersionMismatch {
@@ -119,47 +133,40 @@ impl LedgerVerificationMaterialRow {
     }
 
     pub fn try_restore_signed_ledger_entry(&self) -> Result<SignedLedgerEntry, LedgerError> {
-        use crate::audit::RequestId;
-        use crate::ledger::{LedgerEntryId, LedgerPayload, LedgerResult};
-        use crate::types::SourceEventAt;
-
         let entry_type = crate::ledger::LedgerEntryType::parse(&self.entry_type).map_err(|_| {
             LedgerError::UnknownEntryType {
                 value: self.entry_type.clone(),
             }
         })?;
-
         let source_event_at = SourceEventAt::parse(&self.source_event_at)
             .map_err(|_| LedgerError::SerializationFailed("invalid source_event_at".to_owned()))?;
-
-        // Placeholder values for fields not in the export RPC.
-        // Using well-known nil-like UUIDs that are valid v4.
-        let placeholder_ledger_entry_id =
-            LedgerEntryId::parse("00000000-0000-4000-8000-000000000000").map_err(|_| {
-                LedgerError::InvalidUuid {
-                    field: "ledger_entry_id",
-                }
-            })?;
-        let placeholder_request_id = RequestId::parse("00000000-0000-4000-8000-000000000000")
-            .map_err(|_| LedgerError::InvalidUuid {
+        let request_id =
+            RequestId::parse(&self.request_id).map_err(|_| LedgerError::InvalidUuid {
                 field: "request_id",
             })?;
-        let placeholder_payload = LedgerPayload::empty(entry_type)?;
+        let source_event_id = parse_optional_audit_event_id(self.source_event_id.as_deref())?;
+        let target_secret_id = parse_optional_secret_id(self.target_secret_id.as_deref())?;
+        let target_secret_version_id =
+            parse_optional_target_secret_version_id(self.target_secret_version_id.as_deref())?;
+        let actor_user_id = parse_optional_owner_user_id(self.actor_user_id.as_deref())?;
+        let actor_device_id = parse_optional_device_id(self.actor_device_id.as_deref())?;
+        let result = LedgerResult::parse(&self.result)?;
+        let payload = LedgerPayload::new(entry_type, self.payload.clone())?;
 
         let parts = SignedLedgerEntryParts {
-            ledger_entry_id: placeholder_ledger_entry_id,
+            ledger_entry_id: self.ledger_entry_id.clone(),
             sequence_no: self.sequence_no,
             entry_type,
             source_event_at,
-            request_id: placeholder_request_id,
-            source_event_id: None,
-            target_secret_id: None,
-            target_secret_version_id: None,
-            actor_user_id: None,
-            actor_device_id: None,
-            result: LedgerResult::Success,
-            error_code: None,
-            payload: placeholder_payload,
+            request_id,
+            source_event_id,
+            target_secret_id,
+            target_secret_version_id,
+            actor_user_id,
+            actor_device_id,
+            result,
+            error_code: self.error_code.clone(),
+            payload,
             previous_entry_hash: self.previous_entry_hash,
             entry_hash: self.entry_hash,
             signature: self.signature,
@@ -170,11 +177,60 @@ impl LedgerVerificationMaterialRow {
     }
 }
 
+fn parse_optional_audit_event_id(value: Option<&str>) -> Result<Option<AuditEventId>, LedgerError> {
+    value
+        .map(|raw| {
+            AuditEventId::parse(raw).map_err(|_| LedgerError::InvalidUuid {
+                field: "source_event_id",
+            })
+        })
+        .transpose()
+}
+
+fn parse_optional_secret_id(value: Option<&str>) -> Result<Option<SecretId>, LedgerError> {
+    value
+        .map(|raw| {
+            SecretId::parse(raw).map_err(|_| LedgerError::InvalidUuid {
+                field: "target_secret_id",
+            })
+        })
+        .transpose()
+}
+
+fn parse_optional_target_secret_version_id(
+    value: Option<&str>,
+) -> Result<Option<LedgerTargetSecretVersionId>, LedgerError> {
+    value
+        .map(|raw| {
+            LedgerTargetSecretVersionId::parse(raw).map_err(|_| LedgerError::InvalidUuid {
+                field: "target_secret_version_id",
+            })
+        })
+        .transpose()
+}
+
+fn parse_optional_owner_user_id(value: Option<&str>) -> Result<Option<OwnerUserId>, LedgerError> {
+    value
+        .map(|raw| {
+            OwnerUserId::parse(raw).map_err(|_| LedgerError::InvalidUuid {
+                field: "actor_user_id",
+            })
+        })
+        .transpose()
+}
+
+fn parse_optional_device_id(value: Option<&str>) -> Result<Option<DeviceId>, LedgerError> {
+    value
+        .map(|raw| DeviceId::new(raw).map_err(|_| LedgerError::InvalidActorDeviceId))
+        .transpose()
+}
+
 // ---- Internal response deserialization ----
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LedgerVerificationMaterialResponse {
+    ledger_entry_id: String,
     sequence_no: i64,
     entry_hash: Option<String>,
     previous_entry_hash: Option<String>,
@@ -182,6 +238,15 @@ struct LedgerVerificationMaterialResponse {
     signature_key_version: Option<i32>,
     entry_type: Option<String>,
     source_event_at: Option<String>,
+    request_id: Option<String>,
+    source_event_id: Option<String>,
+    target_secret_id: Option<String>,
+    target_secret_version_id: Option<String>,
+    actor_user_id: Option<String>,
+    actor_device_id: Option<String>,
+    result: Option<String>,
+    error_code: Option<String>,
+    payload: Option<Value>,
     canonicalization_version: Option<i32>,
     hash_algorithm: Option<String>,
     signature_algorithm: Option<String>,
@@ -205,6 +270,12 @@ impl TryFrom<LedgerVerificationMaterialResponse> for LedgerVerificationMaterialR
     type Error = SupabaseRpcError;
 
     fn try_from(response: LedgerVerificationMaterialResponse) -> Result<Self, Self::Error> {
+        let ledger_entry_id = LedgerEntryId::parse(&response.ledger_entry_id).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "export ledger verification materials RPC returned invalid ledger_entry_id"
+                    .to_owned(),
+            )
+        })?;
         let sequence_no = LedgerSequenceNo::from_i64(response.sequence_no).map_err(|_| {
             SupabaseRpcError::InvalidResponse(
                 "export ledger verification materials RPC returned invalid sequence_no".to_owned(),
@@ -273,6 +344,24 @@ impl TryFrom<LedgerVerificationMaterialResponse> for LedgerVerificationMaterialR
             )
         })?;
 
+        let request_id = response.request_id.ok_or_else(|| {
+            SupabaseRpcError::InvalidResponse(
+                "export ledger verification materials RPC returned null request_id".to_owned(),
+            )
+        })?;
+
+        let result = response.result.ok_or_else(|| {
+            SupabaseRpcError::InvalidResponse(
+                "export ledger verification materials RPC returned null result".to_owned(),
+            )
+        })?;
+
+        let payload = response.payload.ok_or_else(|| {
+            SupabaseRpcError::InvalidResponse(
+                "export ledger verification materials RPC returned null payload".to_owned(),
+            )
+        })?;
+
         let canonicalization_version = response.canonicalization_version.ok_or_else(|| {
             SupabaseRpcError::InvalidResponse(
                 "export ledger verification materials RPC returned null canonicalization_version"
@@ -300,6 +389,7 @@ impl TryFrom<LedgerVerificationMaterialResponse> for LedgerVerificationMaterialR
         }
 
         Ok(Self {
+            ledger_entry_id,
             sequence_no,
             entry_hash,
             previous_entry_hash,
@@ -307,6 +397,15 @@ impl TryFrom<LedgerVerificationMaterialResponse> for LedgerVerificationMaterialR
             signature_key_version,
             entry_type,
             source_event_at,
+            request_id,
+            source_event_id: response.source_event_id,
+            target_secret_id: response.target_secret_id,
+            target_secret_version_id: response.target_secret_version_id,
+            actor_user_id: response.actor_user_id,
+            actor_device_id: response.actor_device_id,
+            result,
+            error_code: response.error_code,
+            payload,
             canonicalization_version,
             hash_algorithm,
             signature_algorithm,
