@@ -6,11 +6,11 @@ use std::fmt;
 use serde_json::{Map, Value, json};
 
 pub use builders::{
-    ArchiveExportMetadata, AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata,
-    EncryptCreateMetadata, EncryptRotateMetadata, IntegrityCheckMetadata,
-    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
-    MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RestoreTestMetadata,
-    SiemForwardFailureMetadata, VersionPurgeMetadata,
+    ArchiveExportMetadata, AuditReportGenerateMetadata, AuthFailureMetadata, DecryptMetadata,
+    DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
+    IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
+    KeyRotationStartMetadata, MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata,
+    RestoreTestMetadata, SiemForwardFailureMetadata, VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
@@ -357,6 +357,17 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            // 監査レポート生成（成功・失敗両方を記録）。
+            AuditAction::AuditReportGenerate => [
+                "format",
+                "period_end",
+                "period_start",
+                "error_code",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
         };
 
         for key in object.keys() {
@@ -414,6 +425,8 @@ fn validate_required_metadata_keys(
         AuditAction::DigestTimestamping => vec!["target_year_month"],
         // SIEM forward failure は error_code が常に必須（failure-only）。
         AuditAction::SiemForwardFailure => vec!["error_code"],
+        // audit_report_generate は対象期間と出力形式が常に必須。
+        AuditAction::AuditReportGenerate => vec!["format", "period_end", "period_start"],
     };
 
     if require_source_event_at {
@@ -506,6 +519,25 @@ fn validate_metadata_values(
             return Err(AuditEventError::InvalidMetadataValue { key: "error_code" });
         }
         validate_non_blank_short_string("error_code", value, 64)?;
+    }
+
+    if let Some(value) = object.get("format") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue { key: "format" })?;
+        if text != "json" && text != "markdown" {
+            return Err(AuditEventError::InvalidMetadataValue { key: "format" });
+        }
+    }
+
+    for key in ["period_start", "period_end"] {
+        if let Some(value) = object.get(key) {
+            let text = value
+                .as_str()
+                .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+            SourceEventAt::parse(text)
+                .map_err(|_| AuditEventError::InvalidMetadataValue { key })?;
+        }
     }
 
     if let Some(value) = object.get("archive_key") {

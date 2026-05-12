@@ -6,8 +6,7 @@ use mipsorcu::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
 };
 
-const LATEST_SIEM_MIGRATION_PATH: &str =
-    "supabase/migrations/999_add_siem_forward_failure_audit_action.sql";
+const LATEST_SIEM_MIGRATION_PATH: &str = "supabase/migrations/9999_add_audit_report_generation.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -507,6 +506,7 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::ArchiveExport,
         AuditAction::DigestTimestamping,
         AuditAction::SiemForwardFailure,
+        AuditAction::AuditReportGenerate,
     ]
 }
 
@@ -604,6 +604,16 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
         // SIEM forward failure（failure-only）
         AuditAction::SiemForwardFailure => {
             vec!["error_code", "event_count", "event_type", "source_event_at"]
+        }
+        // audit report generation（成功・失敗両方を記録）
+        AuditAction::AuditReportGenerate => {
+            vec![
+                "error_code",
+                "format",
+                "period_end",
+                "period_start",
+                "source_event_at",
+            ]
         }
     };
     keys.sort();

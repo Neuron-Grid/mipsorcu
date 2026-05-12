@@ -1216,6 +1216,63 @@ mod digest_timestamping_metadata_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AuditReportGenerateMetadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `audit_report_generate` audit metadata builder.
+#[derive(Debug, Clone)]
+pub struct AuditReportGenerateMetadata {
+    format: String,
+    period_end: SourceEventAt,
+    period_start: SourceEventAt,
+    error_code: Option<String>,
+    source_event_at: SourceEventAt,
+}
+
+impl AuditReportGenerateMetadata {
+    pub fn new(
+        format: impl Into<String>,
+        period_start: SourceEventAt,
+        period_end: SourceEventAt,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            format: format.into(),
+            period_end,
+            period_start,
+            error_code: None,
+            source_event_at,
+        }
+    }
+
+    pub fn with_error_code(mut self, error_code: impl Into<String>) -> Self {
+        self.error_code = Some(error_code.into());
+        self
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert("format".to_owned(), Value::String(self.format));
+        object.insert(
+            "period_end".to_owned(),
+            Value::String(self.period_end.as_str().to_owned()),
+        );
+        object.insert(
+            "period_start".to_owned(),
+            Value::String(self.period_start.as_str().to_owned()),
+        );
+        if let Some(error_code) = self.error_code {
+            object.insert("error_code".to_owned(), Value::String(error_code));
+        }
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
+        AuditMetadata::from_object(object)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SiemForwardFailureMetadata
 // ─────────────────────────────────────────────────────────────────────────────
 

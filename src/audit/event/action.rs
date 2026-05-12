@@ -22,6 +22,8 @@ pub enum AuditAction {
     DigestTimestamping,
     /// SIEM への監査イベント転送に失敗した（failure-only の監査）。
     SiemForwardFailure,
+    /// 監査レポート生成操作（成功・失敗両方の監査記録用）。
+    AuditReportGenerate,
 }
 
 impl AuditAction {
@@ -42,6 +44,7 @@ impl AuditAction {
             "archive_export" => Ok(Self::ArchiveExport),
             "digest_timestamping" => Ok(Self::DigestTimestamping),
             "siem_forward_failure" => Ok(Self::SiemForwardFailure),
+            "audit_report_generate" => Ok(Self::AuditReportGenerate),
             _ => Err(AuditEventError::UnknownAction {
                 value: value.to_owned(),
             }),
@@ -65,6 +68,7 @@ impl AuditAction {
             Self::ArchiveExport => "archive_export",
             Self::DigestTimestamping => "digest_timestamping",
             Self::SiemForwardFailure => "siem_forward_failure",
+            Self::AuditReportGenerate => "audit_report_generate",
         }
     }
 

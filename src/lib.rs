@@ -29,9 +29,9 @@ pub use archive::{
 pub use audit::{
     ArchiveExportMetadata, ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent,
     AuditEventAppender, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
-    AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditResult, AuditTrigger,
-    AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata, EncryptCreateMetadata,
-    EncryptRotateMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
+    AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditReportGenerateMetadata, AuditResult,
+    AuditTrigger, AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata,
+    EncryptCreateMetadata, EncryptRotateMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
     LocalAuditFallbackStore, LocalAuditStoreError, MonthlyDigestGenerateMetadata,

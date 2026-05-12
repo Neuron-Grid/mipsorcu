@@ -11,7 +11,8 @@ use crate::server::supabase::{
     SupabaseAuditAppender, SupabaseClient, classify_register_public_key_error,
 };
 use crate::server::{
-    auditor, background, config, digest, integrity_check, key_rotation, restore_test, router,
+    audit_report, auditor, background, config, digest, integrity_check, key_rotation, restore_test,
+    router,
 };
 use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
 
@@ -70,6 +71,18 @@ pub async fn run_entrypoint() {
             });
 
             if let Err(error) = digest::run_cli(config, command_args).await {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        Some((command, command_args)) if command == "audit-report" => {
+            init_tracing();
+            let config = config::load_config().unwrap_or_else(|error| {
+                tracing::error!(error = %error, "configuration loading failed");
+                std::process::exit(1);
+            });
+
+            if let Err(error) = audit_report::run_cli(config, command_args).await {
                 eprintln!("{error}");
                 std::process::exit(2);
             }
@@ -263,6 +276,7 @@ fn usage() -> String {
         integrity_check::usage(),
         auditor::usage(),
         digest::usage(),
+        audit_report::usage(),
     ]
     .join("\n")
 }

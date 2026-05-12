@@ -1,3 +1,4 @@
+pub mod audit_report;
 mod audit_reporter;
 pub mod auditor;
 mod background;
