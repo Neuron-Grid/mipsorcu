@@ -2,7 +2,10 @@ pub(super) const DEFAULT_DOTENV_PATH: &str = ".env";
 pub(super) const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:3000";
 pub(super) const DEFAULT_AUDIT_FALLBACK_PATH: &str =
     "/var/lib/mipsorcu/audit-fallback-current.jsonl";
+pub(super) const DEFAULT_SIEM_BUFFER_PATH: &str = "/var/lib/mipsorcu/siem-buffer-current.jsonl";
 pub(super) const DEFAULT_AUDIT_RESEND_INTERVAL_SECONDS: u64 = 60;
+pub(super) const DEFAULT_SIEM_RESEND_INTERVAL_SECONDS: u64 = 60;
+pub(super) const DEFAULT_SIEM_LONG_FAILURE_THRESHOLD_SECONDS: u64 = 15 * 60;
 pub(super) const DEFAULT_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 pub(super) const DEFAULT_AUDIT_FALLBACK_ROTATE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const DEFAULT_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS: u64 = 90;
@@ -34,7 +37,11 @@ pub(super) const ENV_JWT_ISSUER: &str = "MIPSORCU_JWT_ISSUER";
 pub(super) const ENV_JWT_AUDIENCE: &str = "MIPSORCU_JWT_AUDIENCE";
 pub(super) const ENV_JWKS_URL: &str = "MIPSORCU_JWKS_URL";
 pub(super) const ENV_AUDIT_FALLBACK_PATH: &str = "MIPSORCU_AUDIT_FALLBACK_PATH";
+pub(super) const ENV_SIEM_BUFFER_PATH: &str = "MIPSORCU_SIEM_BUFFER_PATH";
 pub(super) const ENV_AUDIT_RESEND_INTERVAL_SECONDS: &str = "MIPSORCU_AUDIT_RESEND_INTERVAL_SECONDS";
+pub(super) const ENV_SIEM_RESEND_INTERVAL_SECONDS: &str = "MIPSORCU_SIEM_RESEND_INTERVAL_SECONDS";
+pub(super) const ENV_SIEM_LONG_FAILURE_THRESHOLD_SECONDS: &str =
+    "MIPSORCU_SIEM_LONG_FAILURE_THRESHOLD_SECONDS";
 pub(super) const ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES: &str =
     "MIPSORCU_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES";
 pub(super) const ENV_AUDIT_FALLBACK_ROTATE_SIZE_BYTES: &str =

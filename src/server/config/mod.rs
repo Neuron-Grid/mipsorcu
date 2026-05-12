@@ -9,6 +9,7 @@ mod load;
 mod model;
 mod operational_checks;
 mod parse;
+mod siem;
 
 pub use audit_fallback::{
     parse_audit_fallback_alert_threshold, parse_audit_fallback_archive_auto_delete_enabled,
@@ -28,3 +29,4 @@ pub use operational_checks::{
     parse_integrity_check_interval, parse_integrity_check_startup_delay,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
 };
+pub use siem::{parse_siem_long_failure_threshold, parse_siem_resend_interval};

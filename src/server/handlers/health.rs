@@ -39,6 +39,7 @@ pub async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<He
             } else {
                 "not_loaded"
             },
+            siem: components.siem_status,
             disk_free_mb: components.disk_free_mb,
         }),
     )
@@ -68,6 +69,7 @@ pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<Hea
             } else {
                 "not_loaded"
             },
+            siem: components.siem_status,
             disk_free_mb: components.disk_free_mb,
         }),
     )
@@ -82,6 +84,7 @@ pub async fn not_found(request_context: RequestContext) -> impl IntoResponse {
 struct HealthComponents {
     supabase_reachable: bool,
     master_key_loaded: bool,
+    siem_status: &'static str,
     disk_free_mb: Option<u64>,
 }
 
@@ -92,10 +95,20 @@ fn collect_health_components(state: &AppState) -> HealthComponents {
     let supabase_max_age = readiness_stale_threshold(state.health_readiness_poll_interval);
     let supabase_reachable =
         snapshot.supabase_reachable && snapshot.supabase_is_fresh(now, supabase_max_age);
+    let siem_status = if state
+        .siem_forwarding
+        .status()
+        .is_long_failure(now, state.siem_long_failure_threshold)
+    {
+        "degraded"
+    } else {
+        "ok"
+    };
 
     HealthComponents {
         supabase_reachable,
         master_key_loaded: true,
+        siem_status,
         disk_free_mb: available_disk_space_mb(state.audit_fallback_store.path()),
     }
 }

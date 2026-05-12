@@ -10,6 +10,7 @@ use crate::server::audit_reporter::{self, IntegrityCheckAudit};
 use crate::server::config::AppConfig;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
+use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
 use crate::types::supabase::IntegrityCheckSummary;
 use crate::{AuditRecorder, LocalAuditFallbackStore};
 
@@ -263,6 +264,16 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         supabase_client.clone(),
         config.ledger_signing_key.clone(),
     ));
+    let readiness_state = ReadinessState::new();
+    let siem_forwarder = SiemForwarder::new(
+        InMemorySiemSink::new(),
+        LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone()),
+    );
+    let siem_forwarding = Arc::new(crate::server::siem_forwarding::SiemForwardingService::new(
+        siem_forwarder,
+        audit_recorder.clone(),
+        readiness_state.clone(),
+    ));
 
     Ok(AppState {
         master_key_ring: Arc::new(config.master_key_ring),
@@ -270,9 +281,11 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         supabase_client,
         audit_recorder,
         ledger_appender,
+        siem_forwarding,
         audit_fallback_store,
-        readiness_state: ReadinessState::new(),
+        readiness_state,
         health_readiness_poll_interval: config.health_readiness_poll_interval,
+        siem_long_failure_threshold: config.siem_long_failure_threshold,
         http_handler_timeout: config.http_handler_timeout,
         http_rate_limit_requests: config.http_rate_limit_requests,
         http_rate_limit_window: config.http_rate_limit_window,

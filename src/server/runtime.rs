@@ -13,6 +13,7 @@ use crate::server::supabase::{
 use crate::server::{
     auditor, background, config, digest, integrity_check, key_rotation, restore_test, router,
 };
+use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
 
 pub use crate::server::background::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
@@ -163,6 +164,13 @@ async fn run_server_with_config(config: config::AppConfig) {
         supabase_client.clone(),
         ledger_signing_key,
     ));
+    let siem_buffer = LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone());
+    let siem_forwarder = SiemForwarder::new(InMemorySiemSink::new(), siem_buffer);
+    let siem_forwarding = Arc::new(crate::server::siem_forwarding::SiemForwardingService::new(
+        siem_forwarder,
+        audit_recorder.clone(),
+        readiness_state.clone(),
+    ));
     tokio::spawn(background::run_audit_resend_loop(
         audit_recorder.clone(),
         fallback_store,
@@ -179,9 +187,11 @@ async fn run_server_with_config(config: config::AppConfig) {
         supabase_client,
         audit_recorder,
         ledger_appender,
+        siem_forwarding: siem_forwarding.clone(),
         audit_fallback_store: app_fallback_store,
         readiness_state,
         health_readiness_poll_interval: config.health_readiness_poll_interval,
+        siem_long_failure_threshold: config.siem_long_failure_threshold,
         http_handler_timeout: config.http_handler_timeout,
         http_rate_limit_requests: config.http_rate_limit_requests,
         http_rate_limit_window: config.http_rate_limit_window,
@@ -197,6 +207,12 @@ async fn run_server_with_config(config: config::AppConfig) {
         state.clone(),
         config.integrity_check_interval,
         config.integrity_check_startup_delay,
+        shutdown_sender.subscribe(),
+    ));
+    tokio::spawn(background::run_siem_resend_loop(
+        siem_forwarding,
+        config.siem_resend_interval,
+        config.siem_long_failure_threshold,
         shutdown_sender.subscribe(),
     ));
 

@@ -43,7 +43,14 @@ pub(super) async fn record_audit_with_ledger(
         .call_append_audit_event_with_ledger(event, signed_entry)
         .await
     {
-        Ok(_) => Ok(AuditRecordOutcome::PrimarySucceeded),
+        Ok(_) => {
+            let _ = state.siem_forwarding.forward_audit_event(event).await;
+            let _ = state
+                .siem_forwarding
+                .forward_ledger_entry(signed_entry)
+                .await;
+            Ok(AuditRecordOutcome::PrimarySucceeded)
+        }
         Err(error) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),

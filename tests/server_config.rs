@@ -790,7 +790,10 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         http_rate_limit_requests: 9,
         http_rate_limit_window: Duration::from_secs(10),
         audit_fallback_path: PathBuf::from("/tmp/mipsorcu-audit.jsonl"),
+        siem_buffer_path: PathBuf::from("/tmp/mipsorcu-siem.jsonl"),
         audit_resend_interval: Duration::from_secs(60),
+        siem_resend_interval: Duration::from_secs(61),
+        siem_long_failure_threshold: Duration::from_secs(900),
         audit_fallback_alert_threshold_bytes: 4096,
         audit_fallback_rotate_size_bytes: 8192,
         audit_fallback_archive_dir: PathBuf::from("/tmp/mipsorcu-audit-archive"),
@@ -807,6 +810,11 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
 
     assert!(output.contains("audit_fallback_alert_threshold_bytes"));
     assert!(output.contains("4096"));
+    assert!(output.contains("siem_buffer_path"));
+    assert!(output.contains("siem_resend_interval_seconds"));
+    assert!(output.contains("61"));
+    assert!(output.contains("siem_long_failure_threshold_seconds"));
+    assert!(output.contains("900"));
     assert!(output.contains("audit_fallback_rotate_size_bytes"));
     assert!(output.contains("8192"));
     assert!(output.contains("audit_fallback_archive_dir"));

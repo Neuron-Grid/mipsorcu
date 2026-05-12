@@ -14,6 +14,7 @@ mod read_model;
 mod restore_test;
 mod router;
 pub mod runtime;
+pub mod siem_forwarding;
 pub mod state;
 pub mod supabase;
 pub(crate) mod use_cases;

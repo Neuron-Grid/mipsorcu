@@ -6,8 +6,10 @@ use time::OffsetDateTime;
 use crate::MasterKeyRing;
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::JwtVerifier;
+use crate::siem::InMemorySiemSink;
 
 use super::ledger_appender::LedgerAppender;
+use super::siem_forwarding::SiemForwardingService;
 use super::supabase::{SupabaseAuditAppender, SupabaseClient};
 
 #[derive(Clone)]
@@ -17,9 +19,11 @@ pub struct AppState {
     pub supabase_client: Arc<SupabaseClient>,
     pub audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
     pub ledger_appender: Arc<LedgerAppender>,
+    pub siem_forwarding: Arc<SiemForwardingService<InMemorySiemSink>>,
     pub audit_fallback_store: LocalAuditFallbackStore,
     pub readiness_state: ReadinessState,
     pub health_readiness_poll_interval: Duration,
+    pub siem_long_failure_threshold: Duration,
     pub http_handler_timeout: Duration,
     pub http_rate_limit_requests: u64,
     pub http_rate_limit_window: Duration,

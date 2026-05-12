@@ -26,7 +26,10 @@ pub struct AppConfig {
     pub http_rate_limit_requests: u64,
     pub http_rate_limit_window: Duration,
     pub audit_fallback_path: PathBuf,
+    pub siem_buffer_path: PathBuf,
     pub audit_resend_interval: Duration,
+    pub siem_resend_interval: Duration,
+    pub siem_long_failure_threshold: Duration,
     pub audit_fallback_alert_threshold_bytes: u64,
     pub audit_fallback_rotate_size_bytes: u64,
     pub audit_fallback_archive_dir: PathBuf,
@@ -78,9 +81,18 @@ impl fmt::Debug for AppConfig {
                 &self.http_rate_limit_window.as_secs(),
             )
             .field("audit_fallback_path", &self.audit_fallback_path)
+            .field("siem_buffer_path", &self.siem_buffer_path)
             .field(
                 "audit_resend_interval_seconds",
                 &self.audit_resend_interval.as_secs(),
+            )
+            .field(
+                "siem_resend_interval_seconds",
+                &self.siem_resend_interval.as_secs(),
+            )
+            .field(
+                "siem_long_failure_threshold_seconds",
+                &self.siem_long_failure_threshold.as_secs(),
             )
             .field(
                 "audit_fallback_alert_threshold_bytes",

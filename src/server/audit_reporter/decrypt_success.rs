@@ -91,6 +91,11 @@ pub async fn record_success_audit(
         .await
     {
         Ok(_) => {
+            let _ = state.siem_forwarding.forward_audit_event(&event).await;
+            let _ = state
+                .siem_forwarding
+                .forward_ledger_entry(signed_entry)
+                .await;
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
                 secret_id = %target_secret_id.as_canonical_string(),

@@ -8,16 +8,18 @@ use super::audit_fallback::{
 };
 use super::constants::{
     DEFAULT_AUDIT_FALLBACK_PATH, DEFAULT_DOTENV_PATH, DEFAULT_LISTEN_ADDR,
-    ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES, ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED,
-    ENV_AUDIT_FALLBACK_ARCHIVE_DIR, ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS,
-    ENV_AUDIT_FALLBACK_PATH, ENV_AUDIT_FALLBACK_ROTATE_SIZE_BYTES,
-    ENV_AUDIT_RESEND_INTERVAL_SECONDS, ENV_HEALTH_READINESS_POLL_INTERVAL_SECONDS,
-    ENV_HTTP_HANDLER_TIMEOUT_SECONDS, ENV_HTTP_RATE_LIMIT_REQUESTS,
-    ENV_HTTP_RATE_LIMIT_WINDOW_SECONDS, ENV_INTEGRITY_CHECK_INTERVAL_SECONDS,
-    ENV_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS, ENV_JWKS_REFRESH_INTERVAL_SECONDS, ENV_JWKS_URL,
-    ENV_JWT_AUDIENCE, ENV_JWT_ISSUER, ENV_LISTEN_ADDR, ENV_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_SIEM_BUFFER_PATH, ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES,
+    ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED, ENV_AUDIT_FALLBACK_ARCHIVE_DIR,
+    ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS, ENV_AUDIT_FALLBACK_PATH,
+    ENV_AUDIT_FALLBACK_ROTATE_SIZE_BYTES, ENV_AUDIT_RESEND_INTERVAL_SECONDS,
+    ENV_HEALTH_READINESS_POLL_INTERVAL_SECONDS, ENV_HTTP_HANDLER_TIMEOUT_SECONDS,
+    ENV_HTTP_RATE_LIMIT_REQUESTS, ENV_HTTP_RATE_LIMIT_WINDOW_SECONDS,
+    ENV_INTEGRITY_CHECK_INTERVAL_SECONDS, ENV_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS,
+    ENV_JWKS_REFRESH_INTERVAL_SECONDS, ENV_JWKS_URL, ENV_JWT_AUDIENCE, ENV_JWT_ISSUER,
+    ENV_LISTEN_ADDR, ENV_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS,
     ENV_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS, ENV_RESTORE_TEST_INTERVAL_SECONDS,
-    ENV_RESTORE_TEST_SAMPLE_LIMIT, ENV_RESTORE_TEST_STARTUP_DELAY_SECONDS,
+    ENV_RESTORE_TEST_SAMPLE_LIMIT, ENV_RESTORE_TEST_STARTUP_DELAY_SECONDS, ENV_SIEM_BUFFER_PATH,
+    ENV_SIEM_LONG_FAILURE_THRESHOLD_SECONDS, ENV_SIEM_RESEND_INTERVAL_SECONDS,
     ENV_SUPABASE_PUBLISHABLE_KEY, ENV_SUPABASE_SERVICE_ROLE_KEY, ENV_SUPABASE_URL,
 };
 use super::env::{DotenvVars, current_process_var, load_dotenv_file, optional_var, required_var};
@@ -34,6 +36,7 @@ use super::operational_checks::{
     parse_integrity_check_interval, parse_integrity_check_startup_delay,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
 };
+use super::siem::{parse_siem_long_failure_threshold, parse_siem_resend_interval};
 
 pub fn load_config() -> Result<AppConfig, ConfigError> {
     let dotenv = load_dotenv_file(Path::new(DEFAULT_DOTENV_PATH))?;
@@ -106,12 +109,26 @@ where
         optional_var(ENV_AUDIT_FALLBACK_PATH, dotenv, get_process_var)
             .unwrap_or_else(|| DEFAULT_AUDIT_FALLBACK_PATH.to_owned()),
     );
+    let siem_buffer_path = PathBuf::from(
+        optional_var(ENV_SIEM_BUFFER_PATH, dotenv, get_process_var)
+            .unwrap_or_else(|| DEFAULT_SIEM_BUFFER_PATH.to_owned()),
+    );
     let audit_fallback_archive_dir =
         optional_var(ENV_AUDIT_FALLBACK_ARCHIVE_DIR, dotenv, get_process_var)
             .map(PathBuf::from)
             .unwrap_or_else(|| default_audit_fallback_archive_dir(&audit_fallback_path));
     let audit_resend_interval = parse_audit_resend_interval(optional_var(
         ENV_AUDIT_RESEND_INTERVAL_SECONDS,
+        dotenv,
+        get_process_var,
+    ))?;
+    let siem_resend_interval = parse_siem_resend_interval(optional_var(
+        ENV_SIEM_RESEND_INTERVAL_SECONDS,
+        dotenv,
+        get_process_var,
+    ))?;
+    let siem_long_failure_threshold = parse_siem_long_failure_threshold(optional_var(
+        ENV_SIEM_LONG_FAILURE_THRESHOLD_SECONDS,
         dotenv,
         get_process_var,
     ))?;
@@ -181,7 +198,10 @@ where
         http_rate_limit_requests,
         http_rate_limit_window,
         audit_fallback_path,
+        siem_buffer_path,
         audit_resend_interval,
+        siem_resend_interval,
+        siem_long_failure_threshold,
         audit_fallback_alert_threshold_bytes,
         audit_fallback_rotate_size_bytes,
         audit_fallback_archive_dir,

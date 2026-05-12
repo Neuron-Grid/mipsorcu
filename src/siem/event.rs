@@ -15,9 +15,10 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::audit::{AuditAction, AuditEvent, AuditMetadata, AuditResult};
+use crate::ledger::SignedLedgerEntry;
 use crate::types::{KeyVersion, OwnerUserId, SecretId};
 
 /// SIEM 送信時のスキーマバージョン。互換性のない変更を導入する場合は値を上げる。
@@ -73,6 +74,47 @@ impl SiemEvent {
             key_version: event.key_version().map(KeyVersion::get),
             source_event_at,
             metadata: event.metadata_json().as_value().clone(),
+        }
+    }
+
+    /// `ledger_entries` の署名済み行から SIEM 送信用 DTO を構築する。
+    ///
+    /// `SignedLedgerEntry` は ledger の正本型だが、ここでは SIEM 送信専用 DTO に
+    /// 非秘密フィールドだけを再配置する。`payload` は `LedgerPayload` 側で
+    /// action ごとの allowlist と forbidden-key 検査を通過済みの値のみを保持する。
+    /// 署名バイト列そのものは送信せず、hash と key version だけを送る。
+    pub fn from_signed_ledger_entry(entry: &SignedLedgerEntry) -> Self {
+        let metadata = json!({
+            "event_family": "ledger",
+            "entry_hash": entry.entry_hash().to_hex(),
+            "ledger_entry_id": entry.ledger_entry_id().as_canonical_string(),
+            "payload": entry.payload().as_value(),
+            "previous_entry_hash": entry.previous_entry_hash().to_hex(),
+            "sequence_no": entry.sequence_no().get(),
+            "signature_algorithm": "ed25519",
+            "signature_key_version": entry.signature_key_version().get(),
+            "source_event_id": entry
+                .source_event_id()
+                .map(|id| id.as_canonical_string()),
+            "target_secret_version_id": entry
+                .target_secret_version_id()
+                .map(|id| id.as_canonical_string()),
+        });
+
+        Self {
+            schema_version: SIEM_EVENT_SCHEMA_VERSION,
+            event_id: entry.ledger_entry_id().as_canonical_string(),
+            event_type: entry.entry_type().as_str().to_owned(),
+            result: entry.result().as_str().to_owned(),
+            request_id: entry.request_id().as_canonical_string(),
+            actor_user_id: entry.actor_user_id().map(OwnerUserId::as_canonical_string),
+            actor_device_id: entry
+                .actor_device_id()
+                .map(|device_id| device_id.as_str().to_owned()),
+            target_secret_id: entry.target_secret_id().map(SecretId::as_canonical_string),
+            key_version: Some(entry.signature_key_version().get()),
+            source_event_at: entry.source_event_at().as_str().to_owned(),
+            metadata,
         }
     }
 

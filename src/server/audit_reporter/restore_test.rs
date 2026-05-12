@@ -79,6 +79,7 @@ pub async fn record_restore_test_audit(
     let recorder = state.audit_recorder.clone();
     match recorder.record(&event).await {
         Ok(AuditRecordOutcome::PrimarySucceeded) => {
+            let _ = state.siem_forwarding.forward_audit_event(&event).await;
             tracing::debug!(
                 request_id = %request_id.as_canonical_string(),
                 action = "restore_test",
@@ -88,6 +89,7 @@ pub async fn record_restore_test_audit(
             Ok(AuditRecordOutcome::PrimarySucceeded)
         }
         Ok(AuditRecordOutcome::FallbackSucceeded) => {
+            let _ = state.siem_forwarding.forward_audit_event(&event).await;
             tracing::warn!(
                 request_id = %request_id.as_canonical_string(),
                 action = "restore_test",

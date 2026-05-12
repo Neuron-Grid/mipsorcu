@@ -13,17 +13,18 @@ use mipsorcu::server::runtime::{
     audit_fallback_size_alert, build_app, initialize_jwt_verifier_from_jwks_url,
     refresh_jwks_cache_once, run_audit_fallback_rollover_once, sweep_audit_fallback_archive_once,
 };
+use mipsorcu::server::siem_forwarding::SiemForwardingService;
 use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{
     IntegrityCheckSummary, IntegrityCheckViolationSummary, RestoreTestSampleRow,
     SupabaseAuditAppender, SupabaseClient,
 };
 use mipsorcu::{
-    AuditRecorder, AuditTrigger, Classification, CreatedAt, DeviceId, Jwk, Jwks, JwksCache,
-    JwtVerifier, JwtVerifierConfig, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
-    LedgerSignatureKeyVersion, LedgerSigningKey, LocalAuditFallbackStore, MASTER_KEY_LENGTH,
-    MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext, RolloverOutcome,
-    SourceEventAt, prepare_new_secret_version,
+    AuditRecorder, AuditTrigger, Classification, CreatedAt, DeviceId, InMemorySiemSink, Jwk, Jwks,
+    JwksCache, JwtVerifier, JwtVerifierConfig, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
+    LedgerSignatureKeyVersion, LedgerSigningKey, LocalAuditFallbackStore, LocalSiemFallbackBuffer,
+    MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext,
+    RolloverOutcome, SiemForwarder, SourceEventAt, prepare_new_secret_version,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -399,6 +400,15 @@ fn test_app_state(
         supabase_client.clone(),
         ledger_signing_key,
     ));
+    let readiness_state = ReadinessState::new();
+    let siem_forwarding = Arc::new(SiemForwardingService::new(
+        SiemForwarder::new(
+            InMemorySiemSink::new(),
+            LocalSiemFallbackBuffer::new(temp_path("siem-buffer")),
+        ),
+        audit_recorder.clone(),
+        readiness_state.clone(),
+    ));
 
     Ok(AppState {
         master_key_ring: Arc::new(MasterKeyRing::single(
@@ -409,9 +419,11 @@ fn test_app_state(
         supabase_client,
         audit_recorder,
         ledger_appender,
+        siem_forwarding,
         audit_fallback_store,
-        readiness_state: ReadinessState::new(),
+        readiness_state,
         health_readiness_poll_interval: Duration::from_secs(30),
+        siem_long_failure_threshold: Duration::from_secs(900),
         http_handler_timeout: Duration::from_secs(75),
         http_rate_limit_requests: 300,
         http_rate_limit_window: Duration::from_secs(60),
@@ -1137,8 +1149,9 @@ async fn health_endpoint_returns_minimal_liveness_and_does_not_call_supabase() {
     assert_eq!(body["status"], "up");
     assert_eq!(body["supabase"], "ok");
     assert_eq!(body["master_key"], "loaded");
+    assert_eq!(body["siem"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
-    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
     assert!(body.get("fallback_writable").is_none());
     assert!(body.get("audit_fallback_pending").is_none());
     assert!(body.get("supabase_last_checked_at").is_none());
@@ -1174,8 +1187,9 @@ async fn health_endpoint_returns_service_unavailable_when_supabase_state_is_unhe
     assert_eq!(body["status"], "down");
     assert_eq!(body["supabase"], "ng");
     assert_eq!(body["master_key"], "loaded");
+    assert_eq!(body["siem"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
-    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1203,8 +1217,9 @@ async fn ready_endpoint_returns_cached_supabase_state_when_fresh() {
     assert_eq!(body["status"], "ready");
     assert_eq!(body["supabase"], "ok");
     assert_eq!(body["master_key"], "loaded");
+    assert_eq!(body["siem"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
-    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
     assert!(body.get("supabase_reachable").is_none());
     assert!(body.get("supabase_last_checked_at").is_none());
     assert!(body.get("master_key_loaded").is_none());
@@ -1241,8 +1256,9 @@ async fn ready_endpoint_returns_service_unavailable_when_supabase_probe_is_stale
     assert_eq!(body["status"], "not_ready");
     assert_eq!(body["supabase"], "ng");
     assert_eq!(body["master_key"], "loaded");
+    assert_eq!(body["siem"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
-    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
     assert!(body.get("supabase_reachable").is_none());
     assert!(body.get("supabase_last_checked_at").is_none());
 }
@@ -1278,7 +1294,8 @@ async fn ready_endpoint_does_not_expose_failure_audit_state() {
         body.get("audit_failure_append_both_failed_recent")
             .is_none()
     );
-    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert_eq!(body["siem"], "ok");
+    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
 }
 
 #[tokio::test(flavor = "current_thread")]

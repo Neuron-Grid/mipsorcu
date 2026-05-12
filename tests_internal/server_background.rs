@@ -15,10 +15,12 @@ use crate::ledger::{
     LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
 };
 use crate::server::ledger_appender::LedgerAppender;
+use crate::server::siem_forwarding::SiemForwardingService;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{
     IntegrityCheckViolationSummary, SupabaseAuditAppender, SupabaseClient,
 };
+use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
 use crate::types::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
 
 const JWT_ISSUER: &str = "issuer";
@@ -120,6 +122,15 @@ fn test_app_state(
         supabase_client.clone(),
         ledger_signing_key,
     ));
+    let readiness_state = ReadinessState::new();
+    let siem_forwarding = Arc::new(SiemForwardingService::new(
+        SiemForwarder::new(
+            InMemorySiemSink::new(),
+            LocalSiemFallbackBuffer::new(temp_path("siem-buffer")),
+        ),
+        audit_recorder.clone(),
+        readiness_state.clone(),
+    ));
     let jwt_verifier = JwtVerifier::new(
         JwtVerifierConfig::new(JWT_ISSUER, JWT_AUDIENCE)?,
         Jwks::new(vec![Jwk::new(
@@ -141,9 +152,11 @@ fn test_app_state(
         supabase_client,
         audit_recorder,
         ledger_appender,
+        siem_forwarding,
         audit_fallback_store,
-        readiness_state: ReadinessState::new(),
+        readiness_state,
         health_readiness_poll_interval: Duration::from_secs(30),
+        siem_long_failure_threshold: Duration::from_secs(900),
         http_handler_timeout: Duration::from_secs(75),
         http_rate_limit_requests: 300,
         http_rate_limit_window: Duration::from_secs(60),

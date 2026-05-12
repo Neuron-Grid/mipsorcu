@@ -9,9 +9,11 @@ use crate::audit::{
     LocalAuditStoreError, ResendAuditSummary, RolloverOutcome,
 };
 use crate::auth::{JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, fetch_jwks};
+use crate::server::siem_forwarding::SiemForwardingService;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::{integrity_check, restore_test};
+use crate::siem::InMemorySiemSink;
 
 const AUDIT_ARCHIVE_SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -223,6 +225,66 @@ pub(crate) async fn run_audit_resend_loop(
                 .await;
             }
         }
+    }
+}
+
+pub(crate) async fn run_siem_resend_loop(
+    siem_forwarding: Arc<SiemForwardingService<InMemorySiemSink>>,
+    interval_duration: Duration,
+    long_failure_threshold: Duration,
+    mut shutdown_receiver: watch::Receiver<bool>,
+) {
+    record_siem_resend_result(
+        siem_forwarding.resend_pending().await,
+        &siem_forwarding,
+        long_failure_threshold,
+    );
+
+    let mut interval = tokio::time::interval(interval_duration);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            result = shutdown_receiver.changed() => {
+                if result.is_err() || *shutdown_receiver.borrow() {
+                    tracing::info!("SIEM resend loop stopped");
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                record_siem_resend_result(
+                    siem_forwarding.resend_pending().await,
+                    &siem_forwarding,
+                    long_failure_threshold,
+                );
+            }
+        }
+    }
+}
+
+fn record_siem_resend_result(
+    summary: crate::siem::SiemResendSummary,
+    siem_forwarding: &SiemForwardingService<InMemorySiemSink>,
+    long_failure_threshold: Duration,
+) {
+    if summary.attempted > 0 {
+        tracing::info!(
+            attempted = summary.attempted,
+            sent = summary.sent,
+            failed = summary.failed,
+            "SIEM pending event resend completed"
+        );
+    }
+
+    let now = time::OffsetDateTime::now_utc();
+    if siem_forwarding
+        .status()
+        .is_long_failure(now, long_failure_threshold)
+    {
+        tracing::warn!(
+            threshold_seconds = long_failure_threshold.as_secs(),
+            "SIEM forwarding has been failing longer than threshold"
+        );
     }
 }
 

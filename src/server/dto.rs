@@ -53,6 +53,7 @@ pub struct HealthResponse {
     pub status: &'static str,
     pub supabase: &'static str,
     pub master_key: &'static str,
+    pub siem: &'static str,
     pub disk_free_mb: Option<u64>,
 }
 

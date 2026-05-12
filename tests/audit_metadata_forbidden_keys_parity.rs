@@ -6,11 +6,11 @@ use mipsorcu::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
 };
 
-const MIGRATION_300_PATH: &str = "supabase/migrations/300_create_audit_event_guards_and_rpc.sql";
+const LATEST_SIEM_MIGRATION_PATH: &str =
+    "supabase/migrations/999_add_siem_forward_failure_audit_action.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
-// allowlist_parity および violation_summary_parity はこちらを参照する。
+// allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
-const LATEST_ALLOWLIST_MIGRATION_PATH: &str = "supabase/migrations/998_add_digest_timestamped.sql";
 const FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_START";
 const FORBIDDEN_END_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_END";
 const ALLOWLIST_START_MARKER: &str = "-- ACTION_ALLOWLIST_START";
@@ -18,7 +18,7 @@ const ALLOWLIST_END_MARKER: &str = "-- ACTION_ALLOWLIST_END";
 
 #[test]
 fn forbidden_keys_parity_between_rust_and_sql() {
-    let migration = fs::read_to_string(MIGRATION_300_PATH)
+    let migration = fs::read_to_string(LATEST_SIEM_MIGRATION_PATH)
         .expect("forbidden-keys migration should be readable");
     let sql_keys = extract_sql_forbidden_keys(&migration);
     let rust_keys = FORBIDDEN_AUDIT_METADATA_KEYS
@@ -34,7 +34,7 @@ fn allowlist_parity_between_rust_and_sql() {
     // 最新の allowlist migration が audit_metadata_has_unknown_key_for_action の最新定義を持つ。
     // 新 action を追加する場合は最新 migration の ACTION_ALLOWLIST_START/END 内と
     // rust_allowlist_for_action_result（このファイル内）の両方を更新すること。
-    let migration = fs::read_to_string(LATEST_ALLOWLIST_MIGRATION_PATH)
+    let migration = fs::read_to_string(LATEST_SIEM_MIGRATION_PATH)
         .expect("allowlist migration should be readable");
     let sql_allowlist = extract_sql_allowlist(&migration);
 
@@ -45,13 +45,6 @@ fn allowlist_parity_between_rust_and_sql() {
 
             if action.is_write_success_only() && result == AuditResult::Success {
                 // write-success-only action は Rust 側で事前排除されるため allowlist なし
-                continue;
-            }
-
-            // SIEM integration: Rust 側 enum のみ追加し、Supabase migration は
-            // 後続タスクで投入する。migration 投入後にこの skip を削除し、SQL
-            // allowlist と parity させること。
-            if action == AuditAction::SiemForwardFailure {
                 continue;
             }
 
@@ -77,7 +70,7 @@ fn allowlist_parity_between_rust_and_sql() {
 #[test]
 fn integrity_check_violation_summary_allowlist_parity() {
     // 最新 migration は完全な関数定義（violation_summary キーを含む）を保持する。
-    let migration = fs::read_to_string(LATEST_ALLOWLIST_MIGRATION_PATH)
+    let migration = fs::read_to_string(LATEST_SIEM_MIGRATION_PATH)
         .expect("allowlist migration should be readable");
     let sql_summary = extract_sql_violation_summary_keys(&migration);
     let rust_summary = INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST
