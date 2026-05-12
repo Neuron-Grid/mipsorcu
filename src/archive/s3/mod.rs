@@ -13,9 +13,14 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod object_lock;
+pub mod queue;
 pub mod retry;
 pub mod sigv4;
 
 pub use backend::S3ImmutableArchiveBackend;
 pub use config::{S3ArchiveBackendConfig, S3ArchiveBackendConfigError};
 pub use object_lock::S3ObjectLockMode;
+pub use queue::{
+    ArchivePutOrQueueOutcome, ArchiveQueueError, LocalArchiveQueue, QueuedArchiveObject,
+    ResendArchiveSummary,
+};

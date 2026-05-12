@@ -803,6 +803,142 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MonthlyDigestGenerateMetadata / MonthlyDigestVerifyMetadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `monthly_digest_generate` failure audit metadata builder.
+#[derive(Debug, Clone)]
+pub struct MonthlyDigestGenerateMetadata {
+    target_year_month: String,
+    error_code: String,
+    source_event_at: SourceEventAt,
+}
+
+impl MonthlyDigestGenerateMetadata {
+    pub fn new(
+        period: &MonthlyDigestPeriod,
+        error_code: impl Into<String>,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            target_year_month: period.as_str().to_owned(),
+            error_code: error_code.into(),
+            source_event_at,
+        }
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert("error_code".to_owned(), Value::String(self.error_code));
+        object.insert(
+            "target_year_month".to_owned(),
+            Value::String(self.target_year_month),
+        );
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
+        AuditMetadata::from_object(object)
+    }
+}
+
+/// `monthly_digest_verify` failure audit metadata builder.
+#[derive(Debug, Clone)]
+pub struct MonthlyDigestVerifyMetadata {
+    target_year_month: String,
+    error_code: String,
+    source_event_at: SourceEventAt,
+}
+
+impl MonthlyDigestVerifyMetadata {
+    pub fn new(
+        period: &MonthlyDigestPeriod,
+        error_code: impl Into<String>,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            target_year_month: period.as_str().to_owned(),
+            error_code: error_code.into(),
+            source_event_at,
+        }
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert("error_code".to_owned(), Value::String(self.error_code));
+        object.insert(
+            "target_year_month".to_owned(),
+            Value::String(self.target_year_month),
+        );
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
+        AuditMetadata::from_object(object)
+    }
+}
+
+#[cfg(test)]
+mod monthly_digest_metadata_tests {
+    use super::*;
+    use crate::audit::{AuditAction, AuditResult};
+    use crate::ledger::MonthlyDigestPeriod;
+    use crate::types::SourceEventAt;
+
+    fn make_period() -> MonthlyDigestPeriod {
+        MonthlyDigestPeriod::parse("2026-05").unwrap()
+    }
+
+    fn make_source_event_at() -> SourceEventAt {
+        SourceEventAt::parse("2026-06-01T00:00:00Z").unwrap()
+    }
+
+    #[test]
+    fn generate_failure_metadata_contains_only_allowed_keys() {
+        let metadata = MonthlyDigestGenerateMetadata::new(
+            &make_period(),
+            "append_failed",
+            make_source_event_at(),
+        )
+        .build()
+        .unwrap();
+        let value = metadata.as_value();
+        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
+        assert_eq!(value["error_code"].as_str(), Some("append_failed"));
+        assert_eq!(
+            value["source_event_at"].as_str(),
+            Some("2026-06-01T00:00:00Z")
+        );
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        metadata
+            .validate_allowlist_for_action(AuditAction::MonthlyDigestGenerate, AuditResult::Failure)
+            .unwrap();
+    }
+
+    #[test]
+    fn verify_failure_metadata_contains_only_allowed_keys() {
+        let metadata = MonthlyDigestVerifyMetadata::new(
+            &make_period(),
+            "signature_invalid",
+            make_source_event_at(),
+        )
+        .build()
+        .unwrap();
+        let value = metadata.as_value();
+        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
+        assert_eq!(value["error_code"].as_str(), Some("signature_invalid"));
+        assert_eq!(
+            value["source_event_at"].as_str(),
+            Some("2026-06-01T00:00:00Z")
+        );
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        metadata
+            .validate_allowlist_for_action(AuditAction::MonthlyDigestVerify, AuditResult::Failure)
+            .unwrap();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ArchiveExportMetadata
 // ─────────────────────────────────────────────────────────────────────────────
 

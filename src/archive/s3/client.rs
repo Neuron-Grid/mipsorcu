@@ -45,6 +45,12 @@ pub(super) enum HeadOutcome {
     NotFound,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ListObjectsV2Output {
+    pub keys: Vec<String>,
+    pub next_continuation_token: Option<String>,
+}
+
 pub(super) struct S3HttpClient<'a> {
     pub config: &'a S3ArchiveBackendConfig,
     pub http: &'a reqwest::Client,
@@ -180,6 +186,69 @@ impl<'a> S3HttpClient<'a> {
         classify_failure_status(status).map(|_| HeadOutcome::Found)
     }
 
+    pub async fn list_objects_v2(
+        &self,
+        continuation_token: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Result<ListObjectsV2Output, S3BackendError> {
+        let (url, host, canonical_uri, canonical_query_string) =
+            self.build_list_url_and_signing_parts(continuation_token)?;
+        let amz_date = format_amz_date(now)?;
+        let date_stamp = format_date_stamp(now)?;
+        let payload_hash = hex::encode(sha2::Sha256::digest([]));
+
+        let mut headers: Vec<(String, String)> = vec![
+            (HEADER_HOST.to_owned(), host),
+            (HEADER_X_AMZ_DATE.to_owned(), amz_date.clone()),
+            (HEADER_X_AMZ_CONTENT_SHA256.to_owned(), payload_hash),
+        ];
+        if let Some(token) = self.config.session_token() {
+            headers.push((
+                HEADER_X_AMZ_SECURITY_TOKEN.to_owned(),
+                token.expose().to_owned(),
+            ));
+        }
+
+        let signed = sign(SignRequestInput {
+            method: "GET",
+            canonical_uri: &canonical_uri,
+            canonical_query_string: &canonical_query_string,
+            headers: &headers,
+            payload: &[],
+            region: self.config.region(),
+            access_key_id: self.config.access_key_id(),
+            secret_access_key: self.config.secret_access_key().expose(),
+            amz_date: &amz_date,
+            date_stamp: &date_stamp,
+        })?;
+
+        let mut request = self.http.request(Method::GET, &url);
+        for (name, value) in &headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        request = request.header("Authorization", signed.authorization_header);
+
+        let response = request
+            .send()
+            .await
+            .map_err(|error| classify_reqwest_error(&error))?;
+
+        let status = response.status().as_u16();
+        if response.status().is_success() {
+            let text = response
+                .text()
+                .await
+                .map_err(|error| S3BackendError::ResponseRead(error.to_string()))?;
+            return parse_list_objects_v2_response(&text);
+        }
+        match status {
+            401 | 403 => Err(S3BackendError::Unauthenticated),
+            408 | 429 => Err(S3BackendError::ServerError { status }),
+            500..=599 => Err(S3BackendError::ServerError { status }),
+            _ => Err(S3BackendError::Unexpected { status }),
+        }
+    }
+
     pub async fn get_object_bytes(
         &self,
         object_key: &str,
@@ -239,6 +308,45 @@ impl<'a> S3HttpClient<'a> {
             return Ok(None);
         }
         classify_failure_status(status).map(|_| None)
+    }
+
+    fn build_list_url_and_signing_parts(
+        &self,
+        continuation_token: Option<&str>,
+    ) -> Result<(String, String, String, String), S3BackendError> {
+        let endpoint = self.config.endpoint_url().trim_end_matches('/');
+        let parsed = parse_endpoint(endpoint)?;
+        let canonical_query_string = match continuation_token {
+            Some(token) => format!(
+                "continuation-token={}&list-type=2",
+                percent_encode_query_value(token)
+            ),
+            None => "list-type=2".to_owned(),
+        };
+
+        if self.config.path_style() {
+            let canonical_uri = format!("/{}", self.config.bucket());
+            let url = format!(
+                "{endpoint}/{bucket}?{query}",
+                bucket = self.config.bucket(),
+                query = canonical_query_string
+            );
+            Ok((url, parsed.host, canonical_uri, canonical_query_string))
+        } else {
+            let host_with_bucket = format!("{}.{}", self.config.bucket(), parsed.host);
+            let url = format!(
+                "{scheme}://{host}/?{query}",
+                scheme = parsed.scheme,
+                host = host_with_bucket,
+                query = canonical_query_string
+            );
+            Ok((
+                url,
+                host_with_bucket,
+                "/".to_owned(),
+                canonical_query_string,
+            ))
+        }
     }
 
     fn build_url_and_host(&self, object_key: &str) -> Result<(String, String), S3BackendError> {
@@ -307,6 +415,54 @@ fn format_date_stamp(now: OffsetDateTime) -> Result<String, S3BackendError> {
     now.to_offset(time::UtcOffset::UTC)
         .format(&DATE_STAMP_FORMAT)
         .map_err(|_| S3BackendError::InvalidConfig("failed to format date stamp"))
+}
+
+fn parse_list_objects_v2_response(xml: &str) -> Result<ListObjectsV2Output, S3BackendError> {
+    let keys = extract_xml_tags(xml, "Key");
+    let next_continuation_token = extract_xml_tags(xml, "NextContinuationToken")
+        .into_iter()
+        .next();
+    Ok(ListObjectsV2Output {
+        keys,
+        next_continuation_token,
+    })
+}
+
+fn extract_xml_tags(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut rest = xml;
+    let mut values = Vec::new();
+    while let Some(start) = rest.find(&open) {
+        let after_open = &rest[start + open.len()..];
+        let Some(end) = after_open.find(&close) else {
+            break;
+        };
+        values.push(unescape_minimal_xml(&after_open[..end]));
+        rest = &after_open[end + close.len()..];
+    }
+    values
+}
+
+fn unescape_minimal_xml(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    out
 }
 
 fn classify_failure_status(status: u16) -> Result<PutOutcome, S3BackendError> {
@@ -445,6 +601,30 @@ mod tests {
         let parsed = parse_endpoint("https://s3.example.com").unwrap();
         assert_eq!(parsed.scheme, "https");
         assert_eq!(parsed.host, "s3.example.com");
+    }
+
+    #[test]
+    fn parse_list_objects_v2_response_extracts_keys_and_token() {
+        let xml = r#"<ListBucketResult><Contents><Key>digests/2026-05/digest.json</Key></Contents><Contents><Key>digests/2026-06/digest.json</Key></Contents><NextContinuationToken>next-token</NextContinuationToken></ListBucketResult>"#;
+        let parsed = parse_list_objects_v2_response(xml).unwrap();
+        assert_eq!(
+            parsed.keys,
+            vec![
+                "digests/2026-05/digest.json".to_owned(),
+                "digests/2026-06/digest.json".to_owned()
+            ]
+        );
+        assert_eq!(
+            parsed.next_continuation_token.as_deref(),
+            Some("next-token")
+        );
+    }
+
+    #[test]
+    fn parse_list_objects_v2_response_unescapes_xml_values() {
+        let xml = r#"<ListBucketResult><Contents><Key>digests/a&amp;b/digest.json</Key></Contents></ListBucketResult>"#;
+        let parsed = parse_list_objects_v2_response(xml).unwrap();
+        assert_eq!(parsed.keys, vec!["digests/a&b/digest.json".to_owned()]);
     }
 
     #[test]

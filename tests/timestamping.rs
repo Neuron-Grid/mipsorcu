@@ -15,16 +15,16 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use mipsorcu::{
-    DigestHash, FailingTimestampingService, InMemoryTimestampingService, LedgerHash,
-    LedgerSequenceNo, LedgerSignature, LedgerSignatureKeyVersion, MonthlyDigestPeriod, RequestId,
-    RequestTimestampingError, SignedMonthlyDigest, SourceEventAt, TimestampingService,
-    TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
+    AuditRecorder, DigestHash, FailingTimestampingService, InMemoryTimestampingService, LedgerHash,
+    LedgerSequenceNo, LedgerSignature, LedgerSignatureKeyVersion, LocalAuditFallbackStore,
+    MonthlyDigestPeriod, RequestId, RequestTimestampingError, SignedMonthlyDigest, SourceEventAt,
+    TimestampingService, TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
     build_monthly_digest_canonical_form, request_timestamping_for_digest,
 };
 
 // LedgerAppender / SupabaseClient はクレート内 (pub) なので直接アクセス可能。
 use mipsorcu::server::ledger_appender::LedgerAppender;
-use mipsorcu::server::supabase::SupabaseClient;
+use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 
 const LEDGER_ED25519_SECRET_KEY_LENGTH: usize = 32;
 
@@ -85,6 +85,16 @@ fn test_supabase_client(base_url: String) -> Arc<SupabaseClient> {
         base_url,
         "service-role-secret",
         "publishable-key-secret",
+    ))
+}
+
+fn test_audit_recorder(client: Arc<SupabaseClient>) -> Arc<AuditRecorder<SupabaseAuditAppender>> {
+    let path = std::env::temp_dir().join("mipsorcu-timestamping-audit-fallback.jsonl");
+    let archive_dir = std::env::temp_dir().join("mipsorcu-timestamping-audit-fallback-archive");
+    let _ = std::fs::remove_file(&path);
+    Arc::new(AuditRecorder::new(
+        SupabaseAuditAppender::new(client),
+        LocalAuditFallbackStore::with_rollover_config(path, archive_dir, 1024 * 1024),
     ))
 }
 
@@ -379,13 +389,14 @@ async fn happy_path_records_ledger_and_success_audit() -> Result<(), Box<dyn std
         expected_requests: 3, // chain_head + append_ledger + audit
     })?;
     let supabase_client = test_supabase_client(server.url.clone());
+    let audit_recorder = test_audit_recorder(supabase_client.clone());
     let ledger_appender = test_ledger_appender(supabase_client.clone());
     let service = InMemoryTimestampingService::new();
     let digest = test_signed_monthly_digest();
 
     let result = request_timestamping_for_digest(
         &service,
-        &supabase_client,
+        &audit_recorder,
         &ledger_appender,
         &digest,
         test_request_id(),
@@ -447,13 +458,14 @@ async fn backend_failure_records_failure_audit_and_skips_ledger()
         expected_requests: 1, // failure audit のみ
     })?;
     let supabase_client = test_supabase_client(server.url.clone());
+    let audit_recorder = test_audit_recorder(supabase_client.clone());
     let ledger_appender = test_ledger_appender(supabase_client.clone());
     let service = FailingTimestampingService::new("simulated_backend_failure");
     let digest = test_signed_monthly_digest();
 
     let result = request_timestamping_for_digest(
         &service,
-        &supabase_client,
+        &audit_recorder,
         &ledger_appender,
         &digest,
         test_request_id(),
@@ -508,13 +520,14 @@ async fn ledger_append_failure_after_token_acquired_records_success_audit_and_re
         expected_requests: 3,
     })?;
     let supabase_client = test_supabase_client(server.url.clone());
+    let audit_recorder = test_audit_recorder(supabase_client.clone());
     let ledger_appender = test_ledger_appender(supabase_client.clone());
     let service = InMemoryTimestampingService::new();
     let digest = test_signed_monthly_digest();
 
     let result = request_timestamping_for_digest(
         &service,
-        &supabase_client,
+        &audit_recorder,
         &ledger_appender,
         &digest,
         test_request_id(),

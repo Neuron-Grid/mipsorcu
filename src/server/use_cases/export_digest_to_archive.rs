@@ -17,15 +17,15 @@ use std::sync::Arc;
 use crate::archive::backend::{ArchiveBackend, ArchiveBackendError, ArchiveObjectKey};
 use crate::archive::export::ArchiveExportPackage;
 use crate::audit::{
-    ArchiveExportMetadata, AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult,
-    RequestId,
+    ArchiveExportMetadata, AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder,
+    AuditResult, RequestId,
 };
 use crate::ledger::{
     LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
     SignedMonthlyDigest,
 };
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts, LedgerAppender};
-use crate::server::supabase::SupabaseClient;
+use crate::server::supabase::SupabaseAuditAppender;
 use crate::types::SourceEventAt;
 
 /// 外部アーカイブ export 失敗の原因分類。
@@ -68,7 +68,7 @@ impl std::error::Error for ExportDigestToArchiveError {}
 /// 失敗時は `archive_export` 失敗監査のみを記録し、他の操作には伝播しない。
 pub async fn export_digest_to_archive<B: ArchiveBackend>(
     backend: &B,
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     ledger_appender: &Arc<LedgerAppender>,
     digest: &SignedMonthlyDigest,
     request_id: RequestId,
@@ -100,7 +100,7 @@ pub async fn export_digest_to_archive<B: ArchiveBackend>(
             "archive export PUT failed"
         );
         record_archive_export_failure_audit(
-            supabase_client,
+            audit_recorder,
             &request_id,
             period,
             &error_code,
@@ -122,7 +122,7 @@ pub async fn export_digest_to_archive<B: ArchiveBackend>(
 
     // ── 5. 成功監査を記録（ledger 追記結果に関わらず） ──
     record_archive_export_success_audit(
-        supabase_client,
+        audit_recorder,
         &request_id,
         period,
         &key,
@@ -245,7 +245,7 @@ async fn append_archive_exported_ledger_entry(
 }
 
 async fn record_archive_export_success_audit(
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     request_id: &RequestId,
     period: &MonthlyDigestPeriod,
     key: &ArchiveObjectKey,
@@ -253,7 +253,7 @@ async fn record_archive_export_success_audit(
     exported_at: &SourceEventAt,
 ) {
     record_archive_export_audit(
-        supabase_client,
+        audit_recorder,
         request_id,
         period,
         AuditResult::Success,
@@ -266,14 +266,14 @@ async fn record_archive_export_success_audit(
 
 /// archive export 失敗を `audit_events` に同期記録するヘルパー（non-propagating）。
 pub async fn record_archive_export_failure_audit(
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     request_id: &RequestId,
     period: &MonthlyDigestPeriod,
     error_code: &str,
     exported_at: &SourceEventAt,
 ) {
     record_archive_export_audit(
-        supabase_client,
+        audit_recorder,
         request_id,
         period,
         AuditResult::Failure,
@@ -283,7 +283,7 @@ pub async fn record_archive_export_failure_audit(
 }
 
 async fn record_archive_export_audit(
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     request_id: &RequestId,
     period: &MonthlyDigestPeriod,
     result: AuditResult,
@@ -332,21 +332,22 @@ async fn record_archive_export_audit(
         }
     };
 
-    match supabase_client.call_append_audit_event(&event).await {
-        Ok(()) => {
+    match audit_recorder.record(&event).await {
+        Ok(outcome) => {
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
                 period = period.as_str(),
                 result = result.as_str(),
+                audit_record_outcome = ?outcome,
                 "archive export audit recorded"
             );
         }
-        Err(rpc_error) => {
+        Err(record_error) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 period = period.as_str(),
-                error = %rpc_error,
-                "archive export audit RPC failed — manual follow-up required"
+                error = %record_error,
+                "archive export audit primary and fallback recording failed"
             );
         }
     }
@@ -361,6 +362,9 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::{Value, json};
+
+    use crate::audit::LocalAuditFallbackStore;
+    use crate::server::supabase::SupabaseClient;
 
     use super::*;
     use crate::archive::backend::{
@@ -429,6 +433,19 @@ mod tests {
             base_url,
             "service-role-secret",
             "publishable-key-secret",
+        ))
+    }
+
+    fn test_audit_recorder(
+        client: Arc<SupabaseClient>,
+    ) -> Arc<AuditRecorder<SupabaseAuditAppender>> {
+        let path = std::env::temp_dir().join("mipsorcu-archive-export-audit-fallback.jsonl");
+        let archive_dir =
+            std::env::temp_dir().join("mipsorcu-archive-export-audit-fallback-archive");
+        let _ = std::fs::remove_file(&path);
+        Arc::new(AuditRecorder::new(
+            SupabaseAuditAppender::new(client),
+            LocalAuditFallbackStore::with_rollover_config(path, archive_dir, 1024 * 1024),
         ))
     }
 
@@ -750,13 +767,14 @@ mod tests {
             expected_requests: 3,
         })?;
         let supabase_client = test_supabase_client(server.url.clone());
+        let audit_recorder = test_audit_recorder(supabase_client.clone());
         let ledger_appender = test_ledger_appender(supabase_client.clone());
         let backend = InMemoryArchiveBackend::new();
         let digest = test_signed_monthly_digest();
 
         let result = export_digest_to_archive(
             &backend,
-            &supabase_client,
+            &audit_recorder,
             &ledger_appender,
             &digest,
             test_request_id(),
@@ -807,12 +825,13 @@ mod tests {
             expected_requests: 1,
         })?;
         let supabase_client = test_supabase_client(server.url.clone());
+        let audit_recorder = test_audit_recorder(supabase_client.clone());
         let ledger_appender = test_ledger_appender(supabase_client.clone());
         let digest = test_signed_monthly_digest();
 
         let result = export_digest_to_archive(
             &FailingPutBackend,
-            &supabase_client,
+            &audit_recorder,
             &ledger_appender,
             &digest,
             test_request_id(),

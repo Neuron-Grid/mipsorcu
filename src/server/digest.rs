@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::audit::RequestId;
+use crate::audit::{AuditRecorder, LocalAuditFallbackStore, RequestId};
 use crate::ledger::MonthlyDigestPeriod;
 use crate::server::config::AppConfig;
-use crate::server::supabase::SupabaseClient;
+use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::use_cases::generate_monthly_digest::{
     GenerateMonthlyDigestError, GenerateMonthlyDigestInput, generate_monthly_digest,
     record_monthly_digest_failure_audit,
@@ -162,6 +162,7 @@ async fn run_generate_command(
         supabase_client.clone(),
         signing_key,
     ));
+    let audit_recorder = build_audit_recorder(config, supabase_client.clone());
 
     let generated_at =
         SourceEventAt::now_utc().map_err(|error| DigestCliError::Config(error.to_string()))?;
@@ -188,7 +189,7 @@ async fn run_generate_command(
         Err(error) => {
             // 生成失敗を audit_events に同期記録する
             record_monthly_digest_failure_audit(
-                &supabase_client,
+                &audit_recorder,
                 &request_id,
                 &period,
                 &error,
@@ -233,6 +234,8 @@ async fn run_verify_command(
         config.supabase_publishable_key.clone(),
     ));
 
+    let audit_recorder = build_audit_recorder(config, supabase_client.clone());
+
     let verified_at =
         SourceEventAt::now_utc().map_err(|error| DigestCliError::Config(error.to_string()))?;
 
@@ -257,7 +260,7 @@ async fn run_verify_command(
         Err(error) => {
             // 検証失敗を audit_events に同期記録する
             record_monthly_digest_verify_failure_audit(
-                &supabase_client,
+                &audit_recorder,
                 &request_id,
                 &period,
                 &error,
@@ -279,4 +282,17 @@ async fn run_verify_command(
             })
         }
     }
+}
+
+fn build_audit_recorder(
+    config: &AppConfig,
+    supabase_client: Arc<SupabaseClient>,
+) -> Arc<AuditRecorder<SupabaseAuditAppender>> {
+    let audit_appender = SupabaseAuditAppender::new(supabase_client);
+    let fallback_store = LocalAuditFallbackStore::with_rollover_config(
+        &config.audit_fallback_path,
+        &config.audit_fallback_archive_dir,
+        config.audit_fallback_rotate_size_bytes,
+    );
+    Arc::new(AuditRecorder::new(audit_appender, fallback_store))
 }

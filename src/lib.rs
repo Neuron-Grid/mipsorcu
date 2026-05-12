@@ -34,9 +34,10 @@ pub use audit::{
     EncryptRotateMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
-    LocalAuditFallbackStore, LocalAuditStoreError, RequestId, ResendAuditSummary,
-    RestoreTestMetadata, RolloverArchive, RolloverOutcome, SiemForwardFailureMetadata,
-    SweptArchive, VersionPurgeMetadata,
+    LocalAuditFallbackStore, LocalAuditStoreError, MonthlyDigestGenerateMetadata,
+    MonthlyDigestVerifyMetadata, RequestId, ResendAuditSummary, RestoreTestMetadata,
+    RolloverArchive, RolloverOutcome, SiemForwardFailureMetadata, SweptArchive,
+    VersionPurgeMetadata,
 };
 pub use auth::{
     Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,

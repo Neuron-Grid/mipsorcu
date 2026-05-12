@@ -17,13 +17,14 @@
 use std::sync::Arc;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
+    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder, AuditResult,
+    MonthlyDigestVerifyMetadata, RequestId,
 };
 use crate::ledger::{
     DigestHash, LedgerChainHead, LedgerError, LedgerSequenceNo, LedgerVerifyingKey,
     MonthlyDigestPeriod, build_monthly_digest_canonical_form, verify_ledger_chain,
 };
-use crate::server::supabase::SupabaseClient;
+use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::types::SourceEventAt;
 
 pub struct VerifyMonthlyDigestInput {
@@ -398,7 +399,7 @@ pub async fn verify_monthly_digest(
 /// 失敗時は `audit_events` への記録を試みる。
 /// 監査記録自体の失敗はログに記録するが、元の失敗を上書きしない。
 pub async fn record_monthly_digest_verify_failure_audit(
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     request_id: &RequestId,
     period: &MonthlyDigestPeriod,
     error: &VerifyMonthlyDigestError,
@@ -415,22 +416,19 @@ pub async fn record_monthly_digest_verify_failure_audit(
         }
     };
 
-    let metadata_value = serde_json::json!({
-        "error_code": error.as_error_code(),
-        "target_year_month": period.as_str(),
-        "source_event_at": verified_at.as_str(),
-    });
-
-    let metadata = match AuditMetadata::new(metadata_value) {
-        Ok(m) => m,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "failed to build audit metadata for monthly_digest_verify failure audit"
-            );
-            return;
-        }
-    };
+    let metadata =
+        match MonthlyDigestVerifyMetadata::new(period, error.as_error_code(), verified_at.clone())
+            .build()
+        {
+            Ok(m) => m,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to build audit metadata for monthly_digest_verify failure audit"
+                );
+                return;
+            }
+        };
 
     let event = match AuditEvent::new(AuditEventParts {
         audit_event_id,
@@ -453,21 +451,22 @@ pub async fn record_monthly_digest_verify_failure_audit(
         }
     };
 
-    match supabase_client.call_append_audit_event(&event).await {
-        Ok(()) => {
+    match audit_recorder.record(&event).await {
+        Ok(outcome) => {
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
                 period = period.as_str(),
+                audit_record_outcome = ?outcome,
                 "monthly digest verification failure audit recorded"
             );
         }
-        Err(rpc_error) => {
+        Err(record_error) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 period = period.as_str(),
-                error = %rpc_error,
-                error_code = "monthly_digest_verify_failure_audit_rpc_failed",
-                "monthly digest verify failure audit RPC failed — manual follow-up required"
+                error = %record_error,
+                error_code = "monthly_digest_verify_failure_audit_record_failed",
+                "monthly digest verify failure audit primary and fallback recording failed"
             );
         }
     }

@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult,
+    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder, AuditResult,
     DigestTimestampingMetadata, RequestId,
 };
 use crate::ledger::{
@@ -24,7 +24,7 @@ use crate::ledger::{
     SignedMonthlyDigest,
 };
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts, LedgerAppender};
-use crate::server::supabase::SupabaseClient;
+use crate::server::supabase::SupabaseAuditAppender;
 use crate::timestamping::{
     TimestampingService, TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
 };
@@ -73,7 +73,7 @@ impl std::error::Error for RequestTimestampingError {}
 /// 失敗時は `digest_timestamping` 失敗監査のみを記録し、他の操作には伝播しない。
 pub async fn request_timestamping_for_digest<S: TimestampingService>(
     service: &S,
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     ledger_appender: &Arc<LedgerAppender>,
     digest: &SignedMonthlyDigest,
     request_id: RequestId,
@@ -95,7 +95,7 @@ pub async fn request_timestamping_for_digest<S: TimestampingService>(
                 "digest timestamping request failed"
             );
             record_digest_timestamping_failure_audit(
-                supabase_client,
+                audit_recorder,
                 &request_id,
                 period,
                 &digest_hash_hex,
@@ -123,7 +123,7 @@ pub async fn request_timestamping_for_digest<S: TimestampingService>(
 
     // ── 4. 成功監査を記録（ledger 追記結果に関わらず） ──
     record_digest_timestamping_success_audit(
-        supabase_client,
+        audit_recorder,
         &request_id,
         period,
         &digest_hash_hex,
@@ -244,7 +244,7 @@ async fn append_digest_timestamped_ledger_entry(
 }
 
 async fn record_digest_timestamping_success_audit(
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     request_id: &RequestId,
     period: &MonthlyDigestPeriod,
     digest_hash_hex: &str,
@@ -252,7 +252,7 @@ async fn record_digest_timestamping_success_audit(
     requested_at: &SourceEventAt,
 ) {
     record_digest_timestamping_audit(
-        supabase_client,
+        audit_recorder,
         request_id,
         period,
         AuditResult::Success,
@@ -265,7 +265,7 @@ async fn record_digest_timestamping_success_audit(
 
 /// digest timestamping 失敗を `audit_events` に同期記録するヘルパー（non-propagating）。
 pub async fn record_digest_timestamping_failure_audit(
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     request_id: &RequestId,
     period: &MonthlyDigestPeriod,
     digest_hash_hex: &str,
@@ -273,7 +273,7 @@ pub async fn record_digest_timestamping_failure_audit(
     requested_at: &SourceEventAt,
 ) {
     record_digest_timestamping_audit(
-        supabase_client,
+        audit_recorder,
         request_id,
         period,
         AuditResult::Failure,
@@ -285,7 +285,7 @@ pub async fn record_digest_timestamping_failure_audit(
 }
 
 async fn record_digest_timestamping_audit(
-    supabase_client: &Arc<SupabaseClient>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     request_id: &RequestId,
     period: &MonthlyDigestPeriod,
     result: AuditResult,
@@ -334,21 +334,22 @@ async fn record_digest_timestamping_audit(
         }
     };
 
-    match supabase_client.call_append_audit_event(&event).await {
-        Ok(()) => {
+    match audit_recorder.record(&event).await {
+        Ok(outcome) => {
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
                 period = period.as_str(),
                 result = result.as_str(),
+                audit_record_outcome = ?outcome,
                 "digest timestamping audit recorded"
             );
         }
-        Err(rpc_error) => {
+        Err(record_error) => {
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
                 period = period.as_str(),
-                error = %rpc_error,
-                "digest timestamping audit RPC failed — manual follow-up required"
+                error = %record_error,
+                "digest timestamping audit primary and fallback recording failed"
             );
         }
     }

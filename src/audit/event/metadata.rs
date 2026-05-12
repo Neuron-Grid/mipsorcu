@@ -9,7 +9,8 @@ pub use builders::{
     ArchiveExportMetadata, AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata,
     EncryptCreateMetadata, EncryptRotateMetadata, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
-    RestoreTestMetadata, SiemForwardFailureMetadata, VersionPurgeMetadata,
+    MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RestoreTestMetadata,
+    SiemForwardFailureMetadata, VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
@@ -82,11 +83,21 @@ impl AuditTrigger {
 }
 
 impl AuditMetadata {
+    /// Constructs audit metadata from a JSON object.
+    ///
+    /// New action-specific code should prefer the typed builders in
+    /// `audit::event::metadata::builders` so unknown keys cannot be introduced
+    /// at call sites. This constructor remains public for compatibility and for
+    /// deserializing persisted fallback records.
     pub fn new(value: Value) -> Result<Self, AuditEventError> {
-        let mut object = value
+        let object = value
             .as_object()
             .cloned()
             .ok_or(AuditEventError::MetadataMustBeObject)?;
+        Self::from_object(object)
+    }
+
+    pub(crate) fn from_object(mut object: Map<String, Value>) -> Result<Self, AuditEventError> {
         reject_forbidden_metadata_keys_in_object(&object)?;
         validate_trigger(&object)?;
         canonicalize_source_event_at(&mut object)?;

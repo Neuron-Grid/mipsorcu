@@ -15,12 +15,12 @@ as $$
     select case
         when current_setting('mipsorcu.audit_metadata_allowlist_mode', true) in ('warning', 'strict')
             then current_setting('mipsorcu.audit_metadata_allowlist_mode', true)
-        else 'warning'
+        else 'strict'
     end;
 $$;
 
 comment on function public.audit_metadata_allowlist_mode() is
-    'Feature flag for audit metadata allowlist validation. Values: strict (reject unknown keys) or warning (log only). Defaults to warning (Phase 1). Phase 2 switches to strict via GUC mipsorcu.audit_metadata_allowlist_mode. See docs/adr/0027-adr-audit-events-metadata-json-action-allowlist.md for staged migration plan.';
+    'Feature flag for audit metadata allowlist validation. Values: strict (reject unknown keys) or warning (log only). Defaults to strict for Phase 2; operators may temporarily set warning during controlled migration windows only. See docs/adr/0027-adr-audit-events-metadata-json-action-allowlist.md for staged migration plan.';
 
 
 create or replace function public.audit_metadata_has_unknown_key_for_action(
