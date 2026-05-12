@@ -303,6 +303,66 @@ fn ledger_payload_accepts_allowed_keys_only() -> TestResult {
 }
 
 #[test]
+fn scheduler_job_completed_payload_accepts_valid_job_name() -> TestResult {
+    let payload = LedgerPayload::new(
+        LedgerEntryType::SchedulerJobCompleted,
+        json!({
+            "duration_ms": 12,
+            "job_name": "monthly_digest_generate",
+            "target_year_month": "2026-05",
+            "trigger": "background"
+        }),
+    )?;
+
+    assert_eq!(payload.entry_type(), LedgerEntryType::SchedulerJobCompleted);
+    assert_eq!(payload.as_value()["job_name"], "monthly_digest_generate");
+
+    Ok(())
+}
+
+#[test]
+fn scheduler_job_completed_payload_rejects_invalid_job_name() {
+    let blank = LedgerPayload::new(
+        LedgerEntryType::SchedulerJobCompleted,
+        json!({
+            "duration_ms": 12,
+            "job_name": " ",
+            "trigger": "background"
+        }),
+    );
+    assert!(matches!(
+        blank,
+        Err(LedgerError::InvalidPayloadField { .. })
+    ));
+
+    let non_string = LedgerPayload::new(
+        LedgerEntryType::SchedulerJobCompleted,
+        json!({
+            "duration_ms": 12,
+            "job_name": 7,
+            "trigger": "background"
+        }),
+    );
+    assert!(matches!(
+        non_string,
+        Err(LedgerError::InvalidPayloadField { .. })
+    ));
+
+    let oversized = LedgerPayload::new(
+        LedgerEntryType::SchedulerJobCompleted,
+        json!({
+            "duration_ms": 12,
+            "job_name": "x".repeat(129),
+            "trigger": "background"
+        }),
+    );
+    assert!(matches!(
+        oversized,
+        Err(LedgerError::InvalidPayloadField { .. })
+    ));
+}
+
+#[test]
 fn ledger_signature_verifies_and_chain_verification_accepts_valid_entry() -> TestResult {
     let signing_key = sample_signing_key(1)?;
     let verification_key = signing_key.verification_key();

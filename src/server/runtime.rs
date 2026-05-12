@@ -249,8 +249,12 @@ async fn run_server_with_config(config: config::AppConfig) {
     serve_app(state, listen_addr, shutdown_sender).await;
 }
 
-pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) {
-    restore_test::run_restore_test_once(state, sample_limit, crate::audit::AuditTrigger::Cli).await;
+pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) -> bool {
+    matches!(
+        restore_test::run_restore_test_once(state, sample_limit, crate::audit::AuditTrigger::Cli)
+            .await,
+        restore_test::RestoreTestOutcome::Success
+    )
 }
 
 async fn register_ledger_signing_public_key_at_startup(

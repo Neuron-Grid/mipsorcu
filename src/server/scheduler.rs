@@ -15,20 +15,17 @@ use crate::audit::{
 use crate::ledger::{
     DigestHash, LedgerChainHead, LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult,
     LedgerSequenceNo, MonthlyDigestPeriod, SignedLedgerEntry, SignedMonthlyDigest,
-    build_monthly_digest_canonical_form, verify_ledger_chain,
+    build_monthly_digest_canonical_form,
 };
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts};
 use crate::server::state::AppState;
-use crate::server::supabase::{MonthlyDigestVerificationMaterials, SupabaseClient};
+use crate::server::supabase::{
+    LedgerVerificationMaterialRow, MonthlyDigestVerificationMaterials, SupabaseClient,
+};
 use crate::server::use_cases::export_digest_to_archive::export_digest_to_archive;
 use crate::server::use_cases::generate_monthly_digest::{
     GenerateMonthlyDigestInput, generate_monthly_digest, record_monthly_digest_failure_audit,
 };
-use crate::server::use_cases::request_timestamping_for_digest::request_timestamping_for_digest;
-use crate::server::use_cases::verify_monthly_digest::{
-    VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit, verify_monthly_digest,
-};
-use crate::timestamping::InMemoryTimestampingService;
 use crate::types::SourceEventAt;
 
 use super::restore_test;
@@ -48,7 +45,8 @@ pub struct SchedulerConfig {
 enum ScheduledJobName {
     LedgerHashChainFullVerify,
     LedgerSignatureFullVerify,
-    MonthlyDigestPipeline,
+    MonthlyDigestGenerate,
+    ArchiveExport,
     RestoreTest,
     SignatureKeyReviewReminder,
     AuditorPermissionReviewReminder,
@@ -59,7 +57,8 @@ impl ScheduledJobName {
         match self {
             Self::LedgerHashChainFullVerify => "ledger_hash_chain_full_verify",
             Self::LedgerSignatureFullVerify => "ledger_signature_full_verify",
-            Self::MonthlyDigestPipeline => "monthly_digest_pipeline",
+            Self::MonthlyDigestGenerate => "monthly_digest_generate",
+            Self::ArchiveExport => "archive_export",
             Self::RestoreTest => "restore_test",
             Self::SignatureKeyReviewReminder => "signature_key_review_reminder",
             Self::AuditorPermissionReviewReminder => "auditor_permission_review_reminder",
@@ -108,6 +107,7 @@ struct SchedulerRuntimeState {
     hash_chain_lock: JobLock,
     signature_lock: JobLock,
     digest_lock: JobLock,
+    archive_lock: JobLock,
     restore_lock: JobLock,
     signature_review_lock: JobLock,
     auditor_review_lock: JobLock,
@@ -120,6 +120,7 @@ impl SchedulerRuntimeState {
             hash_chain_lock: JobLock::new(),
             signature_lock: JobLock::new(),
             digest_lock: JobLock::new(),
+            archive_lock: JobLock::new(),
             restore_lock: JobLock::new(),
             signature_review_lock: JobLock::new(),
             auditor_review_lock: JobLock::new(),
@@ -130,7 +131,8 @@ impl SchedulerRuntimeState {
         match job_name {
             ScheduledJobName::LedgerHashChainFullVerify => &self.hash_chain_lock,
             ScheduledJobName::LedgerSignatureFullVerify => &self.signature_lock,
-            ScheduledJobName::MonthlyDigestPipeline => &self.digest_lock,
+            ScheduledJobName::MonthlyDigestGenerate => &self.digest_lock,
+            ScheduledJobName::ArchiveExport => &self.archive_lock,
             ScheduledJobName::RestoreTest => &self.restore_lock,
             ScheduledJobName::SignatureKeyReviewReminder => &self.signature_review_lock,
             ScheduledJobName::AuditorPermissionReviewReminder => &self.auditor_review_lock,
@@ -211,10 +213,10 @@ async fn run_due_jobs(
             period_key: period.as_str().to_owned(),
         };
         let hash_period = period.clone();
-        run_once_per_period(
+        let hash_result = run_once_per_period(
             runtime_state,
             key,
-            run_full_ledger_verify_job(
+            run_full_ledger_hash_chain_verify_job(
                 state,
                 ScheduledJobName::LedgerHashChainFullVerify,
                 Some(hash_period),
@@ -227,10 +229,10 @@ async fn run_due_jobs(
             period_key: period.as_str().to_owned(),
         };
         let signature_period = period.clone();
-        run_once_per_period(
+        let signature_result = run_once_per_period(
             runtime_state,
             key,
-            run_full_ledger_verify_job(
+            run_full_ledger_signature_verify_job(
                 state,
                 ScheduledJobName::LedgerSignatureFullVerify,
                 Some(signature_period),
@@ -238,14 +240,107 @@ async fn run_due_jobs(
         )
         .await;
 
+        if hash_result.is_err() || signature_result.is_err() {
+            let digest_period = period.clone();
+            let key = JobRunKey {
+                job_name: ScheduledJobName::MonthlyDigestGenerate,
+                period_key: digest_period.as_str().to_owned(),
+            };
+            let _ = run_once_per_period(
+                runtime_state,
+                key,
+                record_precondition_failure_job(
+                    state,
+                    ScheduledJobName::MonthlyDigestGenerate,
+                    Some(digest_period),
+                    "ledger_verification_precondition_failed",
+                ),
+            )
+            .await;
+
+            let archive_period = period.clone();
+            let key = JobRunKey {
+                job_name: ScheduledJobName::ArchiveExport,
+                period_key: archive_period.as_str().to_owned(),
+            };
+            let _ = run_once_per_period(
+                runtime_state,
+                key,
+                record_precondition_failure_job(
+                    state,
+                    ScheduledJobName::ArchiveExport,
+                    Some(archive_period),
+                    "ledger_verification_precondition_failed",
+                ),
+            )
+            .await;
+
+            return;
+        }
+
         let key = JobRunKey {
-            job_name: ScheduledJobName::MonthlyDigestPipeline,
+            job_name: ScheduledJobName::MonthlyDigestGenerate,
             period_key: period.as_str().to_owned(),
         };
-        run_once_per_period(
+        let digest_result = run_once_per_period(
             runtime_state,
             key,
-            run_monthly_digest_pipeline_job(state, config, period),
+            run_monthly_digest_generate_job(state, period.clone()),
+        )
+        .await;
+
+        let signed_digest = match digest_result {
+            Ok(Some(digest)) => digest,
+            Ok(None) => match fetch_signed_digest(state.supabase_client.as_ref(), &period).await {
+                Ok(digest) => digest,
+                Err(error_code) => {
+                    let key = JobRunKey {
+                        job_name: ScheduledJobName::ArchiveExport,
+                        period_key: period.as_str().to_owned(),
+                    };
+                    let _ = run_once_per_period(
+                        runtime_state,
+                        key,
+                        record_precondition_failure_job(
+                            state,
+                            ScheduledJobName::ArchiveExport,
+                            Some(period),
+                            error_code,
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            },
+            Err(_) => {
+                let key = JobRunKey {
+                    job_name: ScheduledJobName::ArchiveExport,
+                    period_key: period.as_str().to_owned(),
+                };
+                let _ = run_once_per_period(
+                    runtime_state,
+                    key,
+                    record_precondition_failure_job(
+                        state,
+                        ScheduledJobName::ArchiveExport,
+                        Some(period),
+                        "monthly_digest_generate_failed",
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let archive_period = signed_digest.period.clone();
+        let key = JobRunKey {
+            job_name: ScheduledJobName::ArchiveExport,
+            period_key: archive_period.as_str().to_owned(),
+        };
+        let _ = run_once_per_period(
+            runtime_state,
+            key,
+            run_archive_export_job(state, config, signed_digest),
         )
         .await;
     }
@@ -261,7 +356,7 @@ async fn run_due_jobs(
                 job_name,
                 period_key: quarter_key.clone(),
             };
-            run_once_per_period(
+            let _ = run_once_per_period(
                 runtime_state,
                 key,
                 run_quarterly_job(state, config, job_name),
@@ -271,15 +366,16 @@ async fn run_due_jobs(
     }
 }
 
-async fn run_once_per_period<Fut>(
+async fn run_once_per_period<Fut, T>(
     runtime_state: &mut SchedulerRuntimeState,
     key: JobRunKey,
     run: Fut,
-) where
-    Fut: std::future::Future<Output = Result<(), &'static str>>,
+) -> Result<Option<T>, &'static str>
+where
+    Fut: std::future::Future<Output = Result<T, &'static str>>,
 {
     if runtime_state.completed.contains(&key) {
-        return;
+        return Ok(None);
     }
 
     let result = {
@@ -288,7 +384,7 @@ async fn run_once_per_period<Fut>(
                 job_name = key.job_name.as_str(),
                 "scheduled job already running; skipped"
             );
-            return;
+            return Err("scheduler_job_already_running");
         };
         let result = run.await;
         drop(guard);
@@ -296,8 +392,9 @@ async fn run_once_per_period<Fut>(
     };
 
     match result {
-        Ok(()) => {
+        Ok(output) => {
             runtime_state.completed.insert(key);
+            Ok(Some(output))
         }
         Err(error_code) => {
             tracing::error!(
@@ -305,6 +402,7 @@ async fn run_once_per_period<Fut>(
                 error_code,
                 "scheduled job failed"
             );
+            Err(error_code)
         }
     }
 }
@@ -316,36 +414,77 @@ async fn run_quarterly_job(
 ) -> Result<(), &'static str> {
     match job_name {
         ScheduledJobName::RestoreTest => {
-            restore_test::run_restore_test_once(
+            match restore_test::run_restore_test_once(
                 state,
                 config.restore_test_sample_limit,
                 AuditTrigger::Background,
             )
-            .await;
-            Ok(())
+            .await
+            {
+                restore_test::RestoreTestOutcome::Success => {
+                    record_scheduler_job_result(
+                        state,
+                        job_name,
+                        AuditResult::Success,
+                        None,
+                        None,
+                        0,
+                    )
+                    .await
+                }
+                restore_test::RestoreTestOutcome::Failure { error_code } => {
+                    record_scheduler_job_result(
+                        state,
+                        job_name,
+                        AuditResult::Failure,
+                        Some(error_code),
+                        None,
+                        0,
+                    )
+                    .await
+                    .and(Err(error_code))
+                }
+            }
         }
         ScheduledJobName::SignatureKeyReviewReminder
         | ScheduledJobName::AuditorPermissionReviewReminder => {
-            record_scheduler_job_result(state, job_name, AuditResult::Success, None, None, 0).await;
-            Ok(())
+            record_scheduler_job_result(state, job_name, AuditResult::Success, None, None, 0).await
         }
         _ => Ok(()),
     }
 }
 
-async fn run_full_ledger_verify_job(
+async fn record_precondition_failure_job(
+    state: &AppState,
+    job_name: ScheduledJobName,
+    period: Option<MonthlyDigestPeriod>,
+    error_code: &'static str,
+) -> Result<(), &'static str> {
+    record_scheduler_job_result(
+        state,
+        job_name,
+        AuditResult::Failure,
+        Some(error_code),
+        period,
+        0,
+    )
+    .await?;
+    Err(error_code)
+}
+
+async fn run_full_ledger_hash_chain_verify_job(
     state: &AppState,
     job_name: ScheduledJobName,
     period: Option<MonthlyDigestPeriod>,
 ) -> Result<(), &'static str> {
     let started_at = Instant::now();
-    let outcome = verify_full_ledger(state.supabase_client.as_ref()).await;
+    let outcome = verify_full_ledger_hash_chain(state.supabase_client.as_ref()).await;
     let (result, error_code) = match outcome {
         Ok(summary) if summary.valid => {
             tracing::info!(
                 job_name = job_name.as_str(),
                 checked_count = summary.checked_count,
-                "full ledger verification completed"
+                "full ledger hash chain verification completed"
             );
             (AuditResult::Success, None)
         }
@@ -354,7 +493,7 @@ async fn run_full_ledger_verify_job(
                 job_name = job_name.as_str(),
                 checked_count = summary.checked_count,
                 error_code = summary.error_code.unwrap_or("ledger_verification_failed"),
-                "full ledger verification detected an anomaly without auto-repair"
+                "full ledger hash chain verification detected an anomaly without auto-repair"
             );
             (
                 AuditResult::Failure,
@@ -371,7 +510,7 @@ async fn run_full_ledger_verify_job(
         period,
         elapsed_ms(started_at),
     )
-    .await;
+    .await?;
 
     if result == AuditResult::Success {
         Ok(())
@@ -380,11 +519,61 @@ async fn run_full_ledger_verify_job(
     }
 }
 
-async fn run_monthly_digest_pipeline_job(
+async fn run_full_ledger_signature_verify_job(
     state: &AppState,
-    config: &SchedulerConfig,
-    period: MonthlyDigestPeriod,
+    job_name: ScheduledJobName,
+    period: Option<MonthlyDigestPeriod>,
 ) -> Result<(), &'static str> {
+    let started_at = Instant::now();
+    let outcome = verify_full_ledger_signatures(state.supabase_client.as_ref()).await;
+    let (result, error_code) = match outcome {
+        Ok(summary) if summary.valid => {
+            tracing::info!(
+                job_name = job_name.as_str(),
+                checked_count = summary.checked_count,
+                "full ledger signature verification completed"
+            );
+            (AuditResult::Success, None)
+        }
+        Ok(summary) => {
+            tracing::error!(
+                job_name = job_name.as_str(),
+                checked_count = summary.checked_count,
+                error_code = summary
+                    .error_code
+                    .unwrap_or("ledger_signature_verification_failed"),
+                "full ledger signature verification detected an anomaly without auto-repair"
+            );
+            (
+                AuditResult::Failure,
+                summary
+                    .error_code
+                    .or(Some("ledger_signature_verification_failed")),
+            )
+        }
+        Err(error_code) => (AuditResult::Failure, Some(error_code)),
+    };
+    record_scheduler_job_result(
+        state,
+        job_name,
+        result,
+        error_code,
+        period,
+        elapsed_ms(started_at),
+    )
+    .await?;
+
+    if result == AuditResult::Success {
+        Ok(())
+    } else {
+        Err(error_code.unwrap_or("ledger_signature_verification_failed"))
+    }
+}
+
+async fn run_monthly_digest_generate_job(
+    state: &AppState,
+    period: MonthlyDigestPeriod,
+) -> Result<SignedMonthlyDigest, &'static str> {
     let started_at = Instant::now();
     let request_id = RequestId::generate().map_err(|_| "scheduler_request_id_failed")?;
     let source_event_at =
@@ -404,75 +593,64 @@ async fn run_monthly_digest_pipeline_job(
     {
         Ok(digest) => digest,
         Err(error) => {
-            record_monthly_digest_failure_audit(
-                &state.audit_recorder,
-                &request_id,
-                &period,
-                &error,
-                &source_event_at,
-            )
-            .await;
             if error.as_error_code() == "monthly_digest_duplicate" {
-                fetch_signed_digest(state.supabase_client.as_ref(), &period)
-                    .await
-                    .map_err(|_| "monthly_digest_existing_fetch_failed")?
+                match fetch_signed_digest(state.supabase_client.as_ref(), &period).await {
+                    Ok(digest) => digest,
+                    Err(_) => {
+                        record_scheduler_job_result(
+                            state,
+                            ScheduledJobName::MonthlyDigestGenerate,
+                            AuditResult::Failure,
+                            Some("monthly_digest_existing_fetch_failed"),
+                            Some(period),
+                            elapsed_ms(started_at),
+                        )
+                        .await?;
+                        return Err("monthly_digest_existing_fetch_failed");
+                    }
+                }
             } else {
+                record_monthly_digest_failure_audit(
+                    &state.audit_recorder,
+                    &request_id,
+                    &period,
+                    &error,
+                    &source_event_at,
+                )
+                .await;
                 record_scheduler_job_result(
                     state,
-                    ScheduledJobName::MonthlyDigestPipeline,
+                    ScheduledJobName::MonthlyDigestGenerate,
                     AuditResult::Failure,
                     Some("monthly_digest_generate_failed"),
                     Some(period),
                     elapsed_ms(started_at),
                 )
-                .await;
+                .await?;
                 return Err("monthly_digest_generate_failed");
             }
         }
     };
 
-    let verify_request_id = RequestId::generate().map_err(|_| "scheduler_request_id_failed")?;
-    let verify_input = VerifyMonthlyDigestInput {
-        period: period.clone(),
-        request_id: verify_request_id.clone(),
-    };
-    if let Err(error) = verify_monthly_digest(&state.supabase_client, &verify_input).await {
-        let verified_at =
-            SourceEventAt::now_utc().map_err(|_| "scheduler_source_event_at_failed")?;
-        record_monthly_digest_verify_failure_audit(
-            &state.audit_recorder,
-            &verify_request_id,
-            &period,
-            &error,
-            &verified_at,
-        )
-        .await;
-        record_scheduler_job_result(
-            state,
-            ScheduledJobName::MonthlyDigestPipeline,
-            AuditResult::Failure,
-            Some("monthly_digest_verify_failed"),
-            Some(period),
-            elapsed_ms(started_at),
-        )
-        .await;
-        return Err("monthly_digest_verify_failed");
-    }
-
-    let timestamp_request_id = RequestId::generate().map_err(|_| "scheduler_request_id_failed")?;
-    let timestamped_at =
-        SourceEventAt::now_utc().map_err(|_| "scheduler_source_event_at_failed")?;
-    let timestamping_service = InMemoryTimestampingService::new();
-    let _ = request_timestamping_for_digest(
-        &timestamping_service,
-        &state.audit_recorder,
-        &state.ledger_appender,
-        &signed_digest,
-        timestamp_request_id,
-        timestamped_at,
+    record_scheduler_job_result(
+        state,
+        ScheduledJobName::MonthlyDigestGenerate,
+        AuditResult::Success,
+        None,
+        Some(period),
+        elapsed_ms(started_at),
     )
-    .await;
+    .await?;
+    Ok(signed_digest)
+}
 
+async fn run_archive_export_job(
+    state: &AppState,
+    config: &SchedulerConfig,
+    signed_digest: SignedMonthlyDigest,
+) -> Result<(), &'static str> {
+    let started_at = Instant::now();
+    let period = signed_digest.period.clone();
     let archive_request_id = RequestId::generate().map_err(|_| "scheduler_request_id_failed")?;
     let archived_at = SourceEventAt::now_utc().map_err(|_| "scheduler_source_event_at_failed")?;
     let archive_backend = LocalFileArchiveBackend::new(config.local_archive_dir.clone());
@@ -489,25 +667,25 @@ async fn run_monthly_digest_pipeline_job(
     {
         record_scheduler_job_result(
             state,
-            ScheduledJobName::MonthlyDigestPipeline,
+            ScheduledJobName::ArchiveExport,
             AuditResult::Failure,
             Some("archive_export_failed"),
             Some(period),
             elapsed_ms(started_at),
         )
-        .await;
+        .await?;
         return Err("archive_export_failed");
     }
 
     record_scheduler_job_result(
         state,
-        ScheduledJobName::MonthlyDigestPipeline,
+        ScheduledJobName::ArchiveExport,
         AuditResult::Success,
         None,
         Some(period),
         elapsed_ms(started_at),
     )
-    .await;
+    .await?;
     Ok(())
 }
 
@@ -518,19 +696,35 @@ struct LedgerVerificationSummary {
     error_code: Option<&'static str>,
 }
 
-async fn verify_full_ledger(
+async fn verify_full_ledger_hash_chain(
     client: &SupabaseClient,
 ) -> Result<LedgerVerificationSummary, &'static str> {
+    let (chain_head, rows) = fetch_full_ledger_material_rows(client).await?;
+
+    tokio::task::spawn_blocking(move || verify_hash_chain_rows(chain_head, rows))
+        .await
+        .map_err(|_| "ledger_verification_join_failed")?
+}
+
+async fn verify_full_ledger_signatures(
+    client: &SupabaseClient,
+) -> Result<LedgerVerificationSummary, &'static str> {
+    let (_chain_head, rows) = fetch_full_ledger_material_rows(client).await?;
+
+    tokio::task::spawn_blocking(move || verify_signature_rows(rows))
+        .await
+        .map_err(|_| "ledger_verification_join_failed")?
+}
+
+async fn fetch_full_ledger_material_rows(
+    client: &SupabaseClient,
+) -> Result<(LedgerChainHead, Vec<LedgerVerificationMaterialRow>), &'static str> {
     let chain_head = client
         .fetch_ledger_chain_head()
         .await
         .map_err(|_| "ledger_chain_head_fetch_failed")?;
     if chain_head.last_sequence_no() == 0 {
-        return Ok(LedgerVerificationSummary {
-            valid: true,
-            checked_count: 0,
-            error_code: None,
-        });
+        return Ok((chain_head, Vec::new()));
     }
 
     let end = LedgerSequenceNo::new(chain_head.last_sequence_no())
@@ -541,46 +735,113 @@ async fn verify_full_ledger(
         .await
         .map_err(|_| "ledger_export_failed")?;
 
+    Ok((chain_head, rows))
+}
+
+fn verify_hash_chain_rows(
+    chain_head: LedgerChainHead,
+    rows: Vec<LedgerVerificationMaterialRow>,
+) -> Result<LedgerVerificationSummary, &'static str> {
     let mut entries: Vec<SignedLedgerEntry> = Vec::with_capacity(rows.len());
-    let mut verification_keys = Vec::new();
     for row in &rows {
         let entry = row
             .try_restore_signed_ledger_entry()
             .map_err(|_| "ledger_entry_restore_failed")?;
         entries.push(entry);
-        let maybe_key = row
-            .try_restore_verifying_key()
-            .map_err(|_| "ledger_key_restore_failed")?;
-        if let Some(key) = maybe_key
-            && !verification_keys
-                .iter()
-                .any(|existing: &crate::ledger::LedgerVerifyingKey| {
-                    existing.key_version() == key.key_version()
-                })
-        {
-            verification_keys.push(key);
-        }
     }
 
-    match verify_ledger_chain(&entries, LedgerChainHead::genesis(), &verification_keys) {
-        Ok(final_head) if final_head.last_entry_hash() == chain_head.last_entry_hash() => {
-            Ok(LedgerVerificationSummary {
-                valid: true,
-                checked_count: entries.len() as u64,
-                error_code: None,
-            })
+    let mut previous_sequence_no = LedgerChainHead::genesis().last_sequence_no();
+    let mut previous_hash = LedgerChainHead::genesis().last_entry_hash();
+    for entry in &entries {
+        let expected_sequence_no = previous_sequence_no
+            .checked_add(1)
+            .ok_or("ledger_sequence_overflow")?;
+        let actual_sequence_no = entry.sequence_no().get();
+
+        if actual_sequence_no != expected_sequence_no {
+            return Ok(LedgerVerificationSummary {
+                valid: false,
+                checked_count: entry_count(entries.len()),
+                error_code: Some("ledger_sequence_gap"),
+            });
         }
-        Ok(_) => Ok(LedgerVerificationSummary {
-            valid: false,
-            checked_count: entries.len() as u64,
-            error_code: Some("ledger_chain_head_mismatch"),
-        }),
-        Err(_) => Ok(LedgerVerificationSummary {
-            valid: false,
-            checked_count: entries.len() as u64,
-            error_code: Some("ledger_chain_verification_failed"),
-        }),
+
+        if entry.previous_entry_hash() != previous_hash {
+            return Ok(LedgerVerificationSummary {
+                valid: false,
+                checked_count: entry_count(entries.len()),
+                error_code: Some("ledger_previous_hash_mismatch"),
+            });
+        }
+
+        if entry.recompute_entry_hash() != entry.entry_hash() {
+            return Ok(LedgerVerificationSummary {
+                valid: false,
+                checked_count: entry_count(entries.len()),
+                error_code: Some("ledger_entry_hash_mismatch"),
+            });
+        }
+
+        previous_sequence_no = actual_sequence_no;
+        previous_hash = entry.entry_hash();
     }
+
+    if previous_sequence_no != chain_head.last_sequence_no()
+        || previous_hash != chain_head.last_entry_hash()
+    {
+        return Ok(LedgerVerificationSummary {
+            valid: false,
+            checked_count: entry_count(entries.len()),
+            error_code: Some("ledger_chain_head_mismatch"),
+        });
+    }
+
+    Ok(LedgerVerificationSummary {
+        valid: true,
+        checked_count: entry_count(entries.len()),
+        error_code: None,
+    })
+}
+
+fn verify_signature_rows(
+    rows: Vec<LedgerVerificationMaterialRow>,
+) -> Result<LedgerVerificationSummary, &'static str> {
+    let mut checked_count = 0;
+    for row in &rows {
+        let entry = row
+            .try_restore_signed_ledger_entry()
+            .map_err(|_| "ledger_entry_restore_failed")?;
+        let Some(key) = row
+            .try_restore_verifying_key()
+            .map_err(|_| "ledger_key_restore_failed")?
+        else {
+            return Ok(LedgerVerificationSummary {
+                valid: false,
+                checked_count: entry_count(rows.len()),
+                error_code: Some("ledger_signature_key_missing"),
+            });
+        };
+
+        if entry.verify_signature(&key).is_err() {
+            return Ok(LedgerVerificationSummary {
+                valid: false,
+                checked_count: entry_count(rows.len()),
+                error_code: Some("ledger_signature_invalid"),
+            });
+        }
+
+        checked_count += 1;
+    }
+
+    Ok(LedgerVerificationSummary {
+        valid: true,
+        checked_count,
+        error_code: None,
+    })
+}
+
+fn entry_count(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 async fn fetch_signed_digest(
@@ -633,19 +894,19 @@ async fn record_scheduler_job_result(
     error_code: Option<&'static str>,
     period: Option<MonthlyDigestPeriod>,
     duration_ms: u64,
-) {
+) -> Result<(), &'static str> {
     let request_id = match RequestId::generate() {
         Ok(request_id) => request_id,
         Err(error) => {
             tracing::error!(error = %error, job_name = job_name.as_str(), "scheduler audit request id generation failed");
-            return;
+            return Err("scheduler_request_id_failed");
         }
     };
     let source_event_at = match SourceEventAt::now_utc() {
         Ok(source_event_at) => source_event_at,
         Err(error) => {
             tracing::error!(error = %error, job_name = job_name.as_str(), "scheduler source_event_at generation failed");
-            return;
+            return Err("scheduler_source_event_at_failed");
         }
     };
 
@@ -665,7 +926,7 @@ async fn record_scheduler_job_result(
         Ok(metadata) => metadata,
         Err(error) => {
             tracing::error!(error = %error, job_name = job_name.as_str(), "scheduler audit metadata build failed");
-            return;
+            return Err("scheduler_audit_metadata_failed");
         }
     };
 
@@ -673,7 +934,7 @@ async fn record_scheduler_job_result(
         Ok(audit_event_id) => audit_event_id,
         Err(error) => {
             tracing::error!(error = %error, job_name = job_name.as_str(), "scheduler audit event id generation failed");
-            return;
+            return Err("scheduler_audit_event_id_failed");
         }
     };
     let event = match AuditEvent::new(AuditEventParts {
@@ -690,7 +951,7 @@ async fn record_scheduler_job_result(
         Ok(event) => event,
         Err(error) => {
             tracing::error!(error = %error, job_name = job_name.as_str(), "scheduler audit event build failed");
-            return;
+            return Err("scheduler_audit_event_failed");
         }
     };
 
@@ -701,32 +962,36 @@ async fn record_scheduler_job_result(
             result = result.as_str(),
             "scheduler audit primary and fallback recording failed"
         );
+        return Err("scheduler_audit_record_failed");
     }
-    if let Err(error_code) = append_scheduler_ledger_entry(
-        state,
+    append_scheduler_ledger_entry(
         job_name,
-        result,
-        error_code,
-        period,
-        duration_ms,
-        request_id,
-        source_event_at,
-        Some(event.audit_event_id().clone()),
+        SchedulerLedgerEntryRecord {
+            state,
+            result,
+            error_code,
+            period,
+            duration_ms,
+            request_id,
+            source_event_at,
+            source_event_id: Some(event.audit_event_id().clone()),
+        },
     )
     .await
-    {
+    .inspect_err(|&error_code| {
         tracing::error!(
             job_name = job_name.as_str(),
             result = result.as_str(),
             error_code,
             "scheduler ledger recording failed"
         );
-    }
+    })?;
+
+    Ok(())
 }
 
-async fn append_scheduler_ledger_entry(
-    state: &AppState,
-    job_name: ScheduledJobName,
+struct SchedulerLedgerEntryRecord<'a> {
+    state: &'a AppState,
     result: AuditResult,
     error_code: Option<&'static str>,
     period: Option<MonthlyDigestPeriod>,
@@ -734,7 +999,23 @@ async fn append_scheduler_ledger_entry(
     request_id: RequestId,
     source_event_at: SourceEventAt,
     source_event_id: Option<AuditEventId>,
+}
+
+async fn append_scheduler_ledger_entry(
+    job_name: ScheduledJobName,
+    record: SchedulerLedgerEntryRecord<'_>,
 ) -> Result<(), &'static str> {
+    let SchedulerLedgerEntryRecord {
+        state,
+        result,
+        error_code,
+        period,
+        duration_ms,
+        request_id,
+        source_event_at,
+        source_event_id,
+    } = record;
+
     let entry_type = LedgerEntryType::SchedulerJobCompleted;
     let mut payload_value = serde_json::json!({
         "duration_ms": duration_ms,
@@ -863,5 +1144,39 @@ mod tests {
         assert!(lock.try_enter().is_none());
         drop(first);
         assert!(lock.try_enter().is_some());
+    }
+
+    #[tokio::test]
+    async fn run_once_per_period_does_not_complete_failed_job() {
+        let mut runtime_state = SchedulerRuntimeState::new();
+        let key = JobRunKey {
+            job_name: ScheduledJobName::MonthlyDigestGenerate,
+            period_key: "2026-05".to_owned(),
+        };
+
+        let result = run_once_per_period(&mut runtime_state, key.clone(), async {
+            Err::<(), _>("synthetic_failure")
+        })
+        .await;
+
+        assert_eq!(result, Err("synthetic_failure"));
+        assert!(!runtime_state.completed.contains(&key));
+    }
+
+    #[tokio::test]
+    async fn run_once_per_period_returns_none_for_completed_job() {
+        let mut runtime_state = SchedulerRuntimeState::new();
+        let key = JobRunKey {
+            job_name: ScheduledJobName::ArchiveExport,
+            period_key: "2026-05".to_owned(),
+        };
+
+        let first =
+            run_once_per_period(&mut runtime_state, key.clone(), async { Ok::<_, &str>(7) }).await;
+        let second =
+            run_once_per_period(&mut runtime_state, key, async { Ok::<_, &str>(11) }).await;
+
+        assert_eq!(first, Ok(Some(7)));
+        assert_eq!(second, Ok(None));
     }
 }

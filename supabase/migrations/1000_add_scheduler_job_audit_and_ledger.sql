@@ -398,7 +398,215 @@ comment on function public.audit_metadata_has_unknown_key_for_action(text, text,
 is 'Returns true when audit metadata contains a key outside the allowlist for the given action. Updated in T13 to include scheduler_job.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 4. ledger entry_type / payload allowlist に scheduler_job_completed を追加
+-- 4. audit metadata 値検証に scheduler_job 関連フィールドを追加
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function public.audit_metadata_has_invalid_value_for_action(
+    p_action text,
+    p_result text,
+    p_metadata_json jsonb
+)
+returns boolean
+language plpgsql
+stable
+set search_path = public, pg_temp
+as $$
+declare
+    v_key text;
+    v_val jsonb;
+    v_text text;
+begin
+    if jsonb_typeof(p_metadata_json) <> 'object' then
+        return true;
+    end if;
+
+    for v_key in select jsonb_object_keys(p_metadata_json)
+    loop
+        continue when not v_key = any(array[
+            'checked_secret_count',
+            'checked_secret_version_count',
+            'checked_audit_event_count',
+            'duration_ms',
+            'violation_count',
+            'sample_count',
+            'processed_count',
+            'remaining_count',
+            'event_count'
+        ]);
+
+        v_val := p_metadata_json -> v_key;
+        if jsonb_typeof(v_val) <> 'number' or v_val::text !~ '^(0|[1-9][0-9]*)$' then
+            return true;
+        end if;
+    end loop;
+
+    for v_key in select jsonb_object_keys(p_metadata_json)
+    loop
+        continue when not v_key = any(array[
+            'version',
+            'old_key_version',
+            'new_key_version',
+            'failed_version',
+            'batch_size'
+        ]);
+
+        v_val := p_metadata_json -> v_key;
+        if v_key = 'failed_version' and v_val = 'null'::jsonb then
+            continue;
+        end if;
+        if jsonb_typeof(v_val) <> 'number' or v_val::text !~ '^[1-9][0-9]*$' then
+            return true;
+        end if;
+    end loop;
+
+    for v_key in select jsonb_object_keys(p_metadata_json)
+    loop
+        continue when not v_key = any(array[
+            'secret_version_id',
+            'attempted_secret_id'
+        ]);
+
+        v_val := p_metadata_json -> v_key;
+        if jsonb_typeof(v_val) <> 'string' then
+            return true;
+        end if;
+        v_text := p_metadata_json ->> v_key;
+        if v_text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
+            return true;
+        end if;
+    end loop;
+
+    if p_metadata_json ? 'attempted_secret_id'
+        and not (p_action = 'decrypt' and p_result = 'failure')
+    then
+        return true;
+    end if;
+
+    if p_metadata_json ? 'error_code' then
+        if p_result <> 'failure'
+            or jsonb_typeof(p_metadata_json -> 'error_code') <> 'string'
+        then
+            return true;
+        end if;
+        v_text := p_metadata_json ->> 'error_code';
+        if btrim(v_text) = '' or length(v_text) > 64 then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'job_name' then
+        if jsonb_typeof(p_metadata_json -> 'job_name') <> 'string' then
+            return true;
+        end if;
+        v_text := p_metadata_json ->> 'job_name';
+        if btrim(v_text) = '' or length(v_text) > 96 then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'target_year_month' then
+        if jsonb_typeof(p_metadata_json -> 'target_year_month') <> 'string' then
+            return true;
+        end if;
+        v_text := p_metadata_json ->> 'target_year_month';
+        if v_text !~ '^\d{4}-(0[1-9]|1[0-2])$' then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'format' then
+        if jsonb_typeof(p_metadata_json -> 'format') <> 'string'
+            or p_metadata_json ->> 'format' not in ('json', 'markdown')
+        then
+            return true;
+        end if;
+    end if;
+
+    for v_key in select jsonb_object_keys(p_metadata_json)
+    loop
+        continue when not v_key = any(array['period_start', 'period_end']);
+
+        v_val := p_metadata_json -> v_key;
+        if jsonb_typeof(v_val) <> 'string'
+            or not public.audit_metadata_source_event_at_is_valid(
+                jsonb_build_object('source_event_at', v_val #>> '{}')
+            )
+        then
+            return true;
+        end if;
+    end loop;
+
+    if p_metadata_json ? 'archive_key' then
+        if p_result = 'failure'
+            or jsonb_typeof(p_metadata_json -> 'archive_key') <> 'string'
+        then
+            return true;
+        end if;
+        v_text := p_metadata_json ->> 'archive_key';
+        if btrim(v_text) = '' or length(v_text) > 256 then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'check_name' then
+        if jsonb_typeof(p_metadata_json -> 'check_name') <> 'string'
+            or p_metadata_json ->> 'check_name' <> 'mvp_integrity_check'
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'phase' then
+        if jsonb_typeof(p_metadata_json -> 'phase') <> 'string'
+            or p_metadata_json ->> 'phase' <> 'verify'
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_metadata_json ? 'reason' then
+        if jsonb_typeof(p_metadata_json -> 'reason') <> 'string'
+            or p_metadata_json ->> 'reason' <> 'no_current_secret_versions'
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_result = 'success' and p_metadata_json ? 'failed_version' then
+        return true;
+    end if;
+
+    if p_metadata_json ? 'trigger' then
+        if jsonb_typeof(p_metadata_json -> 'trigger') <> 'string' then
+            return true;
+        end if;
+        if p_metadata_json ->> 'trigger' not in ('startup', 'background', 'cli') then
+            return true;
+        end if;
+    end if;
+
+    if p_action = 'integrity_check' and p_metadata_json ? 'violation_summary' then
+        if jsonb_typeof(p_metadata_json -> 'violation_summary') <> 'object' then
+            return true;
+        end if;
+
+        for v_key, v_val in select * from jsonb_each(p_metadata_json -> 'violation_summary')
+        loop
+            if jsonb_typeof(v_val) <> 'number' or v_val::text !~ '^(0|[1-9][0-9]*)$' then
+                return true;
+            end if;
+        end loop;
+    end if;
+
+    return false;
+end;
+$$;
+
+comment on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) is
+    'Returns true if metadata_json contains invalid values per action schema. Updated in T13 to validate scheduler_job job_name, duration_ms, target_year_month, trigger, and error_code semantics.';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 5. ledger entry_type / payload allowlist に scheduler_job_completed を追加
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create or replace function public.ledger_entry_type_allowed(p_entry_type text)

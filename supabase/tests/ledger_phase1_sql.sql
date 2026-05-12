@@ -403,6 +403,38 @@ select ok(
 );
 
 select ok(
+    public.ledger_payload_is_valid(
+        'scheduler_job_completed',
+        '{"duration_ms":12,"job_name":"monthly_digest_generate","target_year_month":"2026-05","trigger":"background"}'::jsonb
+    ),
+    'ledger payload guard accepts valid scheduler_job_completed payload'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'scheduler_job_completed',
+        '{"duration_ms":12,"job_name":" ","trigger":"background"}'::jsonb
+    ),
+    'ledger payload guard rejects blank scheduler job_name'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'scheduler_job_completed',
+        '{"duration_ms":12,"job_name":"monthly_digest_generate","target_year_month":"2026-13","trigger":"background"}'::jsonb
+    ),
+    'ledger payload guard rejects invalid scheduler target_year_month'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'scheduler_job_completed',
+        '{"duration_ms":12,"job_name":"monthly_digest_generate","trigger":"manual"}'::jsonb
+    ),
+    'ledger payload guard rejects invalid scheduler trigger'
+);
+
+select ok(
     not public.ledger_payload_is_valid(
         'secret_created',
         '{"classification":"confidential","nested":{"version":1}}'::jsonb

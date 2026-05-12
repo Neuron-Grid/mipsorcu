@@ -1634,7 +1634,7 @@ async fn restore_test_records_no_sample_reason_without_forbidden_keys()
         spawn_supabase_restore_test_audit_server(200, "[]".to_owned(), 200, r#""ok""#, 3)?;
     let state = test_app_state(&supabase_url, temp_path("restore-no-sample"))?;
 
-    mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let restore_ok = mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
     let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
     let chain_request = receiver.recv_timeout(Duration::from_secs(1))?;
     let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
@@ -1643,6 +1643,7 @@ async fn restore_test_records_no_sample_reason_without_forbidden_keys()
         .expect("restore test server thread should not panic")?;
 
     assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert!(restore_ok);
     assert!(
         chain_request
             .path
@@ -1680,6 +1681,42 @@ async fn restore_test_records_no_sample_reason_without_forbidden_keys()
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn restore_test_returns_failure_when_sample_fetch_fails()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (supabase_url, receiver, server_thread) = spawn_supabase_restore_test_audit_server(
+        500,
+        r#"{"message":"sample failed"}"#.to_owned(),
+        200,
+        r#""ok""#,
+        2,
+    )?;
+    let state = test_app_state(&supabase_url, temp_path("restore-sample-fetch-failure"))?;
+
+    let restore_ok = mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
+    server_thread
+        .join()
+        .expect("restore test server thread should not panic")?;
+
+    assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert!(!restore_ok);
+    assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
+    let audit_body = audit_request
+        .body
+        .ok_or_else(|| std::io::Error::other("restore failure audit body should be JSON"))?;
+    assert_eq!(audit_body["p_action"], "restore_test");
+    assert_eq!(audit_body["p_result"], "failure");
+    assert_eq!(
+        audit_body["p_metadata_json"]["error_code"],
+        "sample_fetch_failed"
+    );
+    assert_eq!(audit_body["p_metadata_json"]["trigger"], "cli");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn restore_test_round_trips_existing_encrypted_sample_via_runtime()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_, row) = prepared_restore_test_row(b"restore test sample".to_vec())?;
@@ -1688,7 +1725,7 @@ async fn restore_test_round_trips_existing_encrypted_sample_via_runtime()
         spawn_supabase_restore_test_audit_server(200, sample_body, 200, r#""ok""#, 3)?;
     let state = test_app_state(&supabase_url, temp_path("restore-valid-sample"))?;
 
-    mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let restore_ok = mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
     let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
     let chain_request = receiver.recv_timeout(Duration::from_secs(1))?;
     let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
@@ -1697,6 +1734,7 @@ async fn restore_test_round_trips_existing_encrypted_sample_via_runtime()
         .expect("restore test server thread should not panic")?;
 
     assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert!(restore_ok);
     assert!(
         chain_request
             .path
@@ -1743,7 +1781,7 @@ async fn restore_test_rejects_aad_tampering_via_runtime() -> Result<(), Box<dyn 
         spawn_supabase_restore_test_audit_server(200, sample_body, 200, r#""ok""#, 2)?;
     let state = test_app_state(&supabase_url, temp_path("restore-aad-tamper"))?;
 
-    mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let restore_ok = mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
     let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
     let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
     server_thread
@@ -1751,6 +1789,7 @@ async fn restore_test_rejects_aad_tampering_via_runtime() -> Result<(), Box<dyn 
         .expect("restore test server thread should not panic")?;
 
     assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert!(!restore_ok);
     assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
     let audit_body = audit_request
         .body
@@ -1791,7 +1830,7 @@ async fn restore_test_rejects_ciphertext_tampering_via_runtime()
         spawn_supabase_restore_test_audit_server(200, sample_body, 200, r#""ok""#, 2)?;
     let state = test_app_state(&supabase_url, temp_path("restore-ciphertext-tamper"))?;
 
-    mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
+    let restore_ok = mipsorcu::server::runtime::run_restore_test_once(&state, 3).await;
     let sample_request = receiver.recv_timeout(Duration::from_secs(1))?;
     let audit_request = receiver.recv_timeout(Duration::from_secs(1))?;
     server_thread
@@ -1799,6 +1838,7 @@ async fn restore_test_rejects_ciphertext_tampering_via_runtime()
         .expect("restore test server thread should not panic")?;
 
     assert_eq!(sample_request.path, "/rest/v1/rpc/rpc_sample_restore_test");
+    assert!(!restore_ok);
     assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
     let audit_body = audit_request
         .body

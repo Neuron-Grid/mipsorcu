@@ -10,7 +10,17 @@ use crate::server::state::AppState;
 use crate::types::supabase::RestoreTestSampleRow;
 use crate::{KeyVersion, SecretId, SecretVersion};
 
-pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger: AuditTrigger) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreTestOutcome {
+    Success,
+    Failure { error_code: &'static str },
+}
+
+pub async fn run_restore_test_once(
+    state: &AppState,
+    sample_limit: u32,
+    trigger: AuditTrigger,
+) -> RestoreTestOutcome {
     let started_at = Instant::now();
     let request_id = match RequestId::generate() {
         Ok(request_id) => request_id,
@@ -22,7 +32,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                 error_code = "request_id_generation_failed",
                 "restore test setup failed"
             );
-            return;
+            return RestoreTestOutcome::Failure {
+                error_code: "request_id_generation_failed",
+            };
         }
     };
 
@@ -57,6 +69,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     error = %audit_err,
                     "restore test audit recording failed"
                 );
+                return RestoreTestOutcome::Failure {
+                    error_code: "restore_test_audit_record_failed",
+                };
             }
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
@@ -64,7 +79,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                 result = "success",
                 sample_count = 0,
             );
-            return;
+            return RestoreTestOutcome::Success;
         }
         Ok(rows) => rows,
         Err(_error) => {
@@ -93,6 +108,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     error = %audit_err,
                     "restore test audit recording failed"
                 );
+                return RestoreTestOutcome::Failure {
+                    error_code: "restore_test_audit_record_failed",
+                };
             }
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
@@ -102,7 +120,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                 sample_count = 0,
                 "restore test sample fetch failed"
             );
-            return;
+            return RestoreTestOutcome::Failure {
+                error_code: "sample_fetch_failed",
+            };
         }
     };
 
@@ -143,6 +163,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                         error = %audit_err,
                         "restore test audit recording failed"
                     );
+                    return RestoreTestOutcome::Failure {
+                        error_code: "restore_test_audit_record_failed",
+                    };
                 }
                 tracing::error!(
                     request_id = %request_id.as_canonical_string(),
@@ -155,7 +178,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     sample_count = sample_count,
                     "restore test row validation failed"
                 );
-                return;
+                return RestoreTestOutcome::Failure {
+                    error_code: "row_validation_failed",
+                };
             }
         };
 
@@ -195,6 +220,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                     error = %audit_err,
                     "restore test audit recording failed"
                 );
+                return RestoreTestOutcome::Failure {
+                    error_code: "restore_test_audit_record_failed",
+                };
             }
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
@@ -211,7 +239,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
                 sample_count = sample_count,
                 "restore test decrypt failed"
             );
-            return;
+            return RestoreTestOutcome::Failure {
+                error_code: "decrypt_failed",
+            };
         }
     }
 
@@ -240,6 +270,9 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
             error = %audit_err,
             "restore test audit recording failed"
         );
+        return RestoreTestOutcome::Failure {
+            error_code: "restore_test_audit_record_failed",
+        };
     }
     tracing::info!(
         request_id = %request_id.as_canonical_string(),
@@ -247,6 +280,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32, trigger:
         result = "success",
         sample_count = sample_count,
     );
+    RestoreTestOutcome::Success
 }
 
 fn restore_test_metadata_with_duration(

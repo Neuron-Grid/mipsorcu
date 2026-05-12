@@ -970,6 +970,158 @@ select is(
 );
 
 select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000140',
+        '00000000-0000-4000-8000-000000000140',
+        null,
+        null,
+        'scheduler_job',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_digest_generate',
+            'trigger', 'background',
+            'duration_ms', 12,
+            'target_year_month', '2026-05',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'scheduler_job success accepts valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000141',
+        '00000000-0000-4000-8000-000000000141',
+        null,
+        null,
+        'scheduler_job',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'job_name', 'archive_export',
+            'trigger', 'background',
+            'duration_ms', 12,
+            'error_code', 'archive_export_failed',
+            'target_year_month', '2026-05',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'scheduler_job failure accepts valid error_code metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000142',
+        '00000000-0000-4000-8000-000000000142',
+        null,
+        null,
+        'scheduler_job',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'trigger', 'background',
+            'duration_ms', 12,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job rejects missing required job_name'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000143',
+        '00000000-0000-4000-8000-000000000143',
+        null,
+        null,
+        'scheduler_job',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_digest_generate',
+            'trigger', 'background',
+            'duration_ms', 12,
+            'unexpected', 'bad',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job rejects unknown metadata key'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000144',
+        '00000000-0000-4000-8000-000000000144',
+        null,
+        null,
+        'scheduler_job',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', ' ',
+            'trigger', 'background',
+            'duration_ms', 12,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job rejects blank job_name'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000145',
+        '00000000-0000-4000-8000-000000000145',
+        null,
+        null,
+        'scheduler_job',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_digest_generate',
+            'trigger', 'background',
+            'duration_ms', 12,
+            'error_code', 'should_be_failure_only',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job success rejects error_code'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000146',
+        '00000000-0000-4000-8000-000000000146',
+        null,
+        null,
+        'scheduler_job',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_digest_generate',
+            'trigger', 'background',
+            'duration_ms', 12,
+            'target_year_month', '2026-13',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job rejects invalid target_year_month'
+);
+
+select is(
     has_function_privilege(
         'anon',
         'public.audit_metadata_has_invalid_value_for_action(text, text, jsonb)',

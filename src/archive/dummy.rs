@@ -145,10 +145,14 @@ impl ArchiveBackend for LocalFileArchiveBackend {
     ) -> Result<(), ArchiveBackendError> {
         let bytes = package.to_json_bytes()?;
         let path = self.resolve_path(key)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(ArchiveBackendError::IoError)?;
-        }
-        std::fs::write(&path, &bytes).map_err(ArchiveBackendError::IoError)
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(ArchiveBackendError::IoError)?;
+            }
+            std::fs::write(&path, &bytes).map_err(ArchiveBackendError::IoError)
+        })
+        .await
+        .map_err(|_| join_failed_archive_error())?
     }
 
     async fn verify_object(
@@ -158,31 +162,42 @@ impl ArchiveBackend for LocalFileArchiveBackend {
     ) -> Result<ArchiveVerifyOutcome, ArchiveBackendError> {
         let expected = package.to_json_bytes()?;
         let path = self.resolve_path(key)?;
-        match std::fs::read(&path) {
+        tokio::task::spawn_blocking(move || match std::fs::read(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(ArchiveVerifyOutcome::NotFound)
             }
             Err(error) => Err(ArchiveBackendError::IoError(error)),
             Ok(stored) if stored == expected => Ok(ArchiveVerifyOutcome::Valid),
             Ok(_) => Ok(ArchiveVerifyOutcome::ContentMismatch),
-        }
+        })
+        .await
+        .map_err(|_| join_failed_archive_error())?
     }
 
     async fn list_objects(&self) -> Result<Vec<ArchiveObjectKey>, ArchiveBackendError> {
-        let entries = std::fs::read_dir(&self.base_dir).map_err(ArchiveBackendError::IoError)?;
-        let mut result = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(ArchiveBackendError::IoError)?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            result.push(ArchiveObjectKey::new(name_str.as_ref()).map_err(|error| {
-                ArchiveBackendError::BackendFailed {
-                    code: format!("invalid_key_from_filesystem: {error}"),
-                }
-            })?);
-        }
-        Ok(result)
+        let base_dir = self.base_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let entries = std::fs::read_dir(&base_dir).map_err(ArchiveBackendError::IoError)?;
+            let mut result = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(ArchiveBackendError::IoError)?;
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                result.push(ArchiveObjectKey::new(name_str.as_ref()).map_err(|error| {
+                    ArchiveBackendError::BackendFailed {
+                        code: format!("invalid_key_from_filesystem: {error}"),
+                    }
+                })?);
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|_| join_failed_archive_error())?
     }
+}
+
+fn join_failed_archive_error() -> ArchiveBackendError {
+    ArchiveBackendError::IoError(std::io::Error::other("join failed"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
