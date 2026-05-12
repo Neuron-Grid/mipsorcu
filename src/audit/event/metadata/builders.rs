@@ -1177,6 +1177,9 @@ mod siem_forward_failure_metadata_tests {
         let value = metadata.as_value();
         assert_eq!(value["event_type"].as_str(), Some("decrypt"));
         assert_eq!(value["event_count"].as_u64(), Some(7));
-        assert_eq!(value[SOURCE_EVENT_AT_KEY].as_str(), Some("2026-05-11T00:00:00Z"));
+        assert_eq!(
+            value[SOURCE_EVENT_AT_KEY].as_str(),
+            Some("2026-05-11T00:00:00Z")
+        );
     }
 }

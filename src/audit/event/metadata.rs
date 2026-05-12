@@ -329,12 +329,15 @@ impl AuditMetadata {
             // SIEM への監査イベント転送失敗（failure-only）。
             // event_type は転送しようとした監査の audit_action 文字列、
             // event_count はバッチ送信時の件数。
-            AuditAction::SiemForwardFailure => {
-                ["error_code", "event_type", "event_count", SOURCE_EVENT_AT_KEY]
-                    .iter()
-                    .cloned()
-                    .collect()
-            }
+            AuditAction::SiemForwardFailure => [
+                "error_code",
+                "event_type",
+                "event_count",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
         };
 
         for key in object.keys() {

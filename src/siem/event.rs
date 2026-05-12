@@ -243,9 +243,15 @@ mod tests {
         assert_eq!(siem.schema_version(), SIEM_EVENT_SCHEMA_VERSION);
         assert_eq!(siem.event_type(), "decrypt");
         assert_eq!(siem.result(), "failure");
-        assert_eq!(siem.event_id(), &event.audit_event_id().as_canonical_string());
+        assert_eq!(
+            siem.event_id(),
+            &event.audit_event_id().as_canonical_string()
+        );
         assert_eq!(siem.request_id(), &event.request_id().as_canonical_string());
-        assert_eq!(siem.actor_user_id(), Some(make_owner().as_canonical_string().as_str()));
+        assert_eq!(
+            siem.actor_user_id(),
+            Some(make_owner().as_canonical_string().as_str())
+        );
         assert_eq!(siem.actor_device_id(), Some(make_device().as_str()));
         assert_eq!(
             siem.target_secret_id(),

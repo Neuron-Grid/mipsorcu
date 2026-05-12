@@ -221,8 +221,7 @@ fn siem_event_top_level_keys_match_allowlist() {
     let value = serde_json::to_value(&siem_event).expect("serialize must succeed");
     let object = value.as_object().expect("must serialize as object");
 
-    let actual_keys: std::collections::BTreeSet<&str> =
-        object.keys().map(String::as_str).collect();
+    let actual_keys: std::collections::BTreeSet<&str> = object.keys().map(String::as_str).collect();
     let expected_keys: std::collections::BTreeSet<&str> =
         SIEM_EVENT_TOP_LEVEL_KEYS.iter().copied().collect();
 
@@ -255,7 +254,10 @@ fn siem_event_metadata_round_trip_preserves_audit_metadata() {
     // AuditMetadata 側の allowlist 強制が SiemEvent にも継承される。
     let audit_event = build_decrypt_failure_audit_event();
     let siem_event = SiemEvent::from_audit_event(&audit_event);
-    assert_eq!(siem_event.metadata(), audit_event.metadata_json().as_value());
+    assert_eq!(
+        siem_event.metadata(),
+        audit_event.metadata_json().as_value()
+    );
 }
 
 #[test]
@@ -292,10 +294,8 @@ fn build_siem_forward_failure_audit_event_allowlist_compliant() {
     )
     .expect("must build");
     let metadata = event.metadata_json().clone();
-    let result = metadata.validate_allowlist_for_action(
-        AuditAction::SiemForwardFailure,
-        AuditResult::Failure,
-    );
+    let result = metadata
+        .validate_allowlist_for_action(AuditAction::SiemForwardFailure, AuditResult::Failure);
     assert!(
         result.is_ok(),
         "allowlist validation should pass for SiemForwardFailure: {result:?}"

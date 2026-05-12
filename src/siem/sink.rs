@@ -63,6 +63,9 @@ mod tests {
         let error = SiemSinkError::InvalidResponse {
             reason: "rejected by server",
         };
-        assert_eq!(format!("{error}"), "siem invalid response: rejected by server");
+        assert_eq!(
+            format!("{error}"),
+            "siem invalid response: rejected by server"
+        );
     }
 }

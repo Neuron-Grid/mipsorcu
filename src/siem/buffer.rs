@@ -291,7 +291,11 @@ mod tests {
         buffer.append_pending(&event).unwrap();
         buffer.append_pending(&event).unwrap();
         let pending = buffer.pending_events().unwrap();
-        assert_eq!(pending.len(), 1, "same event_id must collapse to one pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "same event_id must collapse to one pending"
+        );
         let _ = fs::remove_file(&path);
     }
 

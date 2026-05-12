@@ -479,11 +479,19 @@ mod tests {
             .expect("failure_since must be recorded");
 
         // 同時刻では long failure ではない
-        assert!(!forwarder.status().is_long_failure(since, Duration::from_secs(60)));
+        assert!(
+            !forwarder
+                .status()
+                .is_long_failure(since, Duration::from_secs(60))
+        );
 
         // threshold 経過後は long failure
         let later = since + time::Duration::seconds(120);
-        assert!(forwarder.status().is_long_failure(later, Duration::from_secs(60)));
+        assert!(
+            forwarder
+                .status()
+                .is_long_failure(later, Duration::from_secs(60))
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -552,9 +560,7 @@ mod tests {
 
     #[test]
     fn sink_error_code_invalid_response_returns_static_code() {
-        let error = SiemSinkError::InvalidResponse {
-            reason: "rejected",
-        };
+        let error = SiemSinkError::InvalidResponse { reason: "rejected" };
         assert_eq!(sink_error_code(&error), "siem_invalid_response");
     }
 }
