@@ -19,8 +19,8 @@ use crate::server::state::AppState;
 use crate::server::supabase::{
     AuditReportSummary, AuditUiAuditEventRow, AuditUiAuditEventsParams,
     AuditUiHashChainVerification, AuditUiIntegrityStatusRow, AuditUiLedgerEntriesParams,
-    AuditUiLedgerEntryRow, AuditUiSecretInventoryRow, AuditUiVerificationFailuresParams,
-    AuditUiVerificationFailureRow, SupabaseRpcError,
+    AuditUiLedgerEntryRow, AuditUiSecretInventoryRow, AuditUiVerificationFailureRow,
+    AuditUiVerificationFailuresParams, SupabaseRpcError,
 };
 use crate::server::use_cases::verify_monthly_digest::{
     VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit, verify_monthly_digest,
@@ -159,7 +159,7 @@ struct AuditUiReadAuditInput {
     error_code: Option<&'static str>,
 }
 
-pub async fn list_secrets(
+async fn list_secrets(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
@@ -194,7 +194,7 @@ pub async fn list_secrets(
     Ok(Json(response))
 }
 
-pub async fn list_audit_events(
+async fn list_audit_events(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
@@ -249,7 +249,7 @@ pub async fn list_audit_events(
     Ok(Json(response))
 }
 
-pub async fn list_ledger_entries(
+async fn list_ledger_entries(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
@@ -310,14 +310,13 @@ pub async fn list_ledger_entries(
     Ok(Json(response))
 }
 
-pub async fn integrity_status(
+async fn integrity_status(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
 ) -> ServerResult<Json<Vec<AuditUiIntegrityStatusRow>>> {
     let request_id = request_context.into_request_id();
-    let audit =
-        AuditUiReadAuditInput::new("/audit/v1/integrity-status", "integrity_status");
+    let audit = AuditUiReadAuditInput::new("/audit/v1/integrity-status", "integrity_status");
     ensure_auditor(&state, &request_id, &auth, &audit).await?;
     let rows = match state
         .supabase_client
@@ -341,15 +340,14 @@ pub async fn integrity_status(
     Ok(Json(rows))
 }
 
-pub async fn verify_hash_chain(
+async fn verify_hash_chain(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
     Query(query): Query<SequenceRangeQuery>,
 ) -> ServerResult<Json<AuditUiHashChainVerification>> {
     let request_id = request_context.into_request_id();
-    let mut audit =
-        AuditUiReadAuditInput::new("/audit/v1/verification/hash-chain", "hash_chain");
+    let mut audit = AuditUiReadAuditInput::new("/audit/v1/verification/hash-chain", "hash_chain");
     ensure_auditor(&state, &request_id, &auth, &audit).await?;
     let range = parse_optional_sequence_range(query.start_sequence_no, query.end_sequence_no)
         .map_err(|error| error.with_request_id(&request_id))?;
@@ -379,15 +377,14 @@ pub async fn verify_hash_chain(
     Ok(Json(response))
 }
 
-pub async fn verify_signatures(
+async fn verify_signatures(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
     Query(query): Query<SequenceRangeQuery>,
 ) -> ServerResult<Json<SignatureVerificationResponse>> {
     let request_id = request_context.into_request_id();
-    let mut audit =
-        AuditUiReadAuditInput::new("/audit/v1/verification/signatures", "signatures");
+    let mut audit = AuditUiReadAuditInput::new("/audit/v1/verification/signatures", "signatures");
     ensure_auditor(&state, &request_id, &auth, &audit).await?;
     let (start, end) = resolve_signature_range(&state, query)
         .await
@@ -413,7 +410,7 @@ pub async fn verify_signatures(
     Ok(Json(response))
 }
 
-pub async fn verify_monthly_digest_endpoint(
+async fn verify_monthly_digest_endpoint(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
@@ -423,11 +420,9 @@ pub async fn verify_monthly_digest_endpoint(
     let period = MonthlyDigestPeriod::parse(&query.year_month)
         .map_err(|_| ApiError::BadRequest("invalid year_month".to_owned()))
         .map_err(|error| error.with_request_id(&request_id))?;
-    let audit = AuditUiReadAuditInput::new(
-        "/audit/v1/verification/monthly-digest",
-        "monthly_digest",
-    )
-    .with_target_year_month(period.clone());
+    let audit =
+        AuditUiReadAuditInput::new("/audit/v1/verification/monthly-digest", "monthly_digest")
+            .with_target_year_month(period.clone());
     ensure_auditor(&state, &request_id, &auth, &audit).await?;
 
     let verified_at = SourceEventAt::now_utc()
@@ -472,7 +467,7 @@ pub async fn verify_monthly_digest_endpoint(
     Ok(Json(response))
 }
 
-pub async fn list_verification_failures(
+async fn list_verification_failures(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
@@ -483,11 +478,9 @@ pub async fn list_verification_failures(
         .map_err(|error| error.with_request_id(&request_id))?;
     let (period_start, period_end) = parse_required_period(&query.period_start, &query.period_end)
         .map_err(|error| error.with_request_id(&request_id))?;
-    let audit = AuditUiReadAuditInput::new(
-        "/audit/v1/verification/failures",
-        "verification_failures",
-    )
-    .with_period(period_start.clone(), period_end.clone());
+    let audit =
+        AuditUiReadAuditInput::new("/audit/v1/verification/failures", "verification_failures")
+            .with_period(period_start.clone(), period_end.clone());
     ensure_auditor(&state, &request_id, &auth, &audit).await?;
 
     let rows = match state
@@ -518,7 +511,7 @@ pub async fn list_verification_failures(
     Ok(Json(response))
 }
 
-pub async fn verification_summary(
+async fn verification_summary(
     State(state): State<AppState>,
     request_context: RequestContext,
     auth: AuthenticatedUser,
@@ -527,9 +520,8 @@ pub async fn verification_summary(
     let request_id = request_context.into_request_id();
     let (period_start, period_end) = parse_required_period(&query.period_start, &query.period_end)
         .map_err(|error| error.with_request_id(&request_id))?;
-    let audit =
-        AuditUiReadAuditInput::new("/audit/v1/verification/summary", "summary")
-            .with_period(period_start.clone(), period_end.clone());
+    let audit = AuditUiReadAuditInput::new("/audit/v1/verification/summary", "summary")
+        .with_period(period_start.clone(), period_end.clone());
     ensure_auditor(&state, &request_id, &auth, &audit).await?;
     let summary = match state
         .supabase_client
@@ -547,11 +539,13 @@ pub async fn verification_summary(
                 ApiError::InternalInvariantViolation(
                     "audit summary returned invalid sequence_start".to_owned(),
                 )
+                .with_request_id(&request_id)
             })?;
             let end = LedgerSequenceNo::new(end).map_err(|_| {
                 ApiError::InternalInvariantViolation(
                     "audit summary returned invalid sequence_end".to_owned(),
                 )
+                .with_request_id(&request_id)
             })?;
             match verify_signature_range(&state, Some(start), Some(end)).await {
                 Ok(response) => response,
@@ -679,9 +673,15 @@ async fn record_audit_ui_success(
     actor_user_id: &OwnerUserId,
     input: AuditUiReadAuditInput,
 ) -> Result<(), ApiError> {
-    record_audit_ui_read(state, request_id, actor_user_id, AuditResult::Success, input)
-        .await
-        .map(|_| ())
+    record_audit_ui_read(
+        state,
+        request_id,
+        actor_user_id,
+        AuditResult::Success,
+        input,
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn record_audit_ui_failure(
@@ -690,8 +690,14 @@ async fn record_audit_ui_failure(
     actor_user_id: &OwnerUserId,
     input: AuditUiReadAuditInput,
 ) {
-    if let Err(error) =
-        record_audit_ui_read(state, request_id, actor_user_id, AuditResult::Failure, input).await
+    if let Err(error) = record_audit_ui_read(
+        state,
+        request_id,
+        actor_user_id,
+        AuditResult::Failure,
+        input,
+    )
+    .await
     {
         tracing::error!(
             request_id = %request_id.as_canonical_string(),
@@ -914,11 +920,12 @@ async fn verify_signature_range(
         });
     }
 
-    let verification = tokio::task::spawn_blocking(move || {
-        verify_signature_material_rows(start, end, rows)
-    })
-    .await
-    .map_err(|_| SupabaseRpcError::InvalidResponse("signature verification join failed".to_owned()))?;
+    let verification =
+        tokio::task::spawn_blocking(move || verify_signature_material_rows(start, end, rows))
+            .await
+            .map_err(|_| {
+                SupabaseRpcError::InvalidResponse("signature verification join failed".to_owned())
+            })?;
 
     Ok(verification)
 }
@@ -937,7 +944,9 @@ fn verify_signature_material_rows(
         }
         let entry = match row.try_restore_signed_ledger_entry() {
             Ok(entry) => entry,
-            Err(_) => return signature_failure(start, end, entries.len(), "ledger_entry_restore_failed"),
+            Err(_) => {
+                return signature_failure(start, end, entries.len(), "ledger_entry_restore_failed");
+            }
         };
         if !verification_keys
             .iter()
@@ -945,8 +954,22 @@ fn verify_signature_material_rows(
         {
             match row.try_restore_verifying_key() {
                 Ok(Some(key)) => verification_keys.push(key),
-                Ok(None) => return signature_failure(start, end, entries.len(), "ledger_signature_key_missing"),
-                Err(_) => return signature_failure(start, end, entries.len(), "ledger_key_restore_failed"),
+                Ok(None) => {
+                    return signature_failure(
+                        start,
+                        end,
+                        entries.len(),
+                        "ledger_signature_key_missing",
+                    );
+                }
+                Err(_) => {
+                    return signature_failure(
+                        start,
+                        end,
+                        entries.len(),
+                        "ledger_key_restore_failed",
+                    );
+                }
             }
         }
         entries.push(entry);
@@ -954,7 +977,9 @@ fn verify_signature_material_rows(
 
     let initial_head = match initial_chain_head(start, &rows) {
         Ok(head) => head,
-        Err(_) => return signature_failure(start, end, entries.len(), "ledger_chain_head_build_failed"),
+        Err(_) => {
+            return signature_failure(start, end, entries.len(), "ledger_chain_head_build_failed");
+        }
     };
     match verify_ledger_chain(&entries, initial_head, &verification_keys) {
         Ok(_) => SignatureVerificationResponse {
@@ -975,12 +1000,11 @@ fn initial_chain_head(
     if start.get() == 1 {
         return Ok(LedgerChainHead::genesis());
     }
-    let first_previous_hash = rows
-        .first()
-        .map(|row| row.previous_entry_hash)
-        .ok_or(LedgerError::InvalidPositiveInteger {
+    let first_previous_hash = rows.first().map(|row| row.previous_entry_hash).ok_or(
+        LedgerError::InvalidPositiveInteger {
             field: "sequence_no",
-        })?;
+        },
+    )?;
     LedgerChainHead::new(start.get() - 1, first_previous_hash)
 }
 
@@ -1031,7 +1055,9 @@ fn contains_forbidden_key(value: &Value, forbidden_keys: &[&str]) -> bool {
     match value {
         Value::Object(object) => object.iter().any(|(key, nested)| {
             let normalized = key.trim().to_ascii_lowercase();
-            forbidden_keys.iter().any(|forbidden| normalized == *forbidden)
+            forbidden_keys
+                .iter()
+                .any(|forbidden| normalized == *forbidden)
                 || contains_forbidden_key(nested, forbidden_keys)
         }),
         Value::Array(values) => values

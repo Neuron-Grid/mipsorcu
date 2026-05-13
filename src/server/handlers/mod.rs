@@ -1,3 +1,4 @@
+pub mod audit_ui;
 mod create;
 mod decrypt;
 mod health;

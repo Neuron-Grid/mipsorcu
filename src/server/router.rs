@@ -12,6 +12,7 @@ use crate::server::state::AppState;
 
 pub fn build_app(state: AppState) -> Router {
     let router = Router::new()
+        .nest("/audit/v1", handlers::audit_ui::build_audit_read_router())
         .route("/v1/secrets", post(handlers::create_secret))
         .route(
             "/v1/secrets/{secret_id}/versions",
