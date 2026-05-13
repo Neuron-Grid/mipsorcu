@@ -9,6 +9,7 @@ use crate::audit::{
     LocalAuditStoreError, ResendAuditSummary, RolloverOutcome,
 };
 use crate::auth::{JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, fetch_jwks};
+use crate::incident::{DummyNotificationSink, IncidentRecordInput, IncidentRecorder, IncidentType};
 use crate::server::siem_forwarding::SiemForwardingService;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
@@ -230,6 +231,7 @@ pub(crate) async fn run_audit_resend_loop(
 
 pub(crate) async fn run_siem_resend_loop(
     siem_forwarding: Arc<SiemForwardingService<InMemorySiemSink>>,
+    incident_recorder: Arc<IncidentRecorder<DummyNotificationSink>>,
     interval_duration: Duration,
     long_failure_threshold: Duration,
     mut shutdown_receiver: watch::Receiver<bool>,
@@ -237,8 +239,10 @@ pub(crate) async fn run_siem_resend_loop(
     record_siem_resend_result(
         siem_forwarding.resend_pending().await,
         &siem_forwarding,
+        incident_recorder.as_ref(),
         long_failure_threshold,
-    );
+    )
+    .await;
 
     let mut interval = tokio::time::interval(interval_duration);
     interval.tick().await;
@@ -255,16 +259,19 @@ pub(crate) async fn run_siem_resend_loop(
                 record_siem_resend_result(
                     siem_forwarding.resend_pending().await,
                     &siem_forwarding,
+                    incident_recorder.as_ref(),
                     long_failure_threshold,
-                );
+                )
+                .await;
             }
         }
     }
 }
 
-fn record_siem_resend_result(
+async fn record_siem_resend_result(
     summary: crate::siem::SiemResendSummary,
     siem_forwarding: &SiemForwardingService<InMemorySiemSink>,
+    incident_recorder: &IncidentRecorder<DummyNotificationSink>,
     long_failure_threshold: Duration,
 ) {
     if summary.attempted > 0 {
@@ -285,6 +292,29 @@ fn record_siem_resend_result(
             threshold_seconds = long_failure_threshold.as_secs(),
             "SIEM forwarding has been failing longer than threshold"
         );
+        let incident_type = IncidentType::SiemLongFailure;
+        let input = IncidentRecordInput::new(
+            incident_type,
+            crate::incident::severity_for_incident(incident_type),
+            "siem_resend_loop",
+            "siem-long-failure",
+            "siem_long_outage",
+        );
+        match incident_recorder.record(input).await {
+            Ok(result) => {
+                tracing::info!(
+                    notification_result = result.notification_result.as_str(),
+                    suppressed = result.suppressed,
+                    "SIEM long failure incident recorded"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "SIEM long failure incident recording failed"
+                );
+            }
+        }
     }
 }
 

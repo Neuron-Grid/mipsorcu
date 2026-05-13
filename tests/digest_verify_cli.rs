@@ -457,6 +457,7 @@ fn range_modified_after_digest_exit_2() -> Result<(), Box<dyn std::error::Error>
         (200, chain_export_body(&m)),
         (200, modified_range),
         (200, r#""ok""#.to_owned()),
+        (200, "true".to_owned()),
     ])?;
 
     let run = run_digest_verify(&url, "range-modified", TEST_YEAR_MONTH)?;
@@ -517,6 +518,7 @@ fn chain_broken_exit_2() -> Result<(), Box<dyn std::error::Error>> {
         (200, digest_materials_body(&m)),
         (200, chain_export_body_tampered_entry_hash(&m)),
         (200, r#""ok""#.to_owned()),
+        (200, "true".to_owned()),
     ])?;
 
     let run = run_digest_verify(&url, "chain-broken", TEST_YEAR_MONTH)?;
@@ -550,6 +552,7 @@ fn end_hash_mismatch_exit_2() -> Result<(), Box<dyn std::error::Error>> {
         (200, digest_materials_body_wrong_end_hash(&m)),
         (200, chain_export_body(&m)),
         (200, r#""ok""#.to_owned()),
+        (200, "true".to_owned()),
     ])?;
 
     let run = run_digest_verify(&url, "end-hash-mismatch", TEST_YEAR_MONTH)?;
@@ -580,6 +583,7 @@ fn unknown_signature_key_exit_2() -> Result<(), Box<dyn std::error::Error>> {
         (200, digest_materials_body_null_key(&m)),
         (200, chain_export_body(&m)),
         (200, r#""ok""#.to_owned()),
+        (200, "true".to_owned()),
     ])?;
 
     let run = run_digest_verify(&url, "unknown-key", TEST_YEAR_MONTH)?;
@@ -613,6 +617,7 @@ fn digest_hash_mismatch_exit_2() -> Result<(), Box<dyn std::error::Error>> {
         (200, digest_materials_body_wrong_digest_hash(&m)),
         (200, chain_export_body(&m)),
         (200, r#""ok""#.to_owned()),
+        (200, "true".to_owned()),
     ])?;
 
     let run = run_digest_verify(&url, "hash-mismatch", TEST_YEAR_MONTH)?;
@@ -643,6 +648,7 @@ fn digest_signature_invalid_exit_2() -> Result<(), Box<dyn std::error::Error>> {
         (200, digest_materials_body_wrong_signature(&m)),
         (200, chain_export_body(&m)),
         (200, r#""ok""#.to_owned()),
+        (200, "true".to_owned()),
     ])?;
 
     let run = run_digest_verify(&url, "sig-invalid", TEST_YEAR_MONTH)?;

@@ -12,7 +12,11 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore, RequestId};
-use crate::ledger::MonthlyDigestPeriod;
+use crate::incident::{
+    DummyNotificationSink, IncidentRecordInput, IncidentRecorder, dedupe_key,
+    monthly_digest_incident_type, severity_for_incident,
+};
+use crate::ledger::{LedgerSignatureKeyVersion, MonthlyDigestPeriod};
 use crate::server::config::AppConfig;
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::use_cases::generate_monthly_digest::{
@@ -267,6 +271,8 @@ async fn run_verify_command(
                 &verified_at,
             )
             .await;
+            record_monthly_digest_verify_incident(config, supabase_client.clone(), &period, &error)
+                .await;
 
             Ok(DigestVerifyOutput {
                 period: period.as_str().to_owned(),
@@ -295,4 +301,59 @@ fn build_audit_recorder(
         config.audit_fallback_rotate_size_bytes,
     );
     Arc::new(AuditRecorder::new(audit_appender, fallback_store))
+}
+
+async fn record_monthly_digest_verify_incident(
+    config: &AppConfig,
+    supabase_client: Arc<SupabaseClient>,
+    period: &MonthlyDigestPeriod,
+    error: &VerifyMonthlyDigestError,
+) {
+    let error_code = error.as_error_code();
+    let Some(incident_type) = monthly_digest_incident_type(error_code) else {
+        return;
+    };
+
+    let signing_key = config.ledger_signing_key.clone();
+    let signing_key_version: LedgerSignatureKeyVersion = signing_key.key_version();
+    let ledger_appender = Arc::new(crate::server::ledger_appender::LedgerAppender::new(
+        supabase_client.clone(),
+        signing_key,
+    ));
+    let incident_recorder = IncidentRecorder::new(
+        supabase_client,
+        ledger_appender,
+        DummyNotificationSink::new(),
+    );
+    let detection_source = "monthly_digest_verify";
+    let input = IncidentRecordInput::new(
+        incident_type,
+        severity_for_incident(incident_type),
+        detection_source,
+        dedupe_key(incident_type, detection_source, Some(period)),
+        error_code,
+    )
+    .with_target_year_month(period.clone());
+
+    match incident_recorder.record(input).await {
+        Ok(result) => {
+            tracing::info!(
+                period = period.as_str(),
+                incident_type = incident_type.as_str(),
+                notification_result = result.notification_result.as_str(),
+                suppressed = result.suppressed,
+                signature_key_version = signing_key_version.get(),
+                "monthly digest verification incident recorded"
+            );
+        }
+        Err(record_error) => {
+            tracing::error!(
+                period = period.as_str(),
+                incident_type = incident_type.as_str(),
+                error = %record_error,
+                signature_key_version = signing_key_version.get(),
+                "monthly digest verification incident recording failed"
+            );
+        }
+    }
 }

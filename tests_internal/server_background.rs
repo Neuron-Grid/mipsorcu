@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use crate::audit::{AuditRecordError, AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::{Jwk, Jwks, JwksCache, JwtVerifier, JwtVerifierConfig};
 use crate::crypto::MasterKeyRing;
+use crate::incident::{DummyNotificationSink, IncidentRecorder};
 use crate::ledger::{
     LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
 };
@@ -122,6 +123,11 @@ fn test_app_state(
         supabase_client.clone(),
         ledger_signing_key,
     ));
+    let incident_recorder = Arc::new(IncidentRecorder::new(
+        supabase_client.clone(),
+        ledger_appender.clone(),
+        DummyNotificationSink::new(),
+    ));
     let readiness_state = ReadinessState::new();
     let siem_forwarding = Arc::new(SiemForwardingService::new(
         SiemForwarder::new(
@@ -152,6 +158,7 @@ fn test_app_state(
         supabase_client,
         audit_recorder,
         ledger_appender,
+        incident_recorder,
         siem_forwarding,
         audit_fallback_store,
         readiness_state,

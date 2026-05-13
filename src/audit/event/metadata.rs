@@ -8,15 +8,17 @@ use serde_json::{Map, Value, json};
 pub use builders::{
     ArchiveExportMetadata, AuditReportGenerateMetadata, AuthFailureMetadata, DecryptMetadata,
     DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
-    IntegrityCheckMetadata, KeyRotationCompleteMetadata, KeyRotationReencryptMetadata,
-    KeyRotationStartMetadata, MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata,
-    RestoreTestMetadata, SchedulerJobMetadata, SiemForwardFailureMetadata, VersionPurgeMetadata,
+    IncidentDetectedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
+    KeyRotationReencryptMetadata, KeyRotationStartMetadata, MonthlyDigestGenerateMetadata,
+    MonthlyDigestVerifyMetadata, RestoreTestMetadata, SchedulerJobMetadata,
+    SiemForwardFailureMetadata, VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
 
 use super::super::error::AuditEventError;
 use super::action::{AuditAction, AuditResult};
+use super::id::AuditEventId;
 use super::validation::canonicalize_source_event_at;
 
 pub(super) const SOURCE_EVENT_AT_KEY: &str = "source_event_at";
@@ -379,6 +381,22 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            AuditAction::IncidentDetected => [
+                "incident_type",
+                "severity",
+                "detection_source",
+                "dedupe_key",
+                "notification_sink",
+                "notification_result",
+                "error_code",
+                SOURCE_EVENT_AT_KEY,
+                "source_event_id",
+                "target_sequence_no",
+                "target_year_month",
+            ]
+            .iter()
+            .cloned()
+            .collect(),
         };
 
         for key in object.keys() {
@@ -439,6 +457,15 @@ fn validate_required_metadata_keys(
         // audit_report_generate は対象期間と出力形式が常に必須。
         AuditAction::AuditReportGenerate => vec!["format", "period_end", "period_start"],
         AuditAction::SchedulerJob => vec!["job_name", TRIGGER_KEY, "duration_ms"],
+        AuditAction::IncidentDetected => vec![
+            "incident_type",
+            "severity",
+            "detection_source",
+            "dedupe_key",
+            "notification_sink",
+            "notification_result",
+            "error_code",
+        ],
     };
 
     if require_source_event_at {
@@ -491,6 +518,7 @@ fn validate_metadata_values(
         "old_key_version",
         "new_key_version",
         "batch_size",
+        "target_sequence_no",
     ] {
         if let Some(value) = object.get(key) {
             validate_positive_u64_value(key, value)?;
@@ -518,6 +546,23 @@ fn validate_metadata_values(
         }
     }
 
+    if let Some(value) = object.get("source_event_id") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue {
+                key: "source_event_id",
+            })?;
+        AuditEventId::parse(text).map_err(|_| AuditEventError::InvalidMetadataValue {
+            key: "source_event_id",
+        })?;
+    }
+
+    if object.contains_key("source_event_id") && action != AuditAction::IncidentDetected {
+        return Err(AuditEventError::InvalidMetadataValue {
+            key: "source_event_id",
+        });
+    }
+
     if object.contains_key("attempted_secret_id")
         && !(action == AuditAction::Decrypt && result == AuditResult::Failure)
     {
@@ -535,6 +580,47 @@ fn validate_metadata_values(
 
     if let Some(value) = object.get("job_name") {
         validate_non_blank_short_string("job_name", value, 96)?;
+    }
+
+    for key in ["detection_source", "dedupe_key", "notification_sink"] {
+        if let Some(value) = object.get(key) {
+            validate_non_blank_short_string(key, value, 128)?;
+        }
+    }
+
+    if let Some(value) = object.get("incident_type") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue {
+                key: "incident_type",
+            })?;
+        if !incident_type_allowed(text) {
+            return Err(AuditEventError::InvalidMetadataValue {
+                key: "incident_type",
+            });
+        }
+    }
+
+    if let Some(value) = object.get("severity") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue { key: "severity" })?;
+        if !matches!(text, "critical" | "high" | "medium" | "low") {
+            return Err(AuditEventError::InvalidMetadataValue { key: "severity" });
+        }
+    }
+
+    if let Some(value) = object.get("notification_result") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue {
+                key: "notification_result",
+            })?;
+        if !matches!(text, "sent" | "failed" | "suppressed" | "not_configured") {
+            return Err(AuditEventError::InvalidMetadataValue {
+                key: "notification_result",
+            });
+        }
     }
 
     if let Some(value) = object.get("target_year_month") {
@@ -655,6 +741,23 @@ fn validate_exact_string(
     }
 
     Ok(())
+}
+
+fn incident_type_allowed(value: &str) -> bool {
+    matches!(
+        value,
+        "hash_chain_mismatch"
+            | "signature_mismatch"
+            | "monthly_digest_mismatch"
+            | "digest_timestamping_mismatch"
+            | "archive_export_mismatch"
+            | "sequence_gap"
+            | "unknown_signature_key"
+            | "non_auditor_ledger_read"
+            | "ledger_secret_leak_suspected"
+            | "siem_long_failure"
+            | "audit_ui_forbidden_operation"
+    )
 }
 
 impl fmt::Debug for AuditMetadata {

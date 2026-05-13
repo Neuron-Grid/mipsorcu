@@ -11,6 +11,7 @@ pub mod auth;
 pub mod authorization;
 pub mod crypto;
 pub mod error;
+pub mod incident;
 pub mod ledger;
 pub mod read;
 pub mod server;
@@ -32,7 +33,7 @@ pub use audit::{
     AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditReportGenerateMetadata, AuditResult,
     AuditTrigger, AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata,
     EncryptCreateMetadata, EncryptRotateMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
-    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IntegrityCheckMetadata,
+    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IncidentDetectedMetadata, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
     LocalAuditFallbackStore, LocalAuditStoreError, MonthlyDigestGenerateMetadata,
     MonthlyDigestVerifyMetadata, RequestId, ResendAuditSummary, RestoreTestMetadata,
@@ -54,6 +55,11 @@ pub use crypto::{
 pub use error::{
     AadError, AuthorizationError, CryptoError, DecryptIntegrityError, InputError,
     JwtVerificationError, KeyringError, SecretDecryptError, SecretWriteError,
+};
+pub use incident::{
+    DummyNotificationSink, FailingNotificationSink, IncidentNotificationPayload,
+    IncidentRecordError, IncidentRecordInput, IncidentRecordResult, IncidentRecorder,
+    IncidentSeverity, IncidentType, NotificationResult, NotificationSink, NotificationSinkError,
 };
 pub use ledger::{
     DIGEST_GENERATED_BY, DIGEST_SCHEMA_VERSION_V1, DigestCanonicalBytes, DigestHash,

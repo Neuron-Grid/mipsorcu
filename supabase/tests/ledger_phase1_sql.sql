@@ -435,6 +435,129 @@ select ok(
 );
 
 select ok(
+    public.ledger_payload_is_valid(
+        'incident_detected',
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent',
+            'target_sequence_no', 42,
+            'target_year_month', '2026-05'
+        )
+    ),
+    'ledger payload guard accepts valid incident_detected payload'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'incident_detected',
+        jsonb_build_object(
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent'
+        )
+    ),
+    'ledger payload guard rejects incident_detected missing incident_type'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'incident_detected',
+        jsonb_build_object(
+            'incident_type', 'unexpected_incident',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent'
+        )
+    ),
+    'ledger payload guard rejects invalid incident_type'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'incident_detected',
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'urgent',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent'
+        )
+    ),
+    'ledger payload guard rejects invalid incident severity'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'incident_detected',
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain',
+            'notification_sink', 'dummy',
+            'notification_result', 'queued'
+        )
+    ),
+    'ledger payload guard rejects invalid incident notification_result'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'incident_detected',
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', ' ',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent'
+        )
+    ),
+    'ledger payload guard rejects blank incident dedupe_key'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'incident_detected',
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent',
+            'target_sequence_no', 0
+        )
+    ),
+    'ledger payload guard rejects invalid incident target_sequence_no'
+);
+
+select ok(
+    not public.ledger_payload_is_valid(
+        'incident_detected',
+        jsonb_build_object(
+            'incident_type', 'monthly_digest_mismatch',
+            'severity', 'high',
+            'detection_source', 'monthly_digest_verify',
+            'dedupe_key', 'digest-2026-13',
+            'notification_sink', 'dummy',
+            'notification_result', 'not_configured',
+            'target_year_month', '2026-13'
+        )
+    ),
+    'ledger payload guard rejects invalid incident target_year_month'
+);
+
+select ok(
     not public.ledger_payload_is_valid(
         'secret_created',
         '{"classification":"confidential","nested":{"version":1}}'::jsonb

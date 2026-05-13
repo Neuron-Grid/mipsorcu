@@ -1418,6 +1418,112 @@ impl SiemForwardFailureMetadata {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IncidentDetectedMetadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct IncidentDetectedMetadata {
+    incident_type: String,
+    severity: String,
+    detection_source: String,
+    dedupe_key: String,
+    notification_sink: String,
+    notification_result: String,
+    error_code: String,
+    source_event_at: SourceEventAt,
+    source_event_id: Option<String>,
+    target_sequence_no: Option<u64>,
+    target_year_month: Option<MonthlyDigestPeriod>,
+}
+
+impl IncidentDetectedMetadata {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        incident_type: impl Into<String>,
+        severity: impl Into<String>,
+        detection_source: impl Into<String>,
+        dedupe_key: impl Into<String>,
+        notification_sink: impl Into<String>,
+        notification_result: impl Into<String>,
+        error_code: impl Into<String>,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            incident_type: incident_type.into(),
+            severity: severity.into(),
+            detection_source: detection_source.into(),
+            dedupe_key: dedupe_key.into(),
+            notification_sink: notification_sink.into(),
+            notification_result: notification_result.into(),
+            error_code: error_code.into(),
+            source_event_at,
+            source_event_id: None,
+            target_sequence_no: None,
+            target_year_month: None,
+        }
+    }
+
+    pub fn with_source_event_id(mut self, source_event_id: impl Into<String>) -> Self {
+        self.source_event_id = Some(source_event_id.into());
+        self
+    }
+
+    pub fn with_target_sequence_no(mut self, target_sequence_no: u64) -> Self {
+        self.target_sequence_no = Some(target_sequence_no);
+        self
+    }
+
+    pub fn with_target_year_month(mut self, target_year_month: MonthlyDigestPeriod) -> Self {
+        self.target_year_month = Some(target_year_month);
+        self
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert(
+            "incident_type".to_owned(),
+            Value::String(self.incident_type),
+        );
+        object.insert("severity".to_owned(), Value::String(self.severity));
+        object.insert(
+            "detection_source".to_owned(),
+            Value::String(self.detection_source),
+        );
+        object.insert("dedupe_key".to_owned(), Value::String(self.dedupe_key));
+        object.insert(
+            "notification_sink".to_owned(),
+            Value::String(self.notification_sink),
+        );
+        object.insert(
+            "notification_result".to_owned(),
+            Value::String(self.notification_result),
+        );
+        object.insert("error_code".to_owned(), Value::String(self.error_code));
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
+        if let Some(source_event_id) = self.source_event_id {
+            object.insert("source_event_id".to_owned(), Value::String(source_event_id));
+        }
+        if let Some(target_sequence_no) = self.target_sequence_no {
+            object.insert(
+                "target_sequence_no".to_owned(),
+                Value::Number(target_sequence_no.into()),
+            );
+        }
+        if let Some(target_year_month) = self.target_year_month {
+            object.insert(
+                "target_year_month".to_owned(),
+                Value::String(target_year_month.as_str().to_owned()),
+            );
+        }
+
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
 #[cfg(test)]
 mod siem_forward_failure_metadata_tests {
     use super::*;

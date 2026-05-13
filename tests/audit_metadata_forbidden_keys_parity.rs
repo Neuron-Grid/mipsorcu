@@ -627,6 +627,21 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "trigger",
             ]
         }
+        AuditAction::IncidentDetected => {
+            vec![
+                "dedupe_key",
+                "detection_source",
+                "error_code",
+                "incident_type",
+                "notification_result",
+                "notification_sink",
+                "source_event_at",
+                "source_event_id",
+                "target_sequence_no",
+                "target_year_month",
+                "severity",
+            ]
+        }
     };
     keys.sort();
     keys.into_iter().map(|s| s.to_owned()).collect()

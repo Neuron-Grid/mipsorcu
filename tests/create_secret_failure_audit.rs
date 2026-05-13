@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use mipsorcu::incident::{DummyNotificationSink, IncidentRecorder};
 use mipsorcu::server::dto::CreateSecretRequest;
 use mipsorcu::server::handlers::create_secret;
 use mipsorcu::server::ledger_appender::LedgerAppender;
@@ -283,6 +284,11 @@ fn test_app_state_with_fallback(
         supabase_client.clone(),
         ledger_signing_key,
     ));
+    let incident_recorder = Arc::new(IncidentRecorder::new(
+        supabase_client.clone(),
+        ledger_appender.clone(),
+        DummyNotificationSink::new(),
+    ));
     let readiness_state = ReadinessState::new();
     let siem_forwarding = Arc::new(SiemForwardingService::new(
         SiemForwarder::new(
@@ -302,6 +308,7 @@ fn test_app_state_with_fallback(
         supabase_client,
         audit_recorder,
         ledger_appender,
+        incident_recorder,
         siem_forwarding,
         audit_fallback_store,
         readiness_state,

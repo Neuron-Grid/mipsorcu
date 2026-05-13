@@ -22,6 +22,8 @@ pub enum LedgerEntryType {
     DigestTimestamped,
     /// 定期実行スケジューラ job の実行結果。
     SchedulerJobCompleted,
+    /// インシデント検知結果。
+    IncidentDetected,
 }
 
 impl LedgerEntryType {
@@ -44,6 +46,7 @@ impl LedgerEntryType {
             "archive_exported" => Ok(Self::ArchiveExported),
             "digest_timestamped" => Ok(Self::DigestTimestamped),
             "scheduler_job_completed" => Ok(Self::SchedulerJobCompleted),
+            "incident_detected" => Ok(Self::IncidentDetected),
             _ => Err(LedgerError::UnknownEntryType {
                 value: value.to_owned(),
             }),
@@ -69,6 +72,7 @@ impl LedgerEntryType {
             Self::ArchiveExported => "archive_exported",
             Self::DigestTimestamped => "digest_timestamped",
             Self::SchedulerJobCompleted => "scheduler_job_completed",
+            Self::IncidentDetected => "incident_detected",
         }
     }
 
@@ -135,6 +139,16 @@ impl LedgerEntryType {
             Self::SchedulerJobCompleted => {
                 &["duration_ms", "job_name", "target_year_month", "trigger"]
             }
+            Self::IncidentDetected => &[
+                "dedupe_key",
+                "detection_source",
+                "incident_type",
+                "notification_result",
+                "notification_sink",
+                "severity",
+                "target_sequence_no",
+                "target_year_month",
+            ],
         }
     }
 }

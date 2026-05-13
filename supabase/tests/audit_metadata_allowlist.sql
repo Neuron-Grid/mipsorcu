@@ -1122,6 +1122,185 @@ select is(
 );
 
 select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000147',
+        '00000000-0000-4000-8000-000000000147',
+        null,
+        null,
+        'incident_detected',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent',
+            'error_code', 'ledger_entry_hash_mismatch',
+            'source_event_at', '2026-06-01T03:00:00Z',
+            'source_event_id', '12000000-0000-4000-8000-000000000147',
+            'target_sequence_no', 42,
+            'target_year_month', '2026-05'
+        )
+    ),
+    'ok',
+    'incident_detected failure accepts valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000148',
+        '00000000-0000-4000-8000-000000000148',
+        null,
+        null,
+        'incident_detected',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain-missing',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent',
+            'error_code', 'ledger_entry_hash_mismatch',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'incident_detected rejects missing required incident_type'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000149',
+        '00000000-0000-4000-8000-000000000149',
+        null,
+        null,
+        'incident_detected',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain-extra',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent',
+            'error_code', 'ledger_entry_hash_mismatch',
+            'source_event_at', '2026-06-01T03:00:00Z',
+            'unexpected', 'bad'
+        )
+    ),
+    'invalid_rpc_input',
+    'incident_detected rejects unknown metadata key'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000150',
+        '00000000-0000-4000-8000-000000000150',
+        null,
+        null,
+        'incident_detected',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'urgent',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain-severity',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent',
+            'error_code', 'ledger_entry_hash_mismatch',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'incident_detected rejects invalid severity'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000151',
+        '00000000-0000-4000-8000-000000000151',
+        null,
+        null,
+        'incident_detected',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain-notification',
+            'notification_sink', 'dummy',
+            'notification_result', 'queued',
+            'error_code', 'ledger_entry_hash_mismatch',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'incident_detected rejects invalid notification_result'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000152',
+        '00000000-0000-4000-8000-000000000152',
+        null,
+        null,
+        'incident_detected',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'incident_type', 'hash_chain_mismatch',
+            'severity', 'critical',
+            'detection_source', 'ledger_hash_chain_full_verify',
+            'dedupe_key', 'global-chain-success',
+            'notification_sink', 'dummy',
+            'notification_result', 'sent',
+            'error_code', 'ledger_entry_hash_mismatch',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'incident_detected rejects success result'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000153',
+        '00000000-0000-4000-8000-000000000153',
+        null,
+        null,
+        'incident_detected',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'incident_type', 'monthly_digest_mismatch',
+            'severity', 'high',
+            'detection_source', 'monthly_digest_verify',
+            'dedupe_key', 'digest-2026-13',
+            'notification_sink', 'dummy',
+            'notification_result', 'not_configured',
+            'error_code', 'monthly_digest_hash_mismatch',
+            'source_event_at', '2026-06-01T03:00:00Z',
+            'target_year_month', '2026-13'
+        )
+    ),
+    'invalid_rpc_input',
+    'incident_detected rejects invalid target_year_month'
+);
+
+select is(
     has_function_privilege(
         'anon',
         'public.audit_metadata_has_invalid_value_for_action(text, text, jsonb)',

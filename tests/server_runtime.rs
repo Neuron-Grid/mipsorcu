@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use mipsorcu::incident::{DummyNotificationSink, IncidentRecorder};
 use mipsorcu::server::ledger_appender::LedgerAppender;
 use mipsorcu::server::runtime::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
@@ -400,6 +401,11 @@ fn test_app_state(
         supabase_client.clone(),
         ledger_signing_key,
     ));
+    let incident_recorder = Arc::new(IncidentRecorder::new(
+        supabase_client.clone(),
+        ledger_appender.clone(),
+        DummyNotificationSink::new(),
+    ));
     let readiness_state = ReadinessState::new();
     let siem_forwarding = Arc::new(SiemForwardingService::new(
         SiemForwarder::new(
@@ -419,6 +425,7 @@ fn test_app_state(
         supabase_client,
         audit_recorder,
         ledger_appender,
+        incident_recorder,
         siem_forwarding,
         audit_fallback_store,
         readiness_state,
@@ -1149,9 +1156,9 @@ async fn health_endpoint_returns_minimal_liveness_and_does_not_call_supabase() {
     assert_eq!(body["status"], "up");
     assert_eq!(body["supabase"], "ok");
     assert_eq!(body["master_key"], "loaded");
-    assert_eq!(body["siem"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
-    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert!(body.get("siem").is_none());
     assert!(body.get("fallback_writable").is_none());
     assert!(body.get("audit_fallback_pending").is_none());
     assert!(body.get("supabase_last_checked_at").is_none());
@@ -1187,9 +1194,9 @@ async fn health_endpoint_returns_service_unavailable_when_supabase_state_is_unhe
     assert_eq!(body["status"], "down");
     assert_eq!(body["supabase"], "ng");
     assert_eq!(body["master_key"], "loaded");
-    assert_eq!(body["siem"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
-    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert!(body.get("siem").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1217,9 +1224,9 @@ async fn ready_endpoint_returns_cached_supabase_state_when_fresh() {
     assert_eq!(body["status"], "ready");
     assert_eq!(body["supabase"], "ok");
     assert_eq!(body["master_key"], "loaded");
-    assert_eq!(body["siem"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
-    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert!(body.get("siem").is_none());
     assert!(body.get("supabase_reachable").is_none());
     assert!(body.get("supabase_last_checked_at").is_none());
     assert!(body.get("master_key_loaded").is_none());
@@ -1256,9 +1263,9 @@ async fn ready_endpoint_returns_service_unavailable_when_supabase_probe_is_stale
     assert_eq!(body["status"], "not_ready");
     assert_eq!(body["supabase"], "ng");
     assert_eq!(body["master_key"], "loaded");
-    assert_eq!(body["siem"], "ok");
     assert!(body["disk_free_mb"].is_number() || body["disk_free_mb"].is_null());
-    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    assert!(body.get("siem").is_none());
     assert!(body.get("supabase_reachable").is_none());
     assert!(body.get("supabase_last_checked_at").is_none());
 }
@@ -1294,8 +1301,8 @@ async fn ready_endpoint_does_not_expose_failure_audit_state() {
         body.get("audit_failure_append_both_failed_recent")
             .is_none()
     );
-    assert_eq!(body["siem"], "ok");
-    assert_eq!(body.as_object().map(|object| object.len()), Some(5));
+    assert!(body.get("siem").is_none());
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
 }
 
 #[tokio::test(flavor = "current_thread")]

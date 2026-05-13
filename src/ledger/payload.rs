@@ -118,13 +118,14 @@ fn validate_payload_object(
         validate_payload_field(key, value)?;
     }
 
+    validate_required_payload_keys(entry_type, object)?;
     validate_old_new_key_versions(object)
 }
 
 fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
     match key {
         "version" | "key_version" | "old_key_version" | "new_key_version" | "retention_limit"
-        | "start_sequence_no" | "end_sequence_no" | "entry_count" => {
+        | "start_sequence_no" | "end_sequence_no" | "entry_count" | "target_sequence_no" => {
             let parsed = require_positive_json_u64(key, value)?;
             if key == "retention_limit" && parsed != 4 {
                 return Err(LedgerError::InvalidPayloadField {
@@ -151,9 +152,17 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         "algorithm" => require_string_value(key, value, "xchacha20-poly1305"),
         "classification" => validate_classification_value(key, value),
         "trigger" => validate_trigger_value(key, value),
-        "error_code" | "reason_code" | "archive_key" | "job_name" => {
-            validate_non_blank_short_string(key, value)
+        "error_code" | "reason_code" | "archive_key" | "job_name" | "detection_source"
+        | "dedupe_key" | "notification_sink" => validate_non_blank_short_string(key, value),
+        "incident_type" => validate_incident_type_value(key, value),
+        "severity" => {
+            validate_string_enum_value(key, value, &["critical", "high", "medium", "low"])
         }
+        "notification_result" => validate_string_enum_value(
+            key,
+            value,
+            &["sent", "failed", "suppressed", "not_configured"],
+        ),
         // monthly_digest 専用フィールド
         "target_year_month" => validate_year_month_value(key, value),
         "digest_hash" | "timestamp_token_hash" => validate_digest_hash_value(key, value),
@@ -162,6 +171,33 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
             entry_type: LedgerEntryType::SecretCreated,
         }),
     }
+}
+
+fn validate_required_payload_keys(
+    entry_type: LedgerEntryType,
+    object: &Map<String, Value>,
+) -> Result<(), LedgerError> {
+    if entry_type != LedgerEntryType::IncidentDetected {
+        return Ok(());
+    }
+
+    for key in [
+        "incident_type",
+        "severity",
+        "detection_source",
+        "dedupe_key",
+        "notification_sink",
+        "notification_result",
+    ] {
+        if !object.contains_key(key) {
+            return Err(LedgerError::InvalidPayloadField {
+                key: key.to_owned(),
+                expected: "a required incident_detected payload key",
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// `YYYY-MM` 形式の文字列値を検証する。
@@ -309,6 +345,48 @@ fn validate_non_blank_short_string(key: &str, value: &Value) -> Result<(), Ledge
     }
 
     Ok(())
+}
+
+fn validate_string_enum_value(
+    key: &str,
+    value: &Value,
+    allowed: &[&str],
+) -> Result<(), LedgerError> {
+    let Some(text) = value.as_str() else {
+        return Err(LedgerError::InvalidPayloadField {
+            key: key.to_owned(),
+            expected: "an allowed string value",
+        });
+    };
+
+    if allowed.contains(&text) {
+        return Ok(());
+    }
+
+    Err(LedgerError::InvalidPayloadField {
+        key: key.to_owned(),
+        expected: "an allowed string value",
+    })
+}
+
+fn validate_incident_type_value(key: &str, value: &Value) -> Result<(), LedgerError> {
+    validate_string_enum_value(
+        key,
+        value,
+        &[
+            "hash_chain_mismatch",
+            "signature_mismatch",
+            "monthly_digest_mismatch",
+            "digest_timestamping_mismatch",
+            "archive_export_mismatch",
+            "sequence_gap",
+            "unknown_signature_key",
+            "non_auditor_ledger_read",
+            "ledger_secret_leak_suspected",
+            "siem_long_failure",
+            "audit_ui_forbidden_operation",
+        ],
+    )
 }
 
 fn validate_old_new_key_versions(object: &Map<String, Value>) -> Result<(), LedgerError> {

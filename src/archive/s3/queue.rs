@@ -255,14 +255,21 @@ fn append_record(path: &Path, record: &QueueRecord) -> Result<(), ArchiveQueueEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_QUEUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_queue_path() -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("mipsorcu-archive-queue-{nanos}.jsonl"))
+        let counter = TEMP_QUEUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let process_id = std::process::id();
+        std::env::temp_dir().join(format!(
+            "mipsorcu-archive-queue-{process_id}-{nanos}-{counter}.jsonl"
+        ))
     }
 
     #[test]

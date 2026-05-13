@@ -6,6 +6,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::{JwksCache, JwtVerifier, JwtVerifierConfig, fetch_jwks};
+use crate::incident::{DummyNotificationSink, IncidentRecorder};
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{
     SupabaseAuditAppender, SupabaseClient, classify_register_public_key_error,
@@ -177,6 +178,11 @@ async fn run_server_with_config(config: config::AppConfig) {
         supabase_client.clone(),
         ledger_signing_key,
     ));
+    let incident_recorder = Arc::new(IncidentRecorder::new(
+        supabase_client.clone(),
+        ledger_appender.clone(),
+        DummyNotificationSink::new(),
+    ));
     let siem_buffer = LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone());
     let siem_forwarder = SiemForwarder::new(InMemorySiemSink::new(), siem_buffer);
     let siem_forwarding = Arc::new(crate::server::siem_forwarding::SiemForwardingService::new(
@@ -200,6 +206,7 @@ async fn run_server_with_config(config: config::AppConfig) {
         supabase_client,
         audit_recorder,
         ledger_appender,
+        incident_recorder,
         siem_forwarding: siem_forwarding.clone(),
         audit_fallback_store: app_fallback_store,
         readiness_state,
@@ -226,6 +233,7 @@ async fn run_server_with_config(config: config::AppConfig) {
     ));
     tokio::spawn(background::run_siem_resend_loop(
         siem_forwarding,
+        state.incident_recorder.clone(),
         config.siem_resend_interval,
         config.siem_long_failure_threshold,
         shutdown_sender.subscribe(),

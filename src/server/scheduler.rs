@@ -12,6 +12,9 @@ use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult, AuditTrigger, RequestId,
     SchedulerJobMetadata,
 };
+use crate::incident::{
+    IncidentRecordInput, IncidentType, dedupe_key, scheduler_incident_type, severity_for_incident,
+};
 use crate::ledger::{
     DigestHash, LedgerChainHead, LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult,
     LedgerSequenceNo, MonthlyDigestPeriod, SignedLedgerEntry, SignedMonthlyDigest,
@@ -472,6 +475,62 @@ async fn record_precondition_failure_job(
     Err(error_code)
 }
 
+async fn record_mapped_scheduler_incident(
+    state: &AppState,
+    job_name: ScheduledJobName,
+    error_code: Option<&'static str>,
+    period: Option<MonthlyDigestPeriod>,
+) {
+    let Some(error_code) = error_code else {
+        return;
+    };
+    let Some(incident_type) = scheduler_incident_type(error_code) else {
+        return;
+    };
+
+    record_scheduler_incident(state, job_name, incident_type, error_code, period).await;
+}
+
+async fn record_scheduler_incident(
+    state: &AppState,
+    job_name: ScheduledJobName,
+    incident_type: IncidentType,
+    error_code: &'static str,
+    period: Option<MonthlyDigestPeriod>,
+) {
+    let detection_source = job_name.as_str();
+    let mut input = IncidentRecordInput::new(
+        incident_type,
+        severity_for_incident(incident_type),
+        detection_source,
+        dedupe_key(incident_type, detection_source, period.as_ref()),
+        error_code,
+    );
+    if let Some(period) = period {
+        input = input.with_target_year_month(period);
+    }
+
+    match state.incident_recorder.record(input).await {
+        Ok(result) => {
+            tracing::info!(
+                job_name = detection_source,
+                incident_type = incident_type.as_str(),
+                notification_result = result.notification_result.as_str(),
+                suppressed = result.suppressed,
+                "scheduler incident recorded"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                job_name = detection_source,
+                incident_type = incident_type.as_str(),
+                error = %error,
+                "scheduler incident recording failed"
+            );
+        }
+    }
+}
+
 async fn run_full_ledger_hash_chain_verify_job(
     state: &AppState,
     job_name: ScheduledJobName,
@@ -502,6 +561,7 @@ async fn run_full_ledger_hash_chain_verify_job(
         }
         Err(error_code) => (AuditResult::Failure, Some(error_code)),
     };
+    let incident_period = period.clone();
     record_scheduler_job_result(
         state,
         job_name,
@@ -511,6 +571,10 @@ async fn run_full_ledger_hash_chain_verify_job(
         elapsed_ms(started_at),
     )
     .await?;
+
+    if result == AuditResult::Failure {
+        record_mapped_scheduler_incident(state, job_name, error_code, incident_period).await;
+    }
 
     if result == AuditResult::Success {
         Ok(())
@@ -553,6 +617,7 @@ async fn run_full_ledger_signature_verify_job(
         }
         Err(error_code) => (AuditResult::Failure, Some(error_code)),
     };
+    let incident_period = period.clone();
     record_scheduler_job_result(
         state,
         job_name,
@@ -562,6 +627,10 @@ async fn run_full_ledger_signature_verify_job(
         elapsed_ms(started_at),
     )
     .await?;
+
+    if result == AuditResult::Failure {
+        record_mapped_scheduler_incident(state, job_name, error_code, incident_period).await;
+    }
 
     if result == AuditResult::Success {
         Ok(())
@@ -665,6 +734,7 @@ async fn run_archive_export_job(
     .await
     .is_err()
     {
+        let incident_period = Some(period.clone());
         record_scheduler_job_result(
             state,
             ScheduledJobName::ArchiveExport,
@@ -674,6 +744,14 @@ async fn run_archive_export_job(
             elapsed_ms(started_at),
         )
         .await?;
+        record_scheduler_incident(
+            state,
+            ScheduledJobName::ArchiveExport,
+            IncidentType::ArchiveExportMismatch,
+            "archive_export_failed",
+            incident_period,
+        )
+        .await;
         return Err("archive_export_failed");
     }
 

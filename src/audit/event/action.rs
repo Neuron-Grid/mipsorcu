@@ -26,6 +26,8 @@ pub enum AuditAction {
     AuditReportGenerate,
     /// 定期実行スケジューラ job の実行結果（成功・失敗両方の監査記録用）。
     SchedulerJob,
+    /// インシデント検知（failure-only の監査）。
+    IncidentDetected,
 }
 
 impl AuditAction {
@@ -48,6 +50,7 @@ impl AuditAction {
             "siem_forward_failure" => Ok(Self::SiemForwardFailure),
             "audit_report_generate" => Ok(Self::AuditReportGenerate),
             "scheduler_job" => Ok(Self::SchedulerJob),
+            "incident_detected" => Ok(Self::IncidentDetected),
             _ => Err(AuditEventError::UnknownAction {
                 value: value.to_owned(),
             }),
@@ -73,6 +76,7 @@ impl AuditAction {
             Self::SiemForwardFailure => "siem_forward_failure",
             Self::AuditReportGenerate => "audit_report_generate",
             Self::SchedulerJob => "scheduler_job",
+            Self::IncidentDetected => "incident_detected",
         }
     }
 
@@ -84,7 +88,10 @@ impl AuditAction {
     }
 
     pub fn is_failure_only(self) -> bool {
-        matches!(self, Self::AuthFailure | Self::SiemForwardFailure)
+        matches!(
+            self,
+            Self::AuthFailure | Self::SiemForwardFailure | Self::IncidentDetected
+        )
     }
 }
 

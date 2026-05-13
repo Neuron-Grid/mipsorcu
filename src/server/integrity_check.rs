@@ -6,6 +6,7 @@ use crate::audit::{
     AuditEventError, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditResult,
     AuditTrigger, IntegrityCheckMetadata, RequestId,
 };
+use crate::incident::{DummyNotificationSink, IncidentRecorder};
 use crate::server::audit_reporter::{self, IntegrityCheckAudit};
 use crate::server::config::AppConfig;
 use crate::server::state::{AppState, ReadinessState};
@@ -264,6 +265,11 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         supabase_client.clone(),
         config.ledger_signing_key.clone(),
     ));
+    let incident_recorder = Arc::new(IncidentRecorder::new(
+        supabase_client.clone(),
+        ledger_appender.clone(),
+        DummyNotificationSink::new(),
+    ));
     let readiness_state = ReadinessState::new();
     let siem_forwarder = SiemForwarder::new(
         InMemorySiemSink::new(),
@@ -281,6 +287,7 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         supabase_client,
         audit_recorder,
         ledger_appender,
+        incident_recorder,
         siem_forwarding,
         audit_fallback_store,
         readiness_state,
