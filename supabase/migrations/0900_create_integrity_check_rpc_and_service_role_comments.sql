@@ -1,11 +1,4 @@
--- Local squash note:
--- This migration consolidates the local, unapplied 0900-0999 migration series.
--- The historical section order is intentionally preserved so each later
--- create-or-replace step remains comparable with the original sequence.
-
--- ============================================================================
 -- Section 0900: integrity check RPC and service role comments
--- ============================================================================
 
 create or replace function public.rpc_integrity_check()
 returns table (
@@ -20,9 +13,26 @@ security definer
 set search_path = public, pg_temp
 as $$
 declare
-    v_checked_secret_count integer;
-    v_checked_secret_version_count integer;
-    v_checked_audit_event_count integer;
+    v_aad_keys constant text[] := array[
+        'aad_version',
+        'secret_id',
+        'version',
+        'owner_user_id',
+        'classification',
+        'created_at'
+    ];
+    v_audit_actions constant text[] := array[
+        'encrypt_create',
+        'encrypt_rotate',
+        'decrypt',
+        'version_purge',
+        'integrity_check',
+        'restore_test',
+        'auth_failure',
+        'key_rotation_start',
+        'key_rotation_reencrypt',
+        'key_rotation_complete'
+    ];
     v_current_version_invalid integer;
     v_version_invalid integer;
     v_retention_exceeded integer;
@@ -40,10 +50,12 @@ declare
     v_audit_metadata_forbidden_key integer;
     v_audit_source_event_at_invalid integer;
 begin
-    select count(*)::integer into v_checked_secret_count from public.secrets;
-    select count(*)::integer into v_checked_secret_version_count from public.secret_versions;
-    select count(*)::integer into v_checked_audit_event_count from public.audit_events;
+    -- Base row counts only; do not return row identifiers or secret material.
+    select count(*)::integer into checked_secret_count from public.secrets;
+    select count(*)::integer into checked_secret_version_count from public.secret_versions;
+    select count(*)::integer into checked_audit_event_count from public.audit_events;
 
+    -- secret/current-version invariants.
     select count(*)::integer
     into v_current_version_invalid
     from public.secrets s
@@ -53,6 +65,7 @@ begin
     where s.current_version_id is null
         or sv.id is null;
 
+    -- secret_versions storage invariants.
     select count(*)::integer
     into v_version_invalid
     from public.secret_versions sv
@@ -96,28 +109,13 @@ begin
         having count(*) > 1
     ) duplicate_nonces;
 
+    -- AAD v1 shape and row-binding invariants.
     select count(*)::integer
     into v_aad_keys_invalid
     from public.secret_versions sv
     where jsonb_typeof(sv.aad_context) is distinct from 'object'
-        or not (
-            sv.aad_context ?& array[
-                'aad_version',
-                'secret_id',
-                'version',
-                'owner_user_id',
-                'classification',
-                'created_at'
-            ]
-        )
-        or sv.aad_context - array[
-            'aad_version',
-            'secret_id',
-            'version',
-            'owner_user_id',
-            'classification',
-            'created_at'
-        ] <> '{}'::jsonb
+        or not (sv.aad_context ?& v_aad_keys)
+        or sv.aad_context - v_aad_keys <> '{}'::jsonb
         or jsonb_typeof(sv.aad_context -> 'aad_version') is distinct from 'number'
         or jsonb_typeof(sv.aad_context -> 'secret_id') is distinct from 'string'
         or jsonb_typeof(sv.aad_context -> 'version') is distinct from 'number'
@@ -132,22 +130,8 @@ begin
     inner join public.secrets s
         on s.id = sv.secret_id
     where jsonb_typeof(sv.aad_context) = 'object'
-        and sv.aad_context ?& array[
-            'aad_version',
-            'secret_id',
-            'version',
-            'owner_user_id',
-            'classification',
-            'created_at'
-        ]
-        and sv.aad_context - array[
-            'aad_version',
-            'secret_id',
-            'version',
-            'owner_user_id',
-            'classification',
-            'created_at'
-        ] = '{}'::jsonb
+        and sv.aad_context ?& v_aad_keys
+        and sv.aad_context - v_aad_keys = '{}'::jsonb
         and (
             sv.aad_context ->> 'secret_id' <> sv.secret_id::text
             or sv.aad_context ->> 'version' <> sv.version::text
@@ -171,21 +155,11 @@ begin
             end
         );
 
+    -- audit_events shape invariants. The summary remains aggregate-only.
     select count(*)::integer
     into v_audit_action_invalid
     from public.audit_events ae
-    where ae.action not in (
-        'encrypt_create',
-        'encrypt_rotate',
-        'decrypt',
-        'version_purge',
-        'integrity_check',
-        'restore_test',
-        'auth_failure',
-        'key_rotation_start',
-        'key_rotation_reencrypt',
-        'key_rotation_complete'
-    );
+    where not (ae.action = any(v_audit_actions));
 
     select count(*)::integer
     into v_audit_result_invalid
@@ -208,6 +182,7 @@ begin
     where jsonb_typeof(ae.metadata_json) = 'object'
         and not public.audit_metadata_source_event_at_is_valid(ae.metadata_json);
 
+    -- Result assembly: fixed keys consumed by Rust audit metadata builders/tests.
     violation_summary := jsonb_build_object(
         'current_version_invalid', v_current_version_invalid,
         'version_invalid', v_version_invalid,
@@ -227,9 +202,6 @@ begin
         'audit_source_event_at_invalid', v_audit_source_event_at_invalid
     );
 
-    checked_secret_count := v_checked_secret_count;
-    checked_secret_version_count := v_checked_secret_version_count;
-    checked_audit_event_count := v_checked_audit_event_count;
     violation_count := v_current_version_invalid
         + v_version_invalid
         + v_retention_exceeded
@@ -251,59 +223,28 @@ begin
 end;
 $$;
 
+-- service_role is a BYPASSRLS runtime role. Keep writes and operational
+-- reads behind SECURITY DEFINER RPCs plus limited SELECT grants; do not restore
+-- direct audit_events table privileges to runtime roles.
 comment on function public.rpc_integrity_check() is
-    'Runs MVP integrity checks and returns aggregate violation counts only. Supabase の service_role ロールは BYPASSRLS 属性を持つ高権限ロールである。ただし mipsorcu runtime では direct DML に依存せず、rpc_write_secret_version / rpc_append_audit_event / rpc_sample_restore_test / rpc_integrity_check の EXECUTE 権限と、復号用の限定的 SELECT を中心に最小化して運用する。audit_events には service_role を含む runtime role の direct table privileges を付与しない。';
+    'Runs aggregate-only integrity checks without returning row identifiers or secret material.';
 
 comment on table public.audit_events is
-    'Append-only audit source of truth. Supabase の service_role ロールは BYPASSRLS 属性を持つ高権限ロールである。ただし mipsorcu runtime では direct DML に依存せず、rpc_write_secret_version / rpc_append_audit_event / rpc_sample_restore_test / rpc_integrity_check の EXECUTE 権限と、復号用の限定的 SELECT を中心に最小化して運用する。audit_events には service_role を含む runtime role の direct table privileges を付与しない。';
+    'Append-only audit source of truth. Runtime roles append through dedicated SECURITY DEFINER RPCs.';
 
 comment on policy audit_events_deny_all on public.audit_events is
-    'Restrictive deny-all policy for runtime roles. audit_events direct table privileges must not be granted to service_role or other runtime roles; append and operational reads stay behind dedicated SECURITY DEFINER RPCs.';
-
-comment on function public.rpc_write_secret_version(
-    uuid,
-    text,
-    uuid,
-    uuid,
-    text,
-    text,
-    timestamptz,
-    integer,
-    bytea,
-    bytea,
-    integer,
-    text,
-    bytea,
-    jsonb,
-    uuid,
-    jsonb
-) is
-    'Authoritative production write RPC for encrypt_create and encrypt_rotate. Supabase の service_role ロールは BYPASSRLS 属性を持つ高権限ロールである。ただし mipsorcu runtime では direct DML に依存せず、rpc_write_secret_version / rpc_append_audit_event / rpc_sample_restore_test / rpc_integrity_check の EXECUTE 権限と、復号用の限定的 SELECT を中心に最小化して運用する。audit_events には service_role を含む runtime role の direct table privileges を付与しない。';
-
-comment on function public.rpc_append_audit_event(
-    uuid,
-    uuid,
-    uuid,
-    text,
-    text,
-    uuid,
-    text,
-    integer,
-    jsonb
-) is
-    'Audit append RPC for non-write-path audit events and failure events. Supabase の service_role ロールは BYPASSRLS 属性を持つ高権限ロールである。ただし mipsorcu runtime では direct DML に依存せず、rpc_write_secret_version / rpc_append_audit_event / rpc_sample_restore_test / rpc_integrity_check の EXECUTE 権限と、復号用の限定的 SELECT を中心に最小化して運用する。audit_events には service_role を含む runtime role の direct table privileges を付与しない。';
+    'Restrictive deny-all policy for runtime roles; audit_events direct table access remains unavailable.';
 
 comment on function public.rpc_sample_restore_test(integer) is
-    'Returns current encrypted rows for restore verification. Supabase の service_role ロールは BYPASSRLS 属性を持つ高権限ロールである。ただし mipsorcu runtime では direct DML に依存せず、rpc_write_secret_version / rpc_append_audit_event / rpc_sample_restore_test / rpc_integrity_check の EXECUTE 権限と、復号用の限定的 SELECT を中心に最小化して運用する。audit_events には service_role を含む runtime role の direct table privileges を付与しない。';
+    'Returns current encrypted rows for restore verification without plaintext or key material.';
 
 revoke execute on function public.rpc_integrity_check() from public, anon, authenticated;
-revoke execute on function public.rpc_integrity_check() from public;
 
 grant execute on function public.rpc_integrity_check() to service_role;
 
--- ============================================================================
+
 -- Section 0950: ledger phase1 base schema and append RPC
--- ============================================================================
+
 
 -- Ledger Phase 1 SQL support.
 -- The audit_events table remains the primary audit record. ledger_entries adds
@@ -365,12 +306,16 @@ as $$
         'key_rotation_aborted',
         'ledger_verified',
         'ledger_verification_failed',
-        'audit_fallback_resent'
+        'audit_fallback_resent',
+        'monthly_digest',
+        'archive_exported',
+        -- Ledger Phase 2 §8 / ADR 0040: 外部 timestamping 取得完了
+        'digest_timestamped'
     );
 $$;
 
 comment on function public.ledger_entry_type_allowed(text)
-is 'Returns true for Ledger Phase 1 entry_type vocabulary only.';
+is 'Returns true for every ledger entry_type accepted by this compressed migration.';
 
 create or replace function public.ledger_payload_allowed_keys(p_entry_type text)
 returns text[]
@@ -432,12 +377,30 @@ as $$
             'failed_count',
             'resent_count'
         ]::text[]
+        when 'monthly_digest' then array[
+            'digest_hash',
+            'end_sequence_no',
+            'entry_count',
+            'start_sequence_no',
+            'target_year_month'
+        ]::text[]
+        when 'archive_exported' then array[
+            'archive_key',
+            'digest_hash',
+            'target_year_month'
+        ]::text[]
+        -- Ledger Phase 2 §8 / ADR 0040: digest_timestamped payload keys（アルファベット順）
+        when 'digest_timestamped' then array[
+            'digest_hash',
+            'target_year_month',
+            'timestamp_token_hash'
+        ]::text[]
         else null::text[]
     end;
 $$;
 
 comment on function public.ledger_payload_allowed_keys(text)
-is 'Returns top-level ledger payload keys allowed for a Ledger Phase 1 entry_type.';
+is 'Returns the allowlisted top-level ledger payload keys for an entry_type.';
 
 create or replace function public.ledger_payload_has_forbidden_key(p_payload jsonb)
 returns boolean
@@ -592,6 +555,7 @@ begin
             'checked_secret_count',
             'checked_secret_version_count',
             'duration_ms',
+            'entry_count',
             'failed_count',
             'failure_count',
             'processed_count',
@@ -643,6 +607,39 @@ begin
             if btrim(v_text) = '' or length(v_text) > 128 then
                 return false;
             end if;
+        -- Ledger Phase 2 T07: monthly_digest フィールド
+        -- Ledger Phase 2 T10: timestamp_token_hash も同じ 64 文字 hex 制約
+        elsif v_key in ('digest_hash', 'timestamp_token_hash') then
+            if jsonb_typeof(v_value) <> 'string' then
+                return false;
+            end if;
+
+            v_text := v_value #>> '{}';
+
+            if v_text !~ '^[0-9a-f]{64}$' then
+                return false;
+            end if;
+        elsif v_key = 'target_year_month' then
+            if jsonb_typeof(v_value) <> 'string' then
+                return false;
+            end if;
+
+            v_text := v_value #>> '{}';
+
+            if v_text !~ '^\d{4}-(0[1-9]|1[0-2])$' then
+                return false;
+            end if;
+        -- Ledger Phase 2 T08: archive_exported フィールド
+        elsif v_key = 'archive_key' then
+            if jsonb_typeof(v_value) <> 'string' then
+                return false;
+            end if;
+
+            v_text := v_value #>> '{}';
+
+            if btrim(v_text) = '' or length(v_text) > 128 then
+                return false;
+            end if;
         else
             return false;
         end if;
@@ -665,7 +662,7 @@ end;
 $$;
 
 comment on function public.ledger_payload_schema_is_valid(text, jsonb)
-is 'Validates type, length, vocabulary, and numeric range for Ledger Phase 1 payload fields.';
+is 'Validates ledger payload field types, allowed values, and numeric ranges for all supported entry types.';
 
 create or replace function public.ledger_payload_is_valid(
     p_entry_type text,
@@ -1274,9 +1271,9 @@ grant execute on function public.rpc_append_ledger_entry(
     integer
 ) to service_role;
 
--- ============================================================================
+
 -- Section 0960: ledger use-case integration RPCs
--- ============================================================================
+
 
 -- Ledger Phase 1 use-case integration helpers.
 -- audit_events remains the audit source of truth; these RPCs append ledger
@@ -1468,7 +1465,6 @@ comment on function public.rpc_append_audit_event_with_ledger(
     'Appends a non-write-path audit event and its signed Ledger Phase 1 entry in one transaction.';
 
 revoke execute on function public.rpc_append_ledger_entry_from_jsonb(jsonb) from public, anon, authenticated;
-revoke execute on function public.rpc_append_ledger_entry_from_jsonb(jsonb) from public;
 
 revoke execute on function public.rpc_append_audit_event_with_ledger(
     uuid,
@@ -1496,32 +1492,6 @@ revoke execute on function public.rpc_append_audit_event_with_ledger(
     text,
     integer
 ) from public, anon, authenticated;
-revoke execute on function public.rpc_append_audit_event_with_ledger(
-    uuid,
-    uuid,
-    uuid,
-    text,
-    text,
-    uuid,
-    text,
-    integer,
-    jsonb,
-    uuid,
-    bigint,
-    text,
-    text,
-    uuid,
-    uuid,
-    text,
-    jsonb,
-    integer,
-    bytea,
-    bytea,
-    text,
-    bytea,
-    text,
-    integer
-) from public;
 
 grant execute on function public.rpc_append_audit_event_with_ledger(
     uuid,
@@ -1550,9 +1520,9 @@ grant execute on function public.rpc_append_audit_event_with_ledger(
     integer
 ) to service_role;
 
--- ============================================================================
+
 -- Section 0970: key rotation ledger integration
--- ============================================================================
+
 
 -- Ledger Phase 1 key rotation integration.
 -- The key rotation RPCs remain the transactional boundary for DB mutation and
@@ -1883,15 +1853,6 @@ revoke execute on function public.rpc_apply_key_rotation_batch(
     text,
     jsonb
 ) from public, anon, authenticated;
-revoke execute on function public.rpc_apply_key_rotation_batch(
-    uuid,
-    integer,
-    integer,
-    jsonb,
-    uuid,
-    text,
-    jsonb
-) from public;
 
 revoke execute on function public.rpc_complete_key_rotation(
     uuid,
@@ -1901,14 +1862,6 @@ revoke execute on function public.rpc_complete_key_rotation(
     text,
     jsonb
 ) from public, anon, authenticated;
-revoke execute on function public.rpc_complete_key_rotation(
-    uuid,
-    integer,
-    integer,
-    uuid,
-    text,
-    jsonb
-) from public;
 
 grant execute on function public.rpc_apply_key_rotation_batch(
     uuid,
@@ -1928,9 +1881,9 @@ grant execute on function public.rpc_complete_key_rotation(
     jsonb
 ) to service_role;
 
--- ============================================================================
+
 -- Section 0980: auditor public boundary
--- ============================================================================
+
 
 -- Auditor role and public key registry
 
@@ -2062,7 +2015,6 @@ create policy ledger_signing_public_keys_select_service_role
     using (true);
 
 -- Auditor security-barrier views
-
 -- auditor_secret_inventory_view
 create or replace view public.auditor_secret_inventory_view
 with (security_barrier = true)
@@ -2145,7 +2097,6 @@ comment on view public.auditor_integrity_status_view
 is 'Auditor-facing global chain head state. security_barrier prevents leak via joins.';
 
 -- Auditor public-key management RPCs
-
 -- RPC: rpc_register_ledger_signing_public_key
 
 create or replace function public.rpc_register_ledger_signing_public_key(
@@ -2305,7 +2256,6 @@ comment on function public.rpc_retire_ledger_signing_public_key(integer)
 is 'Retires an active Ed25519 signing public key. Idempotent for already-retired keys.';
 
 -- Auditor verification and export RPCs
-
 -- RPC: rpc_verify_ledger_hash_chain
 
 create or replace function public.rpc_verify_ledger_hash_chain(
@@ -2740,10 +2690,8 @@ revoke all on public.auditor_integrity_status_view from service_role;
 -- Revoke service_role table-level DML on public key table (SELECT only)
 revoke insert, update, delete, truncate on public.ledger_signing_public_keys from service_role;
 
--- ============================================================================
--- Section 0990: audit metadata allowlist and write RPC integration
--- ============================================================================
 
+-- Section 0990: final audit metadata guards and write RPC integration
 -- T04 audit metadata validation.
 -- 時刻源と責務:
 -- - audit_events.occurred_at は DB 側で発生時刻として now() を記録する既存責務を維持する。
@@ -2751,8 +2699,7 @@ revoke insert, update, delete, truncate on public.ledger_signing_public_keys fro
 --   fallback / 再送 / sent マーカーでも同じ値を保持する。SQL 側は canonical UTC RFC3339（末尾 Z）
 --   であることを検証し、値を再生成しない。
 -- - secret_versions.created_at は SBC が決定した p_created_at を保存し、DB now() で置き換えない。
-
--- Audit metadata allowlist helpers
+-- Final audit metadata allowlist helpers
 
 create or replace function public.audit_metadata_allowlist_mode()
 returns text
@@ -2793,21 +2740,12 @@ begin
     -- ACTION_ALLOWLIST_START
     case p_action
         when 'encrypt_create', 'encrypt_rotate', 'version_purge' then
-            v_allowed_keys := array[
-                'version',
-                'secret_version_id',
-                'source_event_at'
-            ];
+            v_allowed_keys := array['version', 'secret_version_id', 'source_event_at'];
         when 'decrypt' then
             if p_result = 'failure' then
-                v_allowed_keys := array[
-                    'attempted_secret_id',
-                    'source_event_at'
-                ];
+                v_allowed_keys := array['attempted_secret_id', 'source_event_at'];
             else
-                v_allowed_keys := array[
-                    'source_event_at'
-                ];
+                v_allowed_keys := array['source_event_at'];
             end if;
         when 'integrity_check' then
             v_allowed_keys := array[
@@ -2852,16 +2790,9 @@ begin
                 'source_event_at'
             ];
         when 'auth_failure' then
-            v_allowed_keys := array[
-                'error_code',
-                'source_event_at'
-            ];
+            v_allowed_keys := array['error_code', 'source_event_at'];
         when 'key_rotation_start' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'source_event_at'
-            ];
+            v_allowed_keys := array['old_key_version', 'new_key_version', 'source_event_at'];
         when 'key_rotation_reencrypt' then
             v_allowed_keys := array[
                 'old_key_version',
@@ -2878,29 +2809,58 @@ begin
                 'remaining_count',
                 'source_event_at'
             ];
+        when 'monthly_digest_generate', 'monthly_digest_verify' then
+            v_allowed_keys := array['error_code', 'target_year_month', 'source_event_at'];
+        when 'archive_export' then
+            v_allowed_keys := array[
+                'archive_key',
+                'digest_hash',
+                'target_year_month',
+                'error_code',
+                'source_event_at'
+            ];
+        when 'digest_timestamping' then
+            v_allowed_keys := array[
+                'digest_hash',
+                'timestamp_token_hash',
+                'target_year_month',
+                'error_code',
+                'source_event_at'
+            ];
+        when 'siem_forward_failure' then
+            v_allowed_keys := array[
+                'error_code',
+                'event_type',
+                'event_count',
+                'source_event_at'
+            ];
+        when 'audit_report_generate' then
+            v_allowed_keys := array[
+                'error_code',
+                'format',
+                'period_end',
+                'period_start',
+                'source_event_at'
+            ];
         else
-            -- 未知action: fail-closed
             return true;
     end case;
     -- ACTION_ALLOWLIST_END
 
-    -- トップレベルキー検証
     for v_key in select jsonb_object_keys(p_metadata_json)
     loop
-        if not v_key = any(v_allowed_keys) then
+        if not (v_key = any(v_allowed_keys)) then
             return true;
         end if;
     end loop;
 
-    -- violation_summary サブオブジェクトキー検証
-    if p_action = 'integrity_check' and p_metadata_json ? 'violation_summary' then
-        if jsonb_typeof(p_metadata_json -> 'violation_summary') <> 'object' then
-            return true;
-        end if;
-
+    if p_action = 'integrity_check'
+        and p_metadata_json ? 'violation_summary'
+        and jsonb_typeof(p_metadata_json -> 'violation_summary') = 'object'
+    then
         for v_key in select jsonb_object_keys(p_metadata_json -> 'violation_summary')
         loop
-            if not v_key = any(v_violation_summary_keys) then
+            if not (v_key = any(v_violation_summary_keys)) then
                 return true;
             end if;
         end loop;
@@ -2911,7 +2871,7 @@ end;
 $$;
 
 comment on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb) is
-    'Returns true if metadata_json contains keys not in the allowlist for the given action and result. Enforces the action-specific schema from docs/audit_metadata_schema.md. Coexists with audit_metadata_has_forbidden_key as defense-in-depth.';
+    'Returns true when audit metadata contains a top-level or integrity summary key outside the action allowlist.';
 
 create or replace function public.audit_metadata_has_missing_required_key_for_action(
     p_action text,
@@ -2967,12 +2927,7 @@ begin
                 'audit_source_event_at_invalid'
             ];
         when 'restore_test' then
-            v_required_keys := array[
-                'phase',
-                'sample_count',
-                'trigger',
-                'duration_ms'
-            ];
+            v_required_keys := array['phase', 'sample_count', 'trigger', 'duration_ms'];
         when 'auth_failure' then
             v_required_keys := array['error_code'];
         when 'key_rotation_start' then
@@ -2986,11 +2941,15 @@ begin
                 'remaining_count'
             ];
         when 'key_rotation_complete' then
-            v_required_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'remaining_count'
-            ];
+            v_required_keys := array['old_key_version', 'new_key_version', 'remaining_count'];
+        when 'monthly_digest_generate', 'monthly_digest_verify' then
+            v_required_keys := array[]::text[];
+        when 'archive_export', 'digest_timestamping' then
+            v_required_keys := array['target_year_month'];
+        when 'siem_forward_failure' then
+            v_required_keys := array['error_code'];
+        when 'audit_report_generate' then
+            v_required_keys := array['format', 'period_end', 'period_start'];
         else
             return true;
     end case;
@@ -3007,6 +2966,7 @@ begin
         if jsonb_typeof(p_metadata_json -> 'violation_summary') <> 'object' then
             return true;
         end if;
+
         if not ((p_metadata_json -> 'violation_summary') ?& v_summary_required_keys) then
             return true;
         end if;
@@ -3017,12 +2977,12 @@ end;
 $$;
 
 comment on function public.audit_metadata_has_missing_required_key_for_action(text, text, jsonb, boolean) is
-    'Returns true if metadata_json is missing action-specific required keys. The require_source_event_at flag distinguishes append-audit RPCs (producer time required) from write RPC internal success audit metadata (producer time optional unless ledger-linked).';
+    'Returns true when audit metadata is missing keys required for the action/result pair.';
 
--- ------------------------------------------------------------------------------
+
 -- 値型検証: count/duration 系, version/key_version 系, violation_summary values,
 -- trigger の enum 制約を検証する。
--- ------------------------------------------------------------------------------
+
 create or replace function public.audit_metadata_has_invalid_value_for_action(
     p_action text,
     p_result text,
@@ -3214,11 +3174,9 @@ comment on function public.audit_metadata_has_schema_violation_for_action(text, 
     'Action-specific audit metadata schema validation wrapper. In warning mode callers log violations only; in strict mode callers reject them as invalid_rpc_input.';
 
 -- Audit append and write RPC integration
-
--- ------------------------------------------------------------------------------
 -- RPC: rpc_append_audit_event
 -- allowlist チェックを追加。denylist・source_event_at 検証と共存。
--- ------------------------------------------------------------------------------
+
 create or replace function public.rpc_append_audit_event(
     p_audit_event_id uuid,
     p_request_id uuid,
@@ -3258,7 +3216,13 @@ begin
         'auth_failure',
         'key_rotation_start',
         'key_rotation_reencrypt',
-        'key_rotation_complete'
+        'key_rotation_complete',
+        'monthly_digest_generate',
+        'monthly_digest_verify',
+        'archive_export',
+        'digest_timestamping',
+        'siem_forward_failure',
+        'audit_report_generate'
     ) then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
@@ -3273,7 +3237,13 @@ begin
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
-    if p_action = 'auth_failure' and p_result <> 'failure' then
+    if p_action in ('auth_failure', 'siem_forward_failure') and p_result <> 'failure' then
+        raise exception 'invalid_rpc_input' using errcode = '22023';
+    end if;
+
+    if p_action in ('monthly_digest_generate', 'monthly_digest_verify')
+        and p_result <> 'failure'
+    then
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
@@ -3306,7 +3276,6 @@ begin
         raise exception 'invalid_rpc_input' using errcode = '22023';
     end if;
 
-    -- allowlist / schema validation (段階的移行対応)
     v_allowlist_mode := public.audit_metadata_allowlist_mode();
 
     if public.audit_metadata_has_schema_violation_for_action(p_action, p_result, p_metadata_json, true) then
@@ -3370,12 +3339,11 @@ $$;
 comment on function public.rpc_append_audit_event(
     uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
 ) is
-    'Audit append RPC for non-write-path audit events and failure events. Added allowlist validation (Phase 2). Caller supplies a stable audit_event_id so fallback resend remains idempotent.';
+    'Appends non-write-path and failure audit events through the audit_events SECURITY DEFINER boundary.';
 
--- ------------------------------------------------------------------------------
 -- RPC: rpc_write_secret_version
 -- 内部生成の audit metadata に対して allowlist 検証を追加
--- ------------------------------------------------------------------------------
+
 create or replace function public.rpc_write_secret_version(
     p_request_id uuid,
     p_action text,
@@ -3868,23 +3836,17 @@ comment on function public.rpc_write_secret_version(
 ) is
     'Authoritative production write RPC for encrypt_create and encrypt_rotate. Added allowlist validation for internally-generated audit metadata (Phase 2). Inserts the version, advances current_version_id, appends success audit events, and purges versions beyond retention in one transaction.';
 
--- ------------------------------------------------------------------------------
 -- 権限設定
--- ------------------------------------------------------------------------------
+
 revoke execute on function public.audit_metadata_allowlist_mode() from public, anon, authenticated;
-revoke execute on function public.audit_metadata_allowlist_mode() from public;
 
 revoke execute on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb) from public, anon, authenticated;
-revoke execute on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb) from public;
 
 revoke execute on function public.audit_metadata_has_missing_required_key_for_action(text, text, jsonb, boolean) from public, anon, authenticated;
-revoke execute on function public.audit_metadata_has_missing_required_key_for_action(text, text, jsonb, boolean) from public;
 
 revoke execute on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) from public, anon, authenticated;
-revoke execute on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) from public;
 
 revoke execute on function public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean) from public, anon, authenticated;
-revoke execute on function public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean) from public;
 
 grant execute on function public.audit_metadata_allowlist_mode() to service_role;
 grant execute on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb) to service_role;
@@ -3895,9 +3857,6 @@ grant execute on function public.audit_metadata_has_schema_violation_for_action(
 revoke execute on function public.rpc_append_audit_event(
     uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
 ) from public, anon, authenticated;
-revoke execute on function public.rpc_append_audit_event(
-    uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
-) from public;
 
 grant execute on function public.rpc_append_audit_event(
     uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
@@ -3907,147 +3866,21 @@ revoke execute on function public.rpc_write_secret_version(
     uuid, text, uuid, uuid, text, text, timestamptz,
     integer, bytea, bytea, integer, text, bytea, jsonb, uuid, jsonb
 ) from public, anon, authenticated;
-revoke execute on function public.rpc_write_secret_version(
-    uuid, text, uuid, uuid, text, text, timestamptz,
-    integer, bytea, bytea, integer, text, bytea, jsonb, uuid, jsonb
-) from public;
 
 grant execute on function public.rpc_write_secret_version(
     uuid, text, uuid, uuid, text, text, timestamptz,
     integer, bytea, bytea, integer, text, bytea, jsonb, uuid, jsonb
 ) to service_role;
 
--- ============================================================================
--- Section 0995: monthly digest action extensions
--- ============================================================================
 
--- Ledger Phase 2: 月次 digest サポート（ADR 0037）。
---
--- 変更内容:
--- 1. ledger_entry_type_allowed: 'monthly_digest' を追加
--- 2. ledger_payload_allowed_keys: 'monthly_digest' payload keys を追加
--- 3. ledger_payload_schema_is_valid: 'monthly_digest' フィールド検証を追加
--- 4. audit_metadata_has_unknown_key_for_action: 'monthly_digest_generate' action を追加
--- 5. rpc_fetch_ledger_range_for_month: 指定年月の ledger range 取得 RPC
--- 6. rpc_check_monthly_digest_exists: 同一年月 digest 重複確認 RPC
---
+-- Section 0995: monthly digest support RPCs
+-- Ledger Phase 2 monthly digest support (ADR 0037).
+-- Final ledger payload and audit metadata allowlists are defined once in the
+-- earlier final-state helper sections. This section keeps the unique digest
+-- validators and read-only RPCs.
 -- 信頼境界: 非秘密メタデータのみを扱う。平文・鍵・JWT を含まない。
--- ADR 参照: docs/adr/0037-adr-monthly-digest-canonical-form.md
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 1. ledger_entry_type_allowed: 'monthly_digest' を追加
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_entry_type_allowed(p_entry_type text)
-returns boolean
-language sql
-stable
-set search_path = public, pg_temp
-as $$
-    select p_entry_type in (
-        'secret_created',
-        'secret_version_created',
-        'secret_decrypted',
-        'secret_version_purged',
-        'integrity_check_completed',
-        'restore_test_completed',
-        'key_rotation_started',
-        'key_rotation_reencrypted',
-        'key_rotation_completed',
-        'key_rotation_aborted',
-        'ledger_verified',
-        'ledger_verification_failed',
-        'audit_fallback_resent',
-        'monthly_digest'
-    );
-$$;
-
-comment on function public.ledger_entry_type_allowed(text)
-is 'Returns true for all allowed ledger entry_type values (Phase 1 + monthly_digest from Phase 2 T06).';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 2. ledger_payload_allowed_keys: 'monthly_digest' payload keys を追加
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_payload_allowed_keys(p_entry_type text)
-returns text[]
-language sql
-stable
-set search_path = public, pg_temp
-as $$
-    select case p_entry_type
-        when 'secret_created' then array['algorithm', 'classification', 'key_version', 'version']::text[]
-        when 'secret_version_created' then array['algorithm', 'classification', 'key_version', 'version']::text[]
-        when 'secret_decrypted' then array['algorithm', 'key_version', 'version']::text[]
-        when 'secret_version_purged' then array['key_version', 'retention_limit', 'version']::text[]
-        when 'integrity_check_completed' then array[
-            'checked_audit_event_count',
-            'checked_secret_count',
-            'checked_secret_version_count',
-            'duration_ms',
-            'violation_count'
-        ]::text[]
-        when 'restore_test_completed' then array[
-            'duration_ms',
-            'failure_count',
-            'sample_count',
-            'success_count',
-            'trigger'
-        ]::text[]
-        when 'key_rotation_started' then array['new_key_version', 'old_key_version']::text[]
-        when 'key_rotation_reencrypted' then array[
-            'batch_size',
-            'new_key_version',
-            'old_key_version',
-            'processed_count',
-            'remaining_count'
-        ]::text[]
-        when 'key_rotation_completed' then array[
-            'new_key_version',
-            'old_key_version',
-            'remaining_count'
-        ]::text[]
-        when 'key_rotation_aborted' then array[
-            'new_key_version',
-            'old_key_version',
-            'reason_code'
-        ]::text[]
-        when 'ledger_verified' then array[
-            'checked_count',
-            'duration_ms',
-            'end_sequence_no',
-            'start_sequence_no'
-        ]::text[]
-        when 'ledger_verification_failed' then array[
-            'end_sequence_no',
-            'error_code',
-            'failed_count',
-            'start_sequence_no'
-        ]::text[]
-        when 'audit_fallback_resent' then array[
-            'duration_ms',
-            'failed_count',
-            'resent_count'
-        ]::text[]
-        -- ADR 0037: monthly_digest payload keys（アルファベット順）
-        when 'monthly_digest' then array[
-            'digest_hash',
-            'end_sequence_no',
-            'entry_count',
-            'start_sequence_no',
-            'target_year_month'
-        ]::text[]
-        else null::text[]
-    end;
-$$;
-
-comment on function public.ledger_payload_allowed_keys(text)
-is 'Returns top-level ledger payload keys allowed for a given entry_type. Updated in T06 to include monthly_digest.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 3. ledger_payload_schema_is_valid: monthly_digest フィールド検証を追加
---    Phase 1 の validate_ 関数を完全に置き換え。
--- ─────────────────────────────────────────────────────────────────────────────
+-- Monthly digest value helpers
 
 create or replace function public.ledger_monthly_digest_target_year_month_is_valid(p_value text)
 returns boolean
@@ -4073,165 +3906,7 @@ $$;
 comment on function public.ledger_monthly_digest_hash_is_valid(text)
 is 'Validates that a digest_hash value is a 64-character lowercase hex string (SHA-256).';
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 4. audit_metadata_has_unknown_key_for_action: monthly_digest_generate を追加
---    ACTION_ALLOWLIST_START と ACTION_ALLOWLIST_END の間に全 action を含む。
---    parity test と Rust 側 AuditMetadata::validate_allowlist_for_action が同期対象。
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.audit_metadata_has_unknown_key_for_action(
-    p_action text,
-    p_result text,
-    p_metadata_json jsonb
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_key text;
-    v_allowed_keys text[];
-    v_violation_summary_keys text[];
-begin
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        return true;
-    end if;
-
-    -- ACTION_ALLOWLIST_START
-    case p_action
-        when 'encrypt_create', 'encrypt_rotate', 'version_purge' then
-            v_allowed_keys := array[
-                'version',
-                'secret_version_id',
-                'source_event_at'
-            ];
-        when 'decrypt' then
-            if p_result = 'failure' then
-                v_allowed_keys := array[
-                    'attempted_secret_id',
-                    'source_event_at'
-                ];
-            else
-                v_allowed_keys := array[
-                    'source_event_at'
-                ];
-            end if;
-        when 'integrity_check' then
-            v_allowed_keys := array[
-                'check_name',
-                'checked_secret_count',
-                'checked_secret_version_count',
-                'checked_audit_event_count',
-                'duration_ms',
-                'violation_count',
-                'violation_summary',
-                'trigger',
-                'error_code',
-                'source_event_at'
-            ];
-            v_violation_summary_keys := array[
-                'current_version_invalid',
-                'version_invalid',
-                'retention_exceeded',
-                'ciphertext_empty',
-                'encrypted_data_key_empty',
-                'nonce_length_invalid',
-                'algorithm_invalid',
-                'nonce_duplicate',
-                'aad_keys_invalid',
-                'aad_row_mismatch',
-                'created_at_mismatch',
-                'audit_action_invalid',
-                'audit_result_invalid',
-                'audit_metadata_not_object',
-                'audit_metadata_forbidden_key',
-                'audit_source_event_at_invalid'
-            ];
-        when 'restore_test' then
-            v_allowed_keys := array[
-                'phase',
-                'sample_count',
-                'trigger',
-                'duration_ms',
-                'error_code',
-                'failed_version',
-                'reason',
-                'source_event_at'
-            ];
-        when 'auth_failure' then
-            v_allowed_keys := array[
-                'error_code',
-                'source_event_at'
-            ];
-        when 'key_rotation_start' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'source_event_at'
-            ];
-        when 'key_rotation_reencrypt' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'batch_size',
-                'processed_count',
-                'remaining_count',
-                'source_event_at'
-            ];
-        when 'key_rotation_complete' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'remaining_count',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T06: 月次 digest 生成失敗の監査記録
-        when 'monthly_digest_generate' then
-            v_allowed_keys := array[
-                'error_code',
-                'target_year_month',
-                'source_event_at'
-            ];
-        else
-            -- 未知の action は拒否
-            return true;
-    end case;
-    -- ACTION_ALLOWLIST_END
-
-    -- トップレベルキーの allowlist チェック
-    for v_key in
-        select jsonb_object_keys(p_metadata_json)
-    loop
-        if not (v_key = any(v_allowed_keys)) then
-            return true;
-        end if;
-    end loop;
-
-    -- integrity_check の violation_summary サブオブジェクトを検証
-    if p_action = 'integrity_check'
-        and p_metadata_json ? 'violation_summary'
-        and jsonb_typeof(p_metadata_json -> 'violation_summary') = 'object'
-    then
-        for v_key in
-            select jsonb_object_keys(p_metadata_json -> 'violation_summary')
-        loop
-            if not (v_key = any(v_violation_summary_keys)) then
-                return true;
-            end if;
-        end loop;
-    end if;
-
-    return false;
-end;
-$$;
-
-comment on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb)
-is 'Returns true when audit metadata contains a key outside the allowlist for the given action. Updated in T06 to include monthly_digest_generate action.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 5. rpc_fetch_ledger_range_for_month: 指定年月の ledger range 取得
--- ─────────────────────────────────────────────────────────────────────────────
+-- Monthly digest range lookup
 
 create or replace function public.rpc_fetch_ledger_range_for_month(
     p_year_month text
@@ -4277,7 +3952,7 @@ begin
     into v_min_seq, v_max_seq, v_count
     from ledger_entries le
     where (le.source_event_at)::timestamptz >= v_month_start
-      and (le.source_event_at)::timestamptz <  v_month_end;
+        and (le.source_event_at)::timestamptz <  v_month_end;
 
     -- エントリが存在しない場合は行を返さない
     if v_min_seq is null or v_count = 0 then
@@ -4308,9 +3983,7 @@ $$;
 comment on function public.rpc_fetch_ledger_range_for_month(text)
 is 'Returns the ledger_entries range (start/end sequence, hashes, count) for the given YYYY-MM period. Returns no row if no entries exist for that month. T06.';
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 6. rpc_check_monthly_digest_exists: 同一年月 digest 重複確認
--- ─────────────────────────────────────────────────────────────────────────────
+-- Monthly digest duplicate check
 
 create or replace function public.rpc_check_monthly_digest_exists(
     p_year_month text
@@ -4338,9 +4011,7 @@ $$;
 comment on function public.rpc_check_monthly_digest_exists(text)
 is 'Returns {exists: true} if a monthly_digest ledger entry already exists for the given YYYY-MM period. Used for duplicate prevention (T06).';
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 7. GRANT: service_role に新 RPC の EXECUTE 権限を付与
--- ─────────────────────────────────────────────────────────────────────────────
+-- Monthly digest privileges
 
 grant execute on function public.rpc_fetch_ledger_range_for_month(text)
     to service_role;
@@ -4354,530 +4025,12 @@ grant execute on function public.ledger_monthly_digest_target_year_month_is_vali
 grant execute on function public.ledger_monthly_digest_hash_is_valid(text)
     to service_role;
 
--- ============================================================================
--- Section 0996: digest verification action extensions
--- ============================================================================
 
--- Ledger Phase 2: 月次 digest 検証サポート（ADR 0037 §7.4）。
---
--- 変更内容:
--- 0. ledger_payload_schema_is_valid: monthly_digest フィールドを追加（T06 バグ修正）
--- 1. rpc_append_audit_event: monthly_digest_generate（T06 バグ修正）と
---    monthly_digest_verify を action allowlist に追加
--- 2. audit_metadata_has_unknown_key_for_action: monthly_digest_verify case を追加
--- 3. rpc_fetch_monthly_digest_for_verification: 検証用 RPC を追加
---
--- 信頼境界: 非秘密メタデータ（digest fields, hashes, public key）のみを扱う。
+-- Section 0996: digest verification RPC
+-- Ledger Phase 2 monthly digest verification support (ADR 0037 section 7.4).
+-- Final action and payload allowlists are defined once in the earlier helper
+-- sections. This read-only RPC returns public verification material only.
 -- 平文・マスターキー・データキー・JWT を含まない。
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 0. ledger_payload_schema_is_valid: monthly_digest フィールドを追加（T06 バグ修正）
---    T06 で entry_count / digest_hash / target_year_month が schema validator に
---    追加されていなかったため、monthly_digest エントリの挿入が
---    ledger_entries_payload_valid 制約で拒否される問題を修正する。
---    Phase 1 の validate_ 関数を or replace で更新する。
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_payload_schema_is_valid(
-    p_entry_type text,
-    p_payload jsonb
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_key text;
-    v_value jsonb;
-    v_text text;
-    v_integer bigint;
-    v_old_key_version bigint;
-    v_new_key_version bigint;
-begin
-    if p_payload is null or jsonb_typeof(p_payload) <> 'object' then
-        return false;
-    end if;
-
-    if not public.ledger_entry_type_allowed(p_entry_type) then
-        return false;
-    end if;
-
-    if public.ledger_payload_has_unknown_key(p_entry_type, p_payload) then
-        return false;
-    end if;
-
-    if exists (
-        select 1
-        from jsonb_each(p_payload) as fields(key, value)
-        where jsonb_typeof(fields.value) in ('object', 'array')
-    ) then
-        return false;
-    end if;
-
-    for v_key, v_value in
-        select fields.key, fields.value
-        from jsonb_each(p_payload) as fields(key, value)
-    loop
-        if v_key in (
-            'version',
-            'key_version',
-            'old_key_version',
-            'new_key_version',
-            'retention_limit',
-            'start_sequence_no',
-            'end_sequence_no'
-        ) then
-            if jsonb_typeof(v_value) <> 'number' or (v_value #>> '{}') !~ '^[0-9]+$' then
-                return false;
-            end if;
-
-            v_integer := (v_value #>> '{}')::bigint;
-
-            if v_integer <= 0 then
-                return false;
-            end if;
-
-            if v_key = 'retention_limit' and v_integer <> 4 then
-                return false;
-            end if;
-        elsif v_key in (
-            'batch_size',
-            'checked_audit_event_count',
-            'checked_count',
-            'checked_secret_count',
-            'checked_secret_version_count',
-            'duration_ms',
-            'entry_count',
-            'failed_count',
-            'failure_count',
-            'processed_count',
-            'remaining_count',
-            'resent_count',
-            'sample_count',
-            'success_count',
-            'violation_count'
-        ) then
-            if jsonb_typeof(v_value) <> 'number' or (v_value #>> '{}') !~ '^[0-9]+$' then
-                return false;
-            end if;
-
-            v_integer := (v_value #>> '{}')::bigint;
-
-            if v_integer < 0 then
-                return false;
-            end if;
-        elsif v_key = 'algorithm' then
-            if jsonb_typeof(v_value) <> 'string' or v_value #>> '{}' <> 'xchacha20-poly1305' then
-                return false;
-            end if;
-        elsif v_key = 'classification' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if btrim(v_text) = '' or length(v_text) > 128 then
-                return false;
-            end if;
-        elsif v_key = 'trigger' then
-            if jsonb_typeof(v_value) <> 'string' or (v_value #>> '{}') not in (
-                'background',
-                'cli',
-                'scheduled',
-                'startup'
-            ) then
-                return false;
-            end if;
-        elsif v_key in ('error_code', 'reason_code') then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if btrim(v_text) = '' or length(v_text) > 128 then
-                return false;
-            end if;
-        -- Ledger Phase 2 T07 (T06 fix): monthly_digest フィールド
-        elsif v_key = 'digest_hash' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if v_text !~ '^[0-9a-f]{64}$' then
-                return false;
-            end if;
-        elsif v_key = 'target_year_month' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if v_text !~ '^\d{4}-(0[1-9]|1[0-2])$' then
-                return false;
-            end if;
-        else
-            return false;
-        end if;
-    end loop;
-
-    if p_payload ? 'old_key_version' and p_payload ? 'new_key_version' then
-        v_old_key_version := (p_payload ->> 'old_key_version')::bigint;
-        v_new_key_version := (p_payload ->> 'new_key_version')::bigint;
-
-        if v_old_key_version = v_new_key_version then
-            return false;
-        end if;
-    end if;
-
-    return true;
-exception
-    when numeric_value_out_of_range then
-        return false;
-end;
-$$;
-
-comment on function public.ledger_payload_schema_is_valid(text, jsonb)
-is 'Validates type, length, vocabulary, and numeric range for ledger payload fields. Updated in T07 to add monthly_digest keys (entry_count, digest_hash, target_year_month).';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 1. rpc_append_audit_event: monthly_digest_generate / monthly_digest_verify 追加
---    T06 で monthly_digest_generate が漏れていたバグを同時に修正する。
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.rpc_append_audit_event(
-    p_audit_event_id uuid,
-    p_request_id uuid,
-    p_actor_user_id uuid default null,
-    p_actor_device_id text default null,
-    p_action text default null,
-    p_target_secret_id uuid default null,
-    p_result text default null,
-    p_key_version integer default null,
-    p_metadata_json jsonb default '{}'::jsonb
-)
-returns uuid
-language plpgsql
-security definer
-set search_path = public, pg_temp
-as $$
-declare
-    v_existing_audit_event record;
-    v_allowlist_mode text;
-begin
-    if p_audit_event_id is null
-        or p_request_id is null
-        or p_action is null
-        or p_result is null
-        or p_metadata_json is null
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action not in (
-        'encrypt_create',
-        'encrypt_rotate',
-        'decrypt',
-        'version_purge',
-        'integrity_check',
-        'restore_test',
-        'auth_failure',
-        'key_rotation_start',
-        'key_rotation_reencrypt',
-        'key_rotation_complete',
-        'monthly_digest_generate',
-        'monthly_digest_verify'
-    ) then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_result not in ('success', 'failure') then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_result = 'success'
-        and p_action in ('encrypt_create', 'encrypt_rotate', 'version_purge')
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action = 'auth_failure' and p_result <> 'failure' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action in ('monthly_digest_generate', 'monthly_digest_verify')
-        and p_result <> 'failure'
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action = 'auth_failure'
-        and (
-            p_actor_user_id is not null
-            or p_actor_device_id is not null
-            or p_target_secret_id is not null
-            or p_key_version is not null
-        )
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_actor_device_id is not null and btrim(p_actor_device_id) = '' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_key_version is not null and p_key_version <= 0 then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if public.audit_metadata_has_forbidden_key(p_metadata_json)
-        or not public.audit_metadata_source_event_at_is_valid(p_metadata_json)
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    -- allowlist / schema validation (段階的移行対応)
-    v_allowlist_mode := public.audit_metadata_allowlist_mode();
-
-    if public.audit_metadata_has_schema_violation_for_action(p_action, p_result, p_metadata_json, true) then
-        if v_allowlist_mode = 'strict' then
-            raise exception 'invalid_rpc_input' using errcode = '22023';
-        else
-            raise notice 'audit_metadata_schema_warning: action=%, result=%, schema_violation_present',
-                p_action, p_result;
-        end if;
-    end if;
-
-    insert into public.audit_events (
-        id,
-        request_id,
-        actor_user_id,
-        actor_device_id,
-        action,
-        target_secret_id,
-        result,
-        key_version,
-        metadata_json
-    )
-    values (
-        p_audit_event_id,
-        p_request_id,
-        p_actor_user_id,
-        p_actor_device_id,
-        p_action,
-        p_target_secret_id,
-        p_result,
-        p_key_version,
-        p_metadata_json
-    )
-    on conflict (id) do nothing;
-
-    select *
-    into v_existing_audit_event
-    from public.audit_events ae
-    where ae.id = p_audit_event_id;
-
-    if not found then
-        raise exception 'audit_event_id_conflict' using errcode = '23505';
-    end if;
-
-    if v_existing_audit_event.request_id <> p_request_id
-        or v_existing_audit_event.actor_user_id is distinct from p_actor_user_id
-        or v_existing_audit_event.actor_device_id is distinct from p_actor_device_id
-        or v_existing_audit_event.action <> p_action
-        or v_existing_audit_event.target_secret_id is distinct from p_target_secret_id
-        or v_existing_audit_event.result <> p_result
-        or v_existing_audit_event.key_version is distinct from p_key_version
-        or v_existing_audit_event.metadata_json <> p_metadata_json
-    then
-        raise exception 'audit_event_id_conflict' using errcode = '23505';
-    end if;
-
-    return p_audit_event_id;
-end;
-$$;
-
-comment on function public.rpc_append_audit_event(
-    uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
-) is
-    'Audit append RPC for non-write-path audit events and failure events. Updated in T07 to add monthly_digest_generate (T06 fix) and monthly_digest_verify.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 2. audit_metadata_has_unknown_key_for_action: monthly_digest_verify case 追加
---    ACTION_ALLOWLIST_START / END マーカーを維持したまま追加する。
---    parity test と Rust 側 AuditMetadata::validate_allowlist_for_action が同期対象。
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.audit_metadata_has_unknown_key_for_action(
-    p_action text,
-    p_result text,
-    p_metadata_json jsonb
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_key text;
-    v_allowed_keys text[];
-    v_violation_summary_keys text[];
-begin
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        return true;
-    end if;
-
-    -- ACTION_ALLOWLIST_START
-    case p_action
-        when 'encrypt_create', 'encrypt_rotate', 'version_purge' then
-            v_allowed_keys := array[
-                'version',
-                'secret_version_id',
-                'source_event_at'
-            ];
-        when 'decrypt' then
-            if p_result = 'failure' then
-                v_allowed_keys := array[
-                    'attempted_secret_id',
-                    'source_event_at'
-                ];
-            else
-                v_allowed_keys := array[
-                    'source_event_at'
-                ];
-            end if;
-        when 'integrity_check' then
-            v_allowed_keys := array[
-                'check_name',
-                'checked_secret_count',
-                'checked_secret_version_count',
-                'checked_audit_event_count',
-                'duration_ms',
-                'violation_count',
-                'violation_summary',
-                'trigger',
-                'error_code',
-                'source_event_at'
-            ];
-            v_violation_summary_keys := array[
-                'current_version_invalid',
-                'version_invalid',
-                'retention_exceeded',
-                'ciphertext_empty',
-                'encrypted_data_key_empty',
-                'nonce_length_invalid',
-                'algorithm_invalid',
-                'nonce_duplicate',
-                'aad_keys_invalid',
-                'aad_row_mismatch',
-                'created_at_mismatch',
-                'audit_action_invalid',
-                'audit_result_invalid',
-                'audit_metadata_not_object',
-                'audit_metadata_forbidden_key',
-                'audit_source_event_at_invalid'
-            ];
-        when 'restore_test' then
-            v_allowed_keys := array[
-                'phase',
-                'sample_count',
-                'trigger',
-                'duration_ms',
-                'error_code',
-                'failed_version',
-                'reason',
-                'source_event_at'
-            ];
-        when 'auth_failure' then
-            v_allowed_keys := array[
-                'error_code',
-                'source_event_at'
-            ];
-        when 'key_rotation_start' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'source_event_at'
-            ];
-        when 'key_rotation_reencrypt' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'batch_size',
-                'processed_count',
-                'remaining_count',
-                'source_event_at'
-            ];
-        when 'key_rotation_complete' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'remaining_count',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T06: 月次 digest 生成失敗の監査記録
-        when 'monthly_digest_generate' then
-            v_allowed_keys := array[
-                'error_code',
-                'target_year_month',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T07: 月次 digest 検証失敗の監査記録
-        when 'monthly_digest_verify' then
-            v_allowed_keys := array[
-                'error_code',
-                'target_year_month',
-                'source_event_at'
-            ];
-        else
-            -- 未知の action は拒否
-            return true;
-    end case;
-    -- ACTION_ALLOWLIST_END
-
-    -- トップレベルキーの allowlist チェック
-    for v_key in
-        select jsonb_object_keys(p_metadata_json)
-    loop
-        if not (v_key = any(v_allowed_keys)) then
-            return true;
-        end if;
-    end loop;
-
-    -- integrity_check の violation_summary サブオブジェクトを検証
-    if p_action = 'integrity_check'
-        and p_metadata_json ? 'violation_summary'
-        and jsonb_typeof(p_metadata_json -> 'violation_summary') = 'object'
-    then
-        for v_key in
-            select jsonb_object_keys(p_metadata_json -> 'violation_summary')
-        loop
-            if not (v_key = any(v_violation_summary_keys)) then
-                return true;
-            end if;
-        end loop;
-    end if;
-
-    return false;
-end;
-$$;
-
-comment on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb)
-is 'Returns true when audit metadata contains a key outside the allowlist for the given action. Updated in T07 to include monthly_digest_verify (and T06 monthly_digest_generate remains).';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 3. rpc_fetch_monthly_digest_for_verification: 検証用 digest 情報取得 RPC
---    SECURITY DEFINER / read-only / set search_path = public, pg_temp
--- ─────────────────────────────────────────────────────────────────────────────
 
 create or replace function public.rpc_fetch_monthly_digest_for_verification(
     p_year_month text
@@ -4939,1357 +4092,16 @@ grant execute on function public.rpc_fetch_monthly_digest_for_verification(text)
 revoke execute on function public.rpc_fetch_monthly_digest_for_verification(text)
     from anon, authenticated, public;
 
--- ============================================================================
--- Section 0997: archive exported action extensions
--- ============================================================================
 
--- Ledger Phase 2: 外部アーカイブ export サポート（§6）。
---
--- 変更内容:
--- 1. ledger_entry_type_allowed: 'archive_exported' を追加
--- 2. ledger_payload_allowed_keys: 'archive_exported' payload keys を追加
--- 3. ledger_payload_schema_is_valid: 'archive_key' フィールド検証を追加
--- 4. rpc_append_audit_event: 'archive_export' action を allowlist に追加
--- 5. audit_metadata_has_unknown_key_for_action: 'archive_export' case を追加
---
--- 信頼境界: 非秘密メタデータのみを扱う。平文・鍵・JWT を含まない。
--- `ArchiveExportPackage` は `SignedMonthlyDigest` からのみ構築可能（Rust 型安全保証）。
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 1. ledger_entry_type_allowed: 'archive_exported' を追加
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_entry_type_allowed(p_entry_type text)
-returns boolean
-language sql
-stable
-set search_path = public, pg_temp
-as $$
-    select p_entry_type in (
-        'secret_created',
-        'secret_version_created',
-        'secret_decrypted',
-        'secret_version_purged',
-        'integrity_check_completed',
-        'restore_test_completed',
-        'key_rotation_started',
-        'key_rotation_reencrypted',
-        'key_rotation_completed',
-        'key_rotation_aborted',
-        'ledger_verified',
-        'ledger_verification_failed',
-        'audit_fallback_resent',
-        'monthly_digest',
-        -- Ledger Phase 2 §6: 外部アーカイブ export 完了
-        'archive_exported'
-    );
-$$;
-
-comment on function public.ledger_entry_type_allowed(text)
-is 'Returns true for all allowed ledger entry_type values. Updated in T08 to include archive_exported.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 2. ledger_payload_allowed_keys: 'archive_exported' payload keys を追加
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_payload_allowed_keys(p_entry_type text)
-returns text[]
-language sql
-stable
-set search_path = public, pg_temp
-as $$
-    select case p_entry_type
-        when 'secret_created' then array['algorithm', 'classification', 'key_version', 'version']::text[]
-        when 'secret_version_created' then array['algorithm', 'classification', 'key_version', 'version']::text[]
-        when 'secret_decrypted' then array['algorithm', 'key_version', 'version']::text[]
-        when 'secret_version_purged' then array['key_version', 'retention_limit', 'version']::text[]
-        when 'integrity_check_completed' then array[
-            'checked_audit_event_count',
-            'checked_secret_count',
-            'checked_secret_version_count',
-            'duration_ms',
-            'violation_count'
-        ]::text[]
-        when 'restore_test_completed' then array[
-            'duration_ms',
-            'failure_count',
-            'sample_count',
-            'success_count',
-            'trigger'
-        ]::text[]
-        when 'key_rotation_started' then array['new_key_version', 'old_key_version']::text[]
-        when 'key_rotation_reencrypted' then array[
-            'batch_size',
-            'new_key_version',
-            'old_key_version',
-            'processed_count',
-            'remaining_count'
-        ]::text[]
-        when 'key_rotation_completed' then array[
-            'new_key_version',
-            'old_key_version',
-            'remaining_count'
-        ]::text[]
-        when 'key_rotation_aborted' then array[
-            'new_key_version',
-            'old_key_version',
-            'reason_code'
-        ]::text[]
-        when 'ledger_verified' then array[
-            'checked_count',
-            'duration_ms',
-            'end_sequence_no',
-            'start_sequence_no'
-        ]::text[]
-        when 'ledger_verification_failed' then array[
-            'end_sequence_no',
-            'error_code',
-            'failed_count',
-            'start_sequence_no'
-        ]::text[]
-        when 'audit_fallback_resent' then array[
-            'duration_ms',
-            'failed_count',
-            'resent_count'
-        ]::text[]
-        when 'monthly_digest' then array[
-            'digest_hash',
-            'end_sequence_no',
-            'entry_count',
-            'start_sequence_no',
-            'target_year_month'
-        ]::text[]
-        -- Ledger Phase 2 §6: archive_exported payload keys（アルファベット順）
-        when 'archive_exported' then array[
-            'archive_key',
-            'digest_hash',
-            'target_year_month'
-        ]::text[]
-        else null::text[]
-    end;
-$$;
-
-comment on function public.ledger_payload_allowed_keys(text)
-is 'Returns top-level ledger payload keys allowed for a given entry_type. Updated in T08 to include archive_exported.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 3. ledger_payload_schema_is_valid: 'archive_key' フィールド検証を追加
---    Phase 2 T07 の関数を or replace で更新。
---    追加: archive_key（非空・128 文字以内の文字列）
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_payload_schema_is_valid(
-    p_entry_type text,
-    p_payload jsonb
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_key text;
-    v_value jsonb;
-    v_text text;
-    v_integer bigint;
-    v_old_key_version bigint;
-    v_new_key_version bigint;
-begin
-    if p_payload is null or jsonb_typeof(p_payload) <> 'object' then
-        return false;
-    end if;
-
-    if not public.ledger_entry_type_allowed(p_entry_type) then
-        return false;
-    end if;
-
-    if public.ledger_payload_has_unknown_key(p_entry_type, p_payload) then
-        return false;
-    end if;
-
-    if exists (
-        select 1
-        from jsonb_each(p_payload) as fields(key, value)
-        where jsonb_typeof(fields.value) in ('object', 'array')
-    ) then
-        return false;
-    end if;
-
-    for v_key, v_value in
-        select fields.key, fields.value
-        from jsonb_each(p_payload) as fields(key, value)
-    loop
-        if v_key in (
-            'version',
-            'key_version',
-            'old_key_version',
-            'new_key_version',
-            'retention_limit',
-            'start_sequence_no',
-            'end_sequence_no'
-        ) then
-            if jsonb_typeof(v_value) <> 'number' or (v_value #>> '{}') !~ '^[0-9]+$' then
-                return false;
-            end if;
-
-            v_integer := (v_value #>> '{}')::bigint;
-
-            if v_integer <= 0 then
-                return false;
-            end if;
-
-            if v_key = 'retention_limit' and v_integer <> 4 then
-                return false;
-            end if;
-        elsif v_key in (
-            'batch_size',
-            'checked_audit_event_count',
-            'checked_count',
-            'checked_secret_count',
-            'checked_secret_version_count',
-            'duration_ms',
-            'entry_count',
-            'failed_count',
-            'failure_count',
-            'processed_count',
-            'remaining_count',
-            'resent_count',
-            'sample_count',
-            'success_count',
-            'violation_count'
-        ) then
-            if jsonb_typeof(v_value) <> 'number' or (v_value #>> '{}') !~ '^[0-9]+$' then
-                return false;
-            end if;
-
-            v_integer := (v_value #>> '{}')::bigint;
-
-            if v_integer < 0 then
-                return false;
-            end if;
-        elsif v_key = 'algorithm' then
-            if jsonb_typeof(v_value) <> 'string' or v_value #>> '{}' <> 'xchacha20-poly1305' then
-                return false;
-            end if;
-        elsif v_key = 'classification' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if btrim(v_text) = '' or length(v_text) > 128 then
-                return false;
-            end if;
-        elsif v_key = 'trigger' then
-            if jsonb_typeof(v_value) <> 'string' or (v_value #>> '{}') not in (
-                'background',
-                'cli',
-                'scheduled',
-                'startup'
-            ) then
-                return false;
-            end if;
-        elsif v_key in ('error_code', 'reason_code') then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if btrim(v_text) = '' or length(v_text) > 128 then
-                return false;
-            end if;
-        -- Ledger Phase 2 T07: monthly_digest フィールド
-        elsif v_key = 'digest_hash' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if v_text !~ '^[0-9a-f]{64}$' then
-                return false;
-            end if;
-        elsif v_key = 'target_year_month' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if v_text !~ '^\d{4}-(0[1-9]|1[0-2])$' then
-                return false;
-            end if;
-        -- Ledger Phase 2 T08: archive_exported フィールド
-        elsif v_key = 'archive_key' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if btrim(v_text) = '' or length(v_text) > 128 then
-                return false;
-            end if;
-        else
-            return false;
-        end if;
-    end loop;
-
-    if p_payload ? 'old_key_version' and p_payload ? 'new_key_version' then
-        v_old_key_version := (p_payload ->> 'old_key_version')::bigint;
-        v_new_key_version := (p_payload ->> 'new_key_version')::bigint;
-
-        if v_old_key_version = v_new_key_version then
-            return false;
-        end if;
-    end if;
-
-    return true;
-exception
-    when numeric_value_out_of_range then
-        return false;
-end;
-$$;
-
-comment on function public.ledger_payload_schema_is_valid(text, jsonb)
-is 'Validates type, length, vocabulary, and numeric range for ledger payload fields. Updated in T08 to add archive_key field.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 4. rpc_append_audit_event: 'archive_export' action を allowlist に追加
---    'archive_export' は success と failure の両方を記録する（result 制限なし）。
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.rpc_append_audit_event(
-    p_audit_event_id uuid,
-    p_request_id uuid,
-    p_actor_user_id uuid default null,
-    p_actor_device_id text default null,
-    p_action text default null,
-    p_target_secret_id uuid default null,
-    p_result text default null,
-    p_key_version integer default null,
-    p_metadata_json jsonb default '{}'::jsonb
-)
-returns uuid
-language plpgsql
-security definer
-set search_path = public, pg_temp
-as $$
-declare
-    v_existing_audit_event record;
-    v_allowlist_mode text;
-begin
-    if p_audit_event_id is null
-        or p_request_id is null
-        or p_action is null
-        or p_result is null
-        or p_metadata_json is null
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action not in (
-        'encrypt_create',
-        'encrypt_rotate',
-        'decrypt',
-        'version_purge',
-        'integrity_check',
-        'restore_test',
-        'auth_failure',
-        'key_rotation_start',
-        'key_rotation_reencrypt',
-        'key_rotation_complete',
-        'monthly_digest_generate',
-        'monthly_digest_verify',
-        -- Ledger Phase 2 §6: archive export（成功・失敗両方を記録）
-        'archive_export'
-    ) then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_result not in ('success', 'failure') then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_result = 'success'
-        and p_action in ('encrypt_create', 'encrypt_rotate', 'version_purge')
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action = 'auth_failure' and p_result <> 'failure' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action in ('monthly_digest_generate', 'monthly_digest_verify')
-        and p_result <> 'failure'
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action = 'auth_failure'
-        and (
-            p_actor_user_id is not null
-            or p_actor_device_id is not null
-            or p_target_secret_id is not null
-            or p_key_version is not null
-        )
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_actor_device_id is not null and btrim(p_actor_device_id) = '' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_key_version is not null and p_key_version <= 0 then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if public.audit_metadata_has_forbidden_key(p_metadata_json)
-        or not public.audit_metadata_source_event_at_is_valid(p_metadata_json)
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    -- allowlist / schema validation (段階的移行対応)
-    v_allowlist_mode := public.audit_metadata_allowlist_mode();
-
-    if public.audit_metadata_has_schema_violation_for_action(p_action, p_result, p_metadata_json, true) then
-        if v_allowlist_mode = 'strict' then
-            raise exception 'invalid_rpc_input' using errcode = '22023';
-        else
-            raise notice 'audit_metadata_schema_warning: action=%, result=%, schema_violation_present',
-                p_action, p_result;
-        end if;
-    end if;
-
-    insert into public.audit_events (
-        id,
-        request_id,
-        actor_user_id,
-        actor_device_id,
-        action,
-        target_secret_id,
-        result,
-        key_version,
-        metadata_json
-    )
-    values (
-        p_audit_event_id,
-        p_request_id,
-        p_actor_user_id,
-        p_actor_device_id,
-        p_action,
-        p_target_secret_id,
-        p_result,
-        p_key_version,
-        p_metadata_json
-    )
-    on conflict (id) do nothing;
-
-    select *
-    into v_existing_audit_event
-    from public.audit_events ae
-    where ae.id = p_audit_event_id;
-
-    if not found then
-        raise exception 'audit_event_id_conflict' using errcode = '23505';
-    end if;
-
-    if v_existing_audit_event.request_id <> p_request_id
-        or v_existing_audit_event.actor_user_id is distinct from p_actor_user_id
-        or v_existing_audit_event.actor_device_id is distinct from p_actor_device_id
-        or v_existing_audit_event.action <> p_action
-        or v_existing_audit_event.target_secret_id is distinct from p_target_secret_id
-        or v_existing_audit_event.result <> p_result
-        or v_existing_audit_event.key_version is distinct from p_key_version
-        or v_existing_audit_event.metadata_json <> p_metadata_json
-    then
-        raise exception 'audit_event_id_conflict' using errcode = '23505';
-    end if;
-
-    return p_audit_event_id;
-end;
-$$;
-
-comment on function public.rpc_append_audit_event(
-    uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
-) is
-    'Audit append RPC for non-write-path audit events and failure events. Updated in T08 to add archive_export action.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 5. audit_metadata_has_unknown_key_for_action: 'archive_export' case を追加
---    ACTION_ALLOWLIST_START / END マーカーを維持したまま追加する。
---    parity test と Rust 側 AuditMetadata::validate_allowlist_for_action が同期対象。
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.audit_metadata_has_unknown_key_for_action(
-    p_action text,
-    p_result text,
-    p_metadata_json jsonb
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_key text;
-    v_allowed_keys text[];
-    v_violation_summary_keys text[];
-begin
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        return true;
-    end if;
-
-    -- ACTION_ALLOWLIST_START
-    case p_action
-        when 'encrypt_create', 'encrypt_rotate', 'version_purge' then
-            v_allowed_keys := array[
-                'version',
-                'secret_version_id',
-                'source_event_at'
-            ];
-        when 'decrypt' then
-            if p_result = 'failure' then
-                v_allowed_keys := array[
-                    'attempted_secret_id',
-                    'source_event_at'
-                ];
-            else
-                v_allowed_keys := array[
-                    'source_event_at'
-                ];
-            end if;
-        when 'integrity_check' then
-            v_allowed_keys := array[
-                'check_name',
-                'checked_secret_count',
-                'checked_secret_version_count',
-                'checked_audit_event_count',
-                'duration_ms',
-                'violation_count',
-                'violation_summary',
-                'trigger',
-                'error_code',
-                'source_event_at'
-            ];
-            v_violation_summary_keys := array[
-                'current_version_invalid',
-                'version_invalid',
-                'retention_exceeded',
-                'ciphertext_empty',
-                'encrypted_data_key_empty',
-                'nonce_length_invalid',
-                'algorithm_invalid',
-                'nonce_duplicate',
-                'aad_keys_invalid',
-                'aad_row_mismatch',
-                'created_at_mismatch',
-                'audit_action_invalid',
-                'audit_result_invalid',
-                'audit_metadata_not_object',
-                'audit_metadata_forbidden_key',
-                'audit_source_event_at_invalid'
-            ];
-        when 'restore_test' then
-            v_allowed_keys := array[
-                'phase',
-                'sample_count',
-                'trigger',
-                'duration_ms',
-                'error_code',
-                'failed_version',
-                'reason',
-                'source_event_at'
-            ];
-        when 'auth_failure' then
-            v_allowed_keys := array[
-                'error_code',
-                'source_event_at'
-            ];
-        when 'key_rotation_start' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'source_event_at'
-            ];
-        when 'key_rotation_reencrypt' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'batch_size',
-                'processed_count',
-                'remaining_count',
-                'source_event_at'
-            ];
-        when 'key_rotation_complete' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'remaining_count',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T06: 月次 digest 生成失敗の監査記録
-        when 'monthly_digest_generate' then
-            v_allowed_keys := array[
-                'error_code',
-                'target_year_month',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T07: 月次 digest 検証失敗の監査記録
-        when 'monthly_digest_verify' then
-            v_allowed_keys := array[
-                'error_code',
-                'target_year_month',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T08 §6: archive export（成功・失敗両方を記録）
-        -- archive_key は success 時のみ有効（RPC 外の Rust 側 validate_metadata_values で検証）
-        when 'archive_export' then
-            v_allowed_keys := array[
-                'archive_key',
-                'digest_hash',
-                'target_year_month',
-                'error_code',
-                'source_event_at'
-            ];
-        else
-            -- 未知の action は拒否
-            return true;
-    end case;
-    -- ACTION_ALLOWLIST_END
-
-    -- トップレベルキーの allowlist チェック
-    for v_key in
-        select jsonb_object_keys(p_metadata_json)
-    loop
-        if not (v_key = any(v_allowed_keys)) then
-            return true;
-        end if;
-    end loop;
-
-    -- integrity_check の violation_summary サブオブジェクトを検証
-    if p_action = 'integrity_check'
-        and p_metadata_json ? 'violation_summary'
-        and jsonb_typeof(p_metadata_json -> 'violation_summary') = 'object'
-    then
-        for v_key in
-            select jsonb_object_keys(p_metadata_json -> 'violation_summary')
-        loop
-            if not (v_key = any(v_violation_summary_keys)) then
-                return true;
-            end if;
-        end loop;
-    end if;
-
-    return false;
-end;
-$$;
-
-comment on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb)
-is 'Returns true when audit metadata contains a key outside the allowlist for the given action. Updated in T08 to include archive_export action.';
-
--- ============================================================================
--- Section 0998: digest timestamped action extensions
--- ============================================================================
-
--- Ledger Phase 2 §8 / ADR 0040: 月次 digest 外部 timestamping サポート。
---
--- 変更内容:
--- 1. ledger_entry_type_allowed: 'digest_timestamped' を追加
--- 2. ledger_payload_allowed_keys: 'digest_timestamped' payload keys を追加
--- 3. ledger_payload_schema_is_valid: 'timestamp_token_hash' フィールド検証を追加
--- 4. rpc_append_audit_event: 'digest_timestamping' action を allowlist に追加
--- 5. audit_metadata_has_unknown_key_for_action: 'digest_timestamping' case を追加
---
--- 信頼境界: 非秘密メタデータのみを扱う。token raw bytes・平文・鍵・JWT を含まない。
--- timestamping への送信ペイロードは Rust 側 trait で `&DigestHash` に限定されている。
--- ledger には `timestamp_token_hash` (SHA-256 hex) のみを記録し、token raw bytes は
--- 呼び出し側責務で保管する（非秘密情報のみを Supabase に保存するため）。
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 1. ledger_entry_type_allowed: 'digest_timestamped' を追加
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_entry_type_allowed(p_entry_type text)
-returns boolean
-language sql
-stable
-set search_path = public, pg_temp
-as $$
-    select p_entry_type in (
-        'secret_created',
-        'secret_version_created',
-        'secret_decrypted',
-        'secret_version_purged',
-        'integrity_check_completed',
-        'restore_test_completed',
-        'key_rotation_started',
-        'key_rotation_reencrypted',
-        'key_rotation_completed',
-        'key_rotation_aborted',
-        'ledger_verified',
-        'ledger_verification_failed',
-        'audit_fallback_resent',
-        'monthly_digest',
-        'archive_exported',
-        -- Ledger Phase 2 §8 / ADR 0040: 外部 timestamping 取得完了
-        'digest_timestamped'
-    );
-$$;
-
-comment on function public.ledger_entry_type_allowed(text)
-is 'Returns true for all allowed ledger entry_type values. Updated in T10 to include digest_timestamped.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 2. ledger_payload_allowed_keys: 'digest_timestamped' payload keys を追加
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_payload_allowed_keys(p_entry_type text)
-returns text[]
-language sql
-stable
-set search_path = public, pg_temp
-as $$
-    select case p_entry_type
-        when 'secret_created' then array['algorithm', 'classification', 'key_version', 'version']::text[]
-        when 'secret_version_created' then array['algorithm', 'classification', 'key_version', 'version']::text[]
-        when 'secret_decrypted' then array['algorithm', 'key_version', 'version']::text[]
-        when 'secret_version_purged' then array['key_version', 'retention_limit', 'version']::text[]
-        when 'integrity_check_completed' then array[
-            'checked_audit_event_count',
-            'checked_secret_count',
-            'checked_secret_version_count',
-            'duration_ms',
-            'violation_count'
-        ]::text[]
-        when 'restore_test_completed' then array[
-            'duration_ms',
-            'failure_count',
-            'sample_count',
-            'success_count',
-            'trigger'
-        ]::text[]
-        when 'key_rotation_started' then array['new_key_version', 'old_key_version']::text[]
-        when 'key_rotation_reencrypted' then array[
-            'batch_size',
-            'new_key_version',
-            'old_key_version',
-            'processed_count',
-            'remaining_count'
-        ]::text[]
-        when 'key_rotation_completed' then array[
-            'new_key_version',
-            'old_key_version',
-            'remaining_count'
-        ]::text[]
-        when 'key_rotation_aborted' then array[
-            'new_key_version',
-            'old_key_version',
-            'reason_code'
-        ]::text[]
-        when 'ledger_verified' then array[
-            'checked_count',
-            'duration_ms',
-            'end_sequence_no',
-            'start_sequence_no'
-        ]::text[]
-        when 'ledger_verification_failed' then array[
-            'end_sequence_no',
-            'error_code',
-            'failed_count',
-            'start_sequence_no'
-        ]::text[]
-        when 'audit_fallback_resent' then array[
-            'duration_ms',
-            'failed_count',
-            'resent_count'
-        ]::text[]
-        when 'monthly_digest' then array[
-            'digest_hash',
-            'end_sequence_no',
-            'entry_count',
-            'start_sequence_no',
-            'target_year_month'
-        ]::text[]
-        when 'archive_exported' then array[
-            'archive_key',
-            'digest_hash',
-            'target_year_month'
-        ]::text[]
-        -- Ledger Phase 2 §8 / ADR 0040: digest_timestamped payload keys（アルファベット順）
-        when 'digest_timestamped' then array[
-            'digest_hash',
-            'target_year_month',
-            'timestamp_token_hash'
-        ]::text[]
-        else null::text[]
-    end;
-$$;
-
-comment on function public.ledger_payload_allowed_keys(text)
-is 'Returns top-level ledger payload keys allowed for a given entry_type. Updated in T10 to include digest_timestamped.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 3. ledger_payload_schema_is_valid: 'timestamp_token_hash' フィールド検証を追加
---    既存の Phase 2 T08 関数を or replace で更新。
---    追加: timestamp_token_hash（digest_hash と同じ 64 文字小文字 hex 制約）
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.ledger_payload_schema_is_valid(
-    p_entry_type text,
-    p_payload jsonb
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_key text;
-    v_value jsonb;
-    v_text text;
-    v_integer bigint;
-    v_old_key_version bigint;
-    v_new_key_version bigint;
-begin
-    if p_payload is null or jsonb_typeof(p_payload) <> 'object' then
-        return false;
-    end if;
-
-    if not public.ledger_entry_type_allowed(p_entry_type) then
-        return false;
-    end if;
-
-    if public.ledger_payload_has_unknown_key(p_entry_type, p_payload) then
-        return false;
-    end if;
-
-    if exists (
-        select 1
-        from jsonb_each(p_payload) as fields(key, value)
-        where jsonb_typeof(fields.value) in ('object', 'array')
-    ) then
-        return false;
-    end if;
-
-    for v_key, v_value in
-        select fields.key, fields.value
-        from jsonb_each(p_payload) as fields(key, value)
-    loop
-        if v_key in (
-            'version',
-            'key_version',
-            'old_key_version',
-            'new_key_version',
-            'retention_limit',
-            'start_sequence_no',
-            'end_sequence_no'
-        ) then
-            if jsonb_typeof(v_value) <> 'number' or (v_value #>> '{}') !~ '^[0-9]+$' then
-                return false;
-            end if;
-
-            v_integer := (v_value #>> '{}')::bigint;
-
-            if v_integer <= 0 then
-                return false;
-            end if;
-
-            if v_key = 'retention_limit' and v_integer <> 4 then
-                return false;
-            end if;
-        elsif v_key in (
-            'batch_size',
-            'checked_audit_event_count',
-            'checked_count',
-            'checked_secret_count',
-            'checked_secret_version_count',
-            'duration_ms',
-            'entry_count',
-            'failed_count',
-            'failure_count',
-            'processed_count',
-            'remaining_count',
-            'resent_count',
-            'sample_count',
-            'success_count',
-            'violation_count'
-        ) then
-            if jsonb_typeof(v_value) <> 'number' or (v_value #>> '{}') !~ '^[0-9]+$' then
-                return false;
-            end if;
-
-            v_integer := (v_value #>> '{}')::bigint;
-
-            if v_integer < 0 then
-                return false;
-            end if;
-        elsif v_key = 'algorithm' then
-            if jsonb_typeof(v_value) <> 'string' or v_value #>> '{}' <> 'xchacha20-poly1305' then
-                return false;
-            end if;
-        elsif v_key = 'classification' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if btrim(v_text) = '' or length(v_text) > 128 then
-                return false;
-            end if;
-        elsif v_key = 'trigger' then
-            if jsonb_typeof(v_value) <> 'string' or (v_value #>> '{}') not in (
-                'background',
-                'cli',
-                'scheduled',
-                'startup'
-            ) then
-                return false;
-            end if;
-        elsif v_key in ('error_code', 'reason_code') then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if btrim(v_text) = '' or length(v_text) > 128 then
-                return false;
-            end if;
-        -- Ledger Phase 2 T07: monthly_digest フィールド
-        -- Ledger Phase 2 T10: timestamp_token_hash も同じ 64 文字 hex 制約
-        elsif v_key in ('digest_hash', 'timestamp_token_hash') then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if v_text !~ '^[0-9a-f]{64}$' then
-                return false;
-            end if;
-        elsif v_key = 'target_year_month' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if v_text !~ '^\d{4}-(0[1-9]|1[0-2])$' then
-                return false;
-            end if;
-        -- Ledger Phase 2 T08: archive_exported フィールド
-        elsif v_key = 'archive_key' then
-            if jsonb_typeof(v_value) <> 'string' then
-                return false;
-            end if;
-
-            v_text := v_value #>> '{}';
-
-            if btrim(v_text) = '' or length(v_text) > 128 then
-                return false;
-            end if;
-        else
-            return false;
-        end if;
-    end loop;
-
-    if p_payload ? 'old_key_version' and p_payload ? 'new_key_version' then
-        v_old_key_version := (p_payload ->> 'old_key_version')::bigint;
-        v_new_key_version := (p_payload ->> 'new_key_version')::bigint;
-
-        if v_old_key_version = v_new_key_version then
-            return false;
-        end if;
-    end if;
-
-    return true;
-exception
-    when numeric_value_out_of_range then
-        return false;
-end;
-$$;
-
-comment on function public.ledger_payload_schema_is_valid(text, jsonb)
-is 'Validates type, length, vocabulary, and numeric range for ledger payload fields. Updated in T10 to add timestamp_token_hash field.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 4. rpc_append_audit_event: 'digest_timestamping' action を allowlist に追加
---    'digest_timestamping' は success と failure の両方を記録する（result 制限なし）。
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.rpc_append_audit_event(
-    p_audit_event_id uuid,
-    p_request_id uuid,
-    p_actor_user_id uuid default null,
-    p_actor_device_id text default null,
-    p_action text default null,
-    p_target_secret_id uuid default null,
-    p_result text default null,
-    p_key_version integer default null,
-    p_metadata_json jsonb default '{}'::jsonb
-)
-returns uuid
-language plpgsql
-security definer
-set search_path = public, pg_temp
-as $$
-declare
-    v_existing_audit_event record;
-    v_allowlist_mode text;
-begin
-    if p_audit_event_id is null
-        or p_request_id is null
-        or p_action is null
-        or p_result is null
-        or p_metadata_json is null
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action not in (
-        'encrypt_create',
-        'encrypt_rotate',
-        'decrypt',
-        'version_purge',
-        'integrity_check',
-        'restore_test',
-        'auth_failure',
-        'key_rotation_start',
-        'key_rotation_reencrypt',
-        'key_rotation_complete',
-        'monthly_digest_generate',
-        'monthly_digest_verify',
-        'archive_export',
-        -- Ledger Phase 2 §8 / ADR 0040: digest 外部 timestamping（成功・失敗両方を記録）
-        'digest_timestamping'
-    ) then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_result not in ('success', 'failure') then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_result = 'success'
-        and p_action in ('encrypt_create', 'encrypt_rotate', 'version_purge')
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action = 'auth_failure' and p_result <> 'failure' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action in ('monthly_digest_generate', 'monthly_digest_verify')
-        and p_result <> 'failure'
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action = 'auth_failure'
-        and (
-            p_actor_user_id is not null
-            or p_actor_device_id is not null
-            or p_target_secret_id is not null
-            or p_key_version is not null
-        )
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_actor_device_id is not null and btrim(p_actor_device_id) = '' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_key_version is not null and p_key_version <= 0 then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if public.audit_metadata_has_forbidden_key(p_metadata_json)
-        or not public.audit_metadata_source_event_at_is_valid(p_metadata_json)
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    -- allowlist / schema validation (段階的移行対応)
-    v_allowlist_mode := public.audit_metadata_allowlist_mode();
-
-    if public.audit_metadata_has_schema_violation_for_action(p_action, p_result, p_metadata_json, true) then
-        if v_allowlist_mode = 'strict' then
-            raise exception 'invalid_rpc_input' using errcode = '22023';
-        else
-            raise notice 'audit_metadata_schema_warning: action=%, result=%, schema_violation_present',
-                p_action, p_result;
-        end if;
-    end if;
-
-    insert into public.audit_events (
-        id,
-        request_id,
-        actor_user_id,
-        actor_device_id,
-        action,
-        target_secret_id,
-        result,
-        key_version,
-        metadata_json
-    )
-    values (
-        p_audit_event_id,
-        p_request_id,
-        p_actor_user_id,
-        p_actor_device_id,
-        p_action,
-        p_target_secret_id,
-        p_result,
-        p_key_version,
-        p_metadata_json
-    )
-    on conflict (id) do nothing;
-
-    select *
-    into v_existing_audit_event
-    from public.audit_events ae
-    where ae.id = p_audit_event_id;
-
-    if not found then
-        raise exception 'audit_event_id_conflict' using errcode = '23505';
-    end if;
-
-    if v_existing_audit_event.request_id <> p_request_id
-        or v_existing_audit_event.actor_user_id is distinct from p_actor_user_id
-        or v_existing_audit_event.actor_device_id is distinct from p_actor_device_id
-        or v_existing_audit_event.action <> p_action
-        or v_existing_audit_event.target_secret_id is distinct from p_target_secret_id
-        or v_existing_audit_event.result <> p_result
-        or v_existing_audit_event.key_version is distinct from p_key_version
-        or v_existing_audit_event.metadata_json <> p_metadata_json
-    then
-        raise exception 'audit_event_id_conflict' using errcode = '23505';
-    end if;
-
-    return p_audit_event_id;
-end;
-$$;
-
-comment on function public.rpc_append_audit_event(
-    uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
-) is
-    'Audit append RPC for non-write-path audit events and failure events. Updated in T10 to add digest_timestamping action.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 5. audit_metadata_has_unknown_key_for_action: 'digest_timestamping' case を追加
---    ACTION_ALLOWLIST_START / END マーカーを維持したまま追加する。
---    parity test と Rust 側 AuditMetadata::validate_allowlist_for_action が同期対象。
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.audit_metadata_has_unknown_key_for_action(
-    p_action text,
-    p_result text,
-    p_metadata_json jsonb
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_key text;
-    v_allowed_keys text[];
-    v_violation_summary_keys text[];
-begin
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        return true;
-    end if;
-
-    -- ACTION_ALLOWLIST_START
-    case p_action
-        when 'encrypt_create', 'encrypt_rotate', 'version_purge' then
-            v_allowed_keys := array[
-                'version',
-                'secret_version_id',
-                'source_event_at'
-            ];
-        when 'decrypt' then
-            if p_result = 'failure' then
-                v_allowed_keys := array[
-                    'attempted_secret_id',
-                    'source_event_at'
-                ];
-            else
-                v_allowed_keys := array[
-                    'source_event_at'
-                ];
-            end if;
-        when 'integrity_check' then
-            v_allowed_keys := array[
-                'check_name',
-                'checked_secret_count',
-                'checked_secret_version_count',
-                'checked_audit_event_count',
-                'duration_ms',
-                'violation_count',
-                'violation_summary',
-                'trigger',
-                'error_code',
-                'source_event_at'
-            ];
-            v_violation_summary_keys := array[
-                'current_version_invalid',
-                'version_invalid',
-                'retention_exceeded',
-                'ciphertext_empty',
-                'encrypted_data_key_empty',
-                'nonce_length_invalid',
-                'algorithm_invalid',
-                'nonce_duplicate',
-                'aad_keys_invalid',
-                'aad_row_mismatch',
-                'created_at_mismatch',
-                'audit_action_invalid',
-                'audit_result_invalid',
-                'audit_metadata_not_object',
-                'audit_metadata_forbidden_key',
-                'audit_source_event_at_invalid'
-            ];
-        when 'restore_test' then
-            v_allowed_keys := array[
-                'phase',
-                'sample_count',
-                'trigger',
-                'duration_ms',
-                'error_code',
-                'failed_version',
-                'reason',
-                'source_event_at'
-            ];
-        when 'auth_failure' then
-            v_allowed_keys := array[
-                'error_code',
-                'source_event_at'
-            ];
-        when 'key_rotation_start' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'source_event_at'
-            ];
-        when 'key_rotation_reencrypt' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'batch_size',
-                'processed_count',
-                'remaining_count',
-                'source_event_at'
-            ];
-        when 'key_rotation_complete' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'remaining_count',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T06: 月次 digest 生成失敗の監査記録
-        when 'monthly_digest_generate' then
-            v_allowed_keys := array[
-                'error_code',
-                'target_year_month',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T07: 月次 digest 検証失敗の監査記録
-        when 'monthly_digest_verify' then
-            v_allowed_keys := array[
-                'error_code',
-                'target_year_month',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T08 §6: archive export（成功・失敗両方を記録）
-        -- archive_key は success 時のみ有効（RPC 外の Rust 側 validate_metadata_values で検証）
-        when 'archive_export' then
-            v_allowed_keys := array[
-                'archive_key',
-                'digest_hash',
-                'target_year_month',
-                'error_code',
-                'source_event_at'
-            ];
-        -- Ledger Phase 2 T10 §8 / ADR 0040: digest 外部 timestamping（成功・失敗両方を記録）
-        -- timestamp_token_hash は success 時のみ実体を持つ（Rust 側 builder の責務）。
-        when 'digest_timestamping' then
-            v_allowed_keys := array[
-                'digest_hash',
-                'timestamp_token_hash',
-                'target_year_month',
-                'error_code',
-                'source_event_at'
-            ];
-        else
-            -- 未知の action は拒否
-            return true;
-    end case;
-    -- ACTION_ALLOWLIST_END
-
-    -- トップレベルキーの allowlist チェック
-    for v_key in
-        select jsonb_object_keys(p_metadata_json)
-    loop
-        if not (v_key = any(v_allowed_keys)) then
-            return true;
-        end if;
-    end loop;
-
-    -- integrity_check の violation_summary サブオブジェクトを検証
-    if p_action = 'integrity_check'
-        and p_metadata_json ? 'violation_summary'
-        and jsonb_typeof(p_metadata_json -> 'violation_summary') = 'object'
-    then
-        for v_key in
-            select jsonb_object_keys(p_metadata_json -> 'violation_summary')
-        loop
-            if not (v_key = any(v_violation_summary_keys)) then
-                return true;
-            end if;
-        end loop;
-    end if;
-
-    return false;
-end;
-$$;
-
-comment on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb)
-is 'Returns true when audit metadata contains a key outside the allowlist for the given action. Updated in T10 to include digest_timestamping action.';
-
--- ============================================================================
 -- Section 0999: SIEM forward failure and audit report extensions
--- ============================================================================
-
--- T11/T12: SIEM forward failure audit action, audit report generation support,
--- and metadata guards.
+-- SIEM forward failure audit action, audit report generation support, and
+-- final metadata guards.
 --
 -- 信頼境界: SIEM 送信失敗および監査レポート生成を audit_events に記録するための
 -- 非秘密 metadata のみを追加する。レポート生成 RPC は read-only 集計のみを行い、
 -- 台帳を変更しない。平文・鍵・JWT・Authorization header・request/response body は
 -- audit_metadata_has_forbidden_key で再帰的に拒否する。
-
--- ─────────────────────────────────────────────────────────────────────────────
 -- 1. 禁止 metadata key を T11 §9.3 に合わせて拡張
--- ─────────────────────────────────────────────────────────────────────────────
 
 create or replace function public.audit_metadata_has_forbidden_key(p_metadata_json jsonb)
 returns boolean
@@ -6368,11 +4180,11 @@ as $$
 $$;
 
 comment on function public.audit_metadata_has_forbidden_key(jsonb) is
-    'Recursive guard used by audit constraints and RPCs to reject metadata keys that could carry plaintext, keys, JWTs, Authorization headers, request/response bodies, or ciphertext material. Updated in T11/T12 for SIEM forwarding and audit report generation.';
+    'Recursively rejects audit metadata keys that could carry secrets, credentials, request/response bodies, or ciphertext material.';
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 2. audit_events.action CHECK に siem_forward_failure / audit_report_generate を追加
--- ─────────────────────────────────────────────────────────────────────────────
+
+-- 2. audit_events.action CHECK を最終 action set に更新
+
 
 alter table public.audit_events
     drop constraint audit_events_action_allowed,
@@ -6405,439 +4217,8 @@ alter table public.audit_events
 comment on constraint audit_events_siem_forward_failure_failure_only on public.audit_events is
     'siem_forward_failure audit events are emitted only when SIEM forwarding failed and must never use result=success.';
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 3. rpc_append_audit_event に siem_forward_failure / audit_report_generate を追加
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.rpc_append_audit_event(
-    p_audit_event_id uuid,
-    p_request_id uuid,
-    p_actor_user_id uuid default null,
-    p_actor_device_id text default null,
-    p_action text default null,
-    p_target_secret_id uuid default null,
-    p_result text default null,
-    p_key_version integer default null,
-    p_metadata_json jsonb default '{}'::jsonb
-)
-returns uuid
-language plpgsql
-security definer
-set search_path = public, pg_temp
-as $$
-declare
-    v_existing_audit_event record;
-    v_allowlist_mode text;
-begin
-    if p_audit_event_id is null
-        or p_request_id is null
-        or p_action is null
-        or p_result is null
-        or p_metadata_json is null
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action not in (
-        'encrypt_create',
-        'encrypt_rotate',
-        'decrypt',
-        'version_purge',
-        'integrity_check',
-        'restore_test',
-        'auth_failure',
-        'key_rotation_start',
-        'key_rotation_reencrypt',
-        'key_rotation_complete',
-        'monthly_digest_generate',
-        'monthly_digest_verify',
-        'archive_export',
-        'digest_timestamping',
-        'siem_forward_failure',
-        'audit_report_generate'
-    ) then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_result not in ('success', 'failure') then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_result = 'success'
-        and p_action in ('encrypt_create', 'encrypt_rotate', 'version_purge')
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action in ('auth_failure', 'siem_forward_failure') and p_result <> 'failure' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action in ('monthly_digest_generate', 'monthly_digest_verify')
-        and p_result <> 'failure'
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_action = 'auth_failure'
-        and (
-            p_actor_user_id is not null
-            or p_actor_device_id is not null
-            or p_target_secret_id is not null
-            or p_key_version is not null
-        )
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_actor_device_id is not null and btrim(p_actor_device_id) = '' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if p_key_version is not null and p_key_version <= 0 then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    if public.audit_metadata_has_forbidden_key(p_metadata_json)
-        or not public.audit_metadata_source_event_at_is_valid(p_metadata_json)
-    then
-        raise exception 'invalid_rpc_input' using errcode = '22023';
-    end if;
-
-    v_allowlist_mode := public.audit_metadata_allowlist_mode();
-
-    if public.audit_metadata_has_schema_violation_for_action(p_action, p_result, p_metadata_json, true) then
-        if v_allowlist_mode = 'strict' then
-            raise exception 'invalid_rpc_input' using errcode = '22023';
-        else
-            raise notice 'audit_metadata_schema_warning: action=%, result=%, schema_violation_present',
-                p_action, p_result;
-        end if;
-    end if;
-
-    insert into public.audit_events (
-        id,
-        request_id,
-        actor_user_id,
-        actor_device_id,
-        action,
-        target_secret_id,
-        result,
-        key_version,
-        metadata_json
-    )
-    values (
-        p_audit_event_id,
-        p_request_id,
-        p_actor_user_id,
-        p_actor_device_id,
-        p_action,
-        p_target_secret_id,
-        p_result,
-        p_key_version,
-        p_metadata_json
-    )
-    on conflict (id) do nothing;
-
-    select *
-    into v_existing_audit_event
-    from public.audit_events ae
-    where ae.id = p_audit_event_id;
-
-    if not found then
-        raise exception 'audit_event_id_conflict' using errcode = '23505';
-    end if;
-
-    if v_existing_audit_event.request_id <> p_request_id
-        or v_existing_audit_event.actor_user_id is distinct from p_actor_user_id
-        or v_existing_audit_event.actor_device_id is distinct from p_actor_device_id
-        or v_existing_audit_event.action <> p_action
-        or v_existing_audit_event.target_secret_id is distinct from p_target_secret_id
-        or v_existing_audit_event.result <> p_result
-        or v_existing_audit_event.key_version is distinct from p_key_version
-        or v_existing_audit_event.metadata_json <> p_metadata_json
-    then
-        raise exception 'audit_event_id_conflict' using errcode = '23505';
-    end if;
-
-    return p_audit_event_id;
-end;
-$$;
-
-comment on function public.rpc_append_audit_event(
-    uuid, uuid, uuid, text, text, uuid, text, integer, jsonb
-) is
-    'Audit append RPC for non-write-path audit events and failure events. Updated in T11/T12 to add siem_forward_failure and audit_report_generate actions.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 4. metadata allowlist / required keys に siem_forward_failure / audit_report_generate を追加
--- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function public.audit_metadata_has_missing_required_key_for_action(
-    p_action text,
-    p_result text,
-    p_metadata_json jsonb,
-    p_require_source_event_at boolean default true
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_required_keys text[];
-    v_summary_required_keys text[];
-begin
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        return true;
-    end if;
-
-    case p_action
-        when 'encrypt_create', 'encrypt_rotate', 'version_purge' then
-            v_required_keys := array['version', 'secret_version_id'];
-        when 'decrypt' then
-            v_required_keys := array[]::text[];
-        when 'integrity_check' then
-            v_required_keys := array[
-                'check_name',
-                'checked_secret_count',
-                'checked_secret_version_count',
-                'checked_audit_event_count',
-                'duration_ms',
-                'violation_count',
-                'violation_summary',
-                'trigger'
-            ];
-            v_summary_required_keys := array[
-                'current_version_invalid',
-                'version_invalid',
-                'retention_exceeded',
-                'ciphertext_empty',
-                'encrypted_data_key_empty',
-                'nonce_length_invalid',
-                'algorithm_invalid',
-                'nonce_duplicate',
-                'aad_keys_invalid',
-                'aad_row_mismatch',
-                'created_at_mismatch',
-                'audit_action_invalid',
-                'audit_result_invalid',
-                'audit_metadata_not_object',
-                'audit_metadata_forbidden_key',
-                'audit_source_event_at_invalid'
-            ];
-        when 'restore_test' then
-            v_required_keys := array['phase', 'sample_count', 'trigger', 'duration_ms'];
-        when 'auth_failure' then
-            v_required_keys := array['error_code'];
-        when 'key_rotation_start' then
-            v_required_keys := array['old_key_version', 'new_key_version'];
-        when 'key_rotation_reencrypt' then
-            v_required_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'batch_size',
-                'processed_count',
-                'remaining_count'
-            ];
-        when 'key_rotation_complete' then
-            v_required_keys := array['old_key_version', 'new_key_version', 'remaining_count'];
-        when 'monthly_digest_generate', 'monthly_digest_verify' then
-            v_required_keys := array[]::text[];
-        when 'archive_export', 'digest_timestamping' then
-            v_required_keys := array['target_year_month'];
-        when 'siem_forward_failure' then
-            v_required_keys := array['error_code'];
-        when 'audit_report_generate' then
-            v_required_keys := array['format', 'period_end', 'period_start'];
-        else
-            return true;
-    end case;
-
-    if p_require_source_event_at then
-        v_required_keys := v_required_keys || array['source_event_at'];
-    end if;
-
-    if not (p_metadata_json ?& v_required_keys) then
-        return true;
-    end if;
-
-    if p_action = 'integrity_check' then
-        if jsonb_typeof(p_metadata_json -> 'violation_summary') <> 'object' then
-            return true;
-        end if;
-
-        if not ((p_metadata_json -> 'violation_summary') ?& v_summary_required_keys) then
-            return true;
-        end if;
-    end if;
-
-    return false;
-end;
-$$;
-
-create or replace function public.audit_metadata_has_unknown_key_for_action(
-    p_action text,
-    p_result text,
-    p_metadata_json jsonb
-)
-returns boolean
-language plpgsql
-stable
-set search_path = public, pg_temp
-as $$
-declare
-    v_key text;
-    v_allowed_keys text[];
-    v_violation_summary_keys text[];
-begin
-    if jsonb_typeof(p_metadata_json) <> 'object' then
-        return true;
-    end if;
-
-    -- ACTION_ALLOWLIST_START
-    case p_action
-        when 'encrypt_create', 'encrypt_rotate', 'version_purge' then
-            v_allowed_keys := array['version', 'secret_version_id', 'source_event_at'];
-        when 'decrypt' then
-            if p_result = 'failure' then
-                v_allowed_keys := array['attempted_secret_id', 'source_event_at'];
-            else
-                v_allowed_keys := array['source_event_at'];
-            end if;
-        when 'integrity_check' then
-            v_allowed_keys := array[
-                'check_name',
-                'checked_secret_count',
-                'checked_secret_version_count',
-                'checked_audit_event_count',
-                'duration_ms',
-                'violation_count',
-                'violation_summary',
-                'trigger',
-                'error_code',
-                'source_event_at'
-            ];
-            v_violation_summary_keys := array[
-                'current_version_invalid',
-                'version_invalid',
-                'retention_exceeded',
-                'ciphertext_empty',
-                'encrypted_data_key_empty',
-                'nonce_length_invalid',
-                'algorithm_invalid',
-                'nonce_duplicate',
-                'aad_keys_invalid',
-                'aad_row_mismatch',
-                'created_at_mismatch',
-                'audit_action_invalid',
-                'audit_result_invalid',
-                'audit_metadata_not_object',
-                'audit_metadata_forbidden_key',
-                'audit_source_event_at_invalid'
-            ];
-        when 'restore_test' then
-            v_allowed_keys := array[
-                'phase',
-                'sample_count',
-                'trigger',
-                'duration_ms',
-                'error_code',
-                'failed_version',
-                'reason',
-                'source_event_at'
-            ];
-        when 'auth_failure' then
-            v_allowed_keys := array['error_code', 'source_event_at'];
-        when 'key_rotation_start' then
-            v_allowed_keys := array['old_key_version', 'new_key_version', 'source_event_at'];
-        when 'key_rotation_reencrypt' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'batch_size',
-                'processed_count',
-                'remaining_count',
-                'source_event_at'
-            ];
-        when 'key_rotation_complete' then
-            v_allowed_keys := array[
-                'old_key_version',
-                'new_key_version',
-                'remaining_count',
-                'source_event_at'
-            ];
-        when 'monthly_digest_generate', 'monthly_digest_verify' then
-            v_allowed_keys := array['error_code', 'target_year_month', 'source_event_at'];
-        when 'archive_export' then
-            v_allowed_keys := array[
-                'archive_key',
-                'digest_hash',
-                'target_year_month',
-                'error_code',
-                'source_event_at'
-            ];
-        when 'digest_timestamping' then
-            v_allowed_keys := array[
-                'digest_hash',
-                'timestamp_token_hash',
-                'target_year_month',
-                'error_code',
-                'source_event_at'
-            ];
-        when 'siem_forward_failure' then
-            v_allowed_keys := array[
-                'error_code',
-                'event_type',
-                'event_count',
-                'source_event_at'
-            ];
-        when 'audit_report_generate' then
-            v_allowed_keys := array[
-                'error_code',
-                'format',
-                'period_end',
-                'period_start',
-                'source_event_at'
-            ];
-        else
-            return true;
-    end case;
-    -- ACTION_ALLOWLIST_END
-
-    for v_key in select jsonb_object_keys(p_metadata_json)
-    loop
-        if not (v_key = any(v_allowed_keys)) then
-            return true;
-        end if;
-    end loop;
-
-    if p_action = 'integrity_check'
-        and p_metadata_json ? 'violation_summary'
-        and jsonb_typeof(p_metadata_json -> 'violation_summary') = 'object'
-    then
-        for v_key in select jsonb_object_keys(p_metadata_json -> 'violation_summary')
-        loop
-            if not (v_key = any(v_violation_summary_keys)) then
-                return true;
-            end if;
-        end loop;
-    end if;
-
-    return false;
-end;
-$$;
-
-comment on function public.audit_metadata_has_unknown_key_for_action(text, text, jsonb)
-is 'Returns true when audit metadata contains a key outside the allowlist for the given action. Updated in T11/T12 to include siem_forward_failure and audit_report_generate actions.';
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 5. 期間指定レポート集計 RPC（read-only）
--- ─────────────────────────────────────────────────────────────────────────────
+-- Period-bounded audit report summary. The RPC performs read-only aggregation and
+-- returns non-secret counts/status only.
 
 create or replace function public.rpc_audit_report_summary(
     p_period_start text,
@@ -7025,5 +4406,4 @@ comment on function public.rpc_audit_report_summary(text, text)
 is 'Returns a read-only JSONB summary for audit report generation over [period_start, period_end). Does not modify ledger_entries or audit_events.';
 
 revoke execute on function public.rpc_audit_report_summary(text, text) from public, anon, authenticated;
-revoke execute on function public.rpc_audit_report_summary(text, text) from public;
 grant execute on function public.rpc_audit_report_summary(text, text) to service_role;
