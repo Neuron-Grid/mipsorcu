@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mipsorcu::{
     LEDGER_CANONICALIZATION_VERSION_V1, LEDGER_ED25519_SECRET_KEY_LENGTH,
     LEDGER_HASH_ALGORITHM_SHA256, LEDGER_HASH_LENGTH, LEDGER_SIGNATURE_ALGORITHM_ED25519,
-    LEDGER_SIGNATURE_LENGTH, MASTER_KEY_LENGTH, SourceEventAt,
+    LEDGER_SIGNATURE_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey, MASTER_KEY_LENGTH,
+    SourceEventAt,
 };
 use serde_json::{Value, json};
 
@@ -57,7 +58,7 @@ fn spawn_key_rotation_start_server(
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (mut stream, _) = listener.accept()?;
             let request = read_http_request(&mut stream)?;
             let path = request.path.clone();
@@ -75,7 +76,14 @@ fn spawn_key_rotation_start_server(
                 )
             })?;
 
-            if path.starts_with("/rest/v1/ledger_chain_state") {
+            if path == "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status" {
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "OK",
+                    &ledger_signing_public_key_status_body(),
+                )?;
+            } else if path.starts_with("/rest/v1/ledger_chain_state") {
                 write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
             } else if append_status == 200 {
                 let body = append_success_body.as_deref().unwrap_or(r#""ok""#);
@@ -149,6 +157,7 @@ fn key_rotation_start_appends_audit_event_with_signed_ledger_entry()
     let (supabase_url, receiver, server_thread) = spawn_key_rotation_start_server(200, r#""ok""#)?;
 
     let run = run_key_rotation_start(&supabase_url, "success")?;
+    let status_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
     let chain_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
     let audit_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
     server_thread
@@ -166,6 +175,11 @@ fn key_rotation_start_appends_audit_event_with_signed_ledger_entry()
         "success stderr should be empty: {stderr}"
     );
 
+    assert_eq!(status_request.method, "POST");
+    assert_eq!(
+        status_request.path,
+        "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status"
+    );
     assert_eq!(chain_request.method, "GET");
     assert!(
         chain_request
@@ -245,6 +259,7 @@ fn key_rotation_start_fails_when_append_audit_event_with_ledger_fails()
         spawn_key_rotation_start_server(500, r#"{"message":"secret internal upstream details"}"#)?;
 
     let run = run_key_rotation_start(&supabase_url, "append-failure")?;
+    let status_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
     let chain_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
     let audit_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
     server_thread
@@ -255,6 +270,11 @@ fn key_rotation_start_fails_when_append_audit_event_with_ledger_fails()
     assert_eq!(run.output.status.code(), Some(2));
     let stdout = String::from_utf8_lossy(&run.output.stdout);
     assert!(!stdout.contains("key_rotation_start request_id="));
+    assert_eq!(status_request.method, "POST");
+    assert_eq!(
+        status_request.path,
+        "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status"
+    );
     assert_eq!(chain_request.method, "GET");
     assert!(
         chain_request
@@ -332,6 +352,27 @@ fn ledger_chain_head_body() -> String {
     json!([{
         "last_sequence_no": 0,
         "last_entry_hash": "\\x0000000000000000000000000000000000000000000000000000000000000000",
+    }])
+    .to_string()
+}
+
+fn ledger_signing_public_key_status_body() -> String {
+    let key = LedgerSigningKey::from_secret_key_bytes(
+        LedgerSignatureKeyVersion::new(1).expect("valid key version"),
+        &LEDGER_SIGNING_KEY_BYTES,
+    )
+    .expect("valid signing key")
+    .verification_key();
+
+    json!([{
+        "key_version": 1,
+        "public_key": format!("\\x{}", hex::encode(key.as_bytes())),
+        "public_key_fingerprint": key.fingerprint_hex(),
+        "algorithm": "ed25519",
+        "status": "active",
+        "created_at": "2026-05-13T00:00:00Z",
+        "activated_at": "2026-05-13T00:00:00Z",
+        "retired_at": null
     }])
     .to_string()
 }

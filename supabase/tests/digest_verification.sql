@@ -320,7 +320,7 @@ select is(
         null,
         '{"error_code":"x","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
     ),
-    'ERROR:  invalid_rpc_input',
+    'invalid_rpc_input',
     'rpc_append_audit_event rejects monthly_digest_verify success (failure-only)'
 );
 
@@ -337,7 +337,7 @@ select is(
         null,
         '{"error_code":"x","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
     ),
-    'ERROR:  invalid_rpc_input',
+    'invalid_rpc_input',
     'rpc_append_audit_event rejects monthly_digest_generate success (failure-only)'
 );
 

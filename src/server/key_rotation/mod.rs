@@ -27,6 +27,10 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), KeyRotati
         config.supabase_service_role_key.clone(),
         config.supabase_publishable_key.clone(),
     ));
+    supabase_client
+        .ensure_active_ledger_signing_public_key(&config.ledger_signing_key.verification_key())
+        .await
+        .map_err(KeyRotationCliError::Supabase)?;
     let ledger_appender = Arc::new(LedgerAppender::new(
         supabase_client.clone(),
         config.ledger_signing_key.clone(),

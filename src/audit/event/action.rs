@@ -12,6 +12,12 @@ pub enum AuditAction {
     KeyRotationStart,
     KeyRotationReencrypt,
     KeyRotationComplete,
+    /// Ledger 署名公開鍵の registry 作成。
+    SignatureKeyCreated,
+    /// Ledger 署名鍵の新規署名用有効化。
+    SignatureKeyActivated,
+    /// Ledger 署名鍵の新規署名用失効。過去署名検証には保持する。
+    SignatureKeyRetired,
     /// 月次 digest 生成操作（失敗時の監査記録用）。
     MonthlyDigestGenerate,
     /// 月次 digest 検証操作（失敗時の監査記録用）。
@@ -43,6 +49,9 @@ impl AuditAction {
             "key_rotation_start" => Ok(Self::KeyRotationStart),
             "key_rotation_reencrypt" => Ok(Self::KeyRotationReencrypt),
             "key_rotation_complete" => Ok(Self::KeyRotationComplete),
+            "signature_key_created" => Ok(Self::SignatureKeyCreated),
+            "signature_key_activated" => Ok(Self::SignatureKeyActivated),
+            "signature_key_retired" => Ok(Self::SignatureKeyRetired),
             "monthly_digest_generate" => Ok(Self::MonthlyDigestGenerate),
             "monthly_digest_verify" => Ok(Self::MonthlyDigestVerify),
             "archive_export" => Ok(Self::ArchiveExport),
@@ -69,6 +78,9 @@ impl AuditAction {
             Self::KeyRotationStart => "key_rotation_start",
             Self::KeyRotationReencrypt => "key_rotation_reencrypt",
             Self::KeyRotationComplete => "key_rotation_complete",
+            Self::SignatureKeyCreated => "signature_key_created",
+            Self::SignatureKeyActivated => "signature_key_activated",
+            Self::SignatureKeyRetired => "signature_key_retired",
             Self::MonthlyDigestGenerate => "monthly_digest_generate",
             Self::MonthlyDigestVerify => "monthly_digest_verify",
             Self::ArchiveExport => "archive_export",

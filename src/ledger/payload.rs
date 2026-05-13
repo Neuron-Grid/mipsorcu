@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 
+use crate::types::SourceEventAt;
+
 use super::canonical::CanonicalPayloadObject;
 use super::constants::{
     FORBIDDEN_LEDGER_PAYLOAD_KEYS, LEDGER_I64_MAX_U64, LEDGER_PAYLOAD_MAX_CANONICAL_BYTES,
@@ -124,8 +126,16 @@ fn validate_payload_object(
 
 fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
     match key {
-        "version" | "key_version" | "old_key_version" | "new_key_version" | "retention_limit"
-        | "start_sequence_no" | "end_sequence_no" | "entry_count" | "target_sequence_no" => {
+        "version"
+        | "key_version"
+        | "old_key_version"
+        | "new_key_version"
+        | "signature_key_version"
+        | "retention_limit"
+        | "start_sequence_no"
+        | "end_sequence_no"
+        | "entry_count"
+        | "target_sequence_no" => {
             let parsed = require_positive_json_u64(key, value)?;
             if key == "retention_limit" && parsed != 4 {
                 return Err(LedgerError::InvalidPayloadField {
@@ -165,7 +175,10 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         ),
         // monthly_digest 専用フィールド
         "target_year_month" => validate_year_month_value(key, value),
-        "digest_hash" | "timestamp_token_hash" => validate_digest_hash_value(key, value),
+        "digest_hash" | "timestamp_token_hash" | "public_key_fingerprint" => {
+            validate_digest_hash_value(key, value)
+        }
+        "created_at" | "activated_at" | "retired_at" => validate_source_event_at_value(key, value),
         _ => Err(LedgerError::UnknownPayloadKey {
             key: key.to_owned(),
             entry_type: LedgerEntryType::SecretCreated,
@@ -225,6 +238,22 @@ fn validate_year_month_value(key: &str, value: &Value) -> Result<(), LedgerError
             expected: "a string in YYYY-MM format",
         });
     }
+
+    Ok(())
+}
+
+fn validate_source_event_at_value(key: &str, value: &Value) -> Result<(), LedgerError> {
+    let Some(text) = value.as_str() else {
+        return Err(LedgerError::InvalidPayloadField {
+            key: key.to_owned(),
+            expected: "an RFC3339 UTC timestamp ending with Z",
+        });
+    };
+
+    SourceEventAt::parse(text).map_err(|_| LedgerError::InvalidPayloadField {
+        key: key.to_owned(),
+        expected: "an RFC3339 UTC timestamp ending with Z",
+    })?;
 
     Ok(())
 }

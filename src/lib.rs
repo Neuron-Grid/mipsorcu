@@ -38,6 +38,7 @@ pub use audit::{
     LocalAuditFallbackStore, LocalAuditStoreError, MonthlyDigestGenerateMetadata,
     MonthlyDigestVerifyMetadata, RequestId, ResendAuditSummary, RestoreTestMetadata,
     RolloverArchive, RolloverOutcome, SchedulerJobMetadata, SiemForwardFailureMetadata,
+    SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata,
     SweptArchive, VersionPurgeMetadata,
 };
 pub use auth::{

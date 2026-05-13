@@ -12,6 +12,9 @@ pub enum LedgerEntryType {
     KeyRotationReencrypted,
     KeyRotationCompleted,
     KeyRotationAborted,
+    SignatureKeyCreated,
+    SignatureKeyActivated,
+    SignatureKeyRetired,
     LedgerVerified,
     LedgerVerificationFailed,
     AuditFallbackResent,
@@ -39,6 +42,9 @@ impl LedgerEntryType {
             "key_rotation_reencrypted" => Ok(Self::KeyRotationReencrypted),
             "key_rotation_completed" => Ok(Self::KeyRotationCompleted),
             "key_rotation_aborted" => Ok(Self::KeyRotationAborted),
+            "signature_key_created" => Ok(Self::SignatureKeyCreated),
+            "signature_key_activated" => Ok(Self::SignatureKeyActivated),
+            "signature_key_retired" => Ok(Self::SignatureKeyRetired),
             "ledger_verified" => Ok(Self::LedgerVerified),
             "ledger_verification_failed" => Ok(Self::LedgerVerificationFailed),
             "audit_fallback_resent" => Ok(Self::AuditFallbackResent),
@@ -65,6 +71,9 @@ impl LedgerEntryType {
             Self::KeyRotationReencrypted => "key_rotation_reencrypted",
             Self::KeyRotationCompleted => "key_rotation_completed",
             Self::KeyRotationAborted => "key_rotation_aborted",
+            Self::SignatureKeyCreated => "signature_key_created",
+            Self::SignatureKeyActivated => "signature_key_activated",
+            Self::SignatureKeyRetired => "signature_key_retired",
             Self::LedgerVerified => "ledger_verified",
             Self::LedgerVerificationFailed => "ledger_verification_failed",
             Self::AuditFallbackResent => "audit_fallback_resent",
@@ -109,6 +118,21 @@ impl LedgerEntryType {
                 &["new_key_version", "old_key_version", "remaining_count"]
             }
             Self::KeyRotationAborted => &["new_key_version", "old_key_version", "reason_code"],
+            Self::SignatureKeyCreated => &[
+                "created_at",
+                "public_key_fingerprint",
+                "signature_key_version",
+            ],
+            Self::SignatureKeyActivated => &[
+                "activated_at",
+                "public_key_fingerprint",
+                "signature_key_version",
+            ],
+            Self::SignatureKeyRetired => &[
+                "public_key_fingerprint",
+                "retired_at",
+                "signature_key_version",
+            ],
             Self::LedgerVerified => &[
                 "checked_count",
                 "duration_ms",

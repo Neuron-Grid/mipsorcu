@@ -189,6 +189,20 @@ fn restore_retired_verifying_key() {
 }
 
 #[test]
+fn restore_created_verifying_key_for_lifecycle_entries() {
+    let (signed, public_key_bytes) = test_signed_ledger_entry();
+    let row = make_dto_row(&signed, &public_key_bytes, Some("created"));
+
+    let key = row
+        .try_restore_verifying_key()
+        .expect("should restore key")
+        .expect("key should be present");
+
+    assert_eq!(key.key_version().get(), 1);
+    assert_eq!(key.as_bytes(), public_key_bytes);
+}
+
+#[test]
 fn detect_missing_public_key() {
     let (signed, public_key_bytes) = test_signed_ledger_entry();
     let row = make_dto_row(&signed, &public_key_bytes, None);

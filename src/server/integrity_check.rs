@@ -251,6 +251,10 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         config.supabase_service_role_key,
         config.supabase_publishable_key,
     ));
+    supabase_client
+        .ensure_active_ledger_signing_public_key(&config.ledger_signing_key.verification_key())
+        .await
+        .map_err(|error| IntegrityCheckError::Config(error.to_string()))?;
     let audit_appender = SupabaseAuditAppender::new(supabase_client.clone());
     let audit_fallback_store = LocalAuditFallbackStore::with_rollover_config(
         &config.audit_fallback_path,

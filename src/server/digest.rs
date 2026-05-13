@@ -160,6 +160,10 @@ async fn run_generate_command(
         config.supabase_service_role_key.clone(),
         config.supabase_publishable_key.clone(),
     ));
+    supabase_client
+        .ensure_active_ledger_signing_public_key(&config.ledger_signing_key.verification_key())
+        .await
+        .map_err(|error| DigestCliError::Config(error.to_string()))?;
 
     let signing_key = config.ledger_signing_key.clone();
     let ledger_appender = Arc::new(crate::server::ledger_appender::LedgerAppender::new(

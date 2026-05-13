@@ -392,7 +392,7 @@ is 'Returns the ledger_entries range (start/end sequence, hashes, count) for the
 create or replace function public.rpc_check_monthly_digest_exists(
     p_year_month text
 )
-returns table(exists boolean)
+returns table("exists" boolean)
 language plpgsql
 stable
 set search_path = public, pg_temp

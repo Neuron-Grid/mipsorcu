@@ -11,7 +11,8 @@ pub use builders::{
     IncidentDetectedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
     KeyRotationReencryptMetadata, KeyRotationStartMetadata, MonthlyDigestGenerateMetadata,
     MonthlyDigestVerifyMetadata, RestoreTestMetadata, SchedulerJobMetadata,
-    SiemForwardFailureMetadata, VersionPurgeMetadata,
+    SiemForwardFailureMetadata, SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata,
+    SignatureKeyRetiredMetadata, VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
@@ -307,6 +308,33 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            AuditAction::SignatureKeyCreated => [
+                "created_at",
+                "public_key_fingerprint",
+                "signature_key_version",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            AuditAction::SignatureKeyActivated => [
+                "activated_at",
+                "public_key_fingerprint",
+                "signature_key_version",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            AuditAction::SignatureKeyRetired => [
+                "public_key_fingerprint",
+                "retired_at",
+                "signature_key_version",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
             // 月次 digest 生成失敗時の監査記録。
             // error_code は failure result 時のみ記録する。
             AuditAction::MonthlyDigestGenerate => {
@@ -445,6 +473,27 @@ fn validate_required_metadata_keys(
         AuditAction::KeyRotationComplete => {
             vec!["old_key_version", "new_key_version", "remaining_count"]
         }
+        AuditAction::SignatureKeyCreated => {
+            vec![
+                "signature_key_version",
+                "public_key_fingerprint",
+                "created_at",
+            ]
+        }
+        AuditAction::SignatureKeyActivated => {
+            vec![
+                "signature_key_version",
+                "public_key_fingerprint",
+                "activated_at",
+            ]
+        }
+        AuditAction::SignatureKeyRetired => {
+            vec![
+                "signature_key_version",
+                "public_key_fingerprint",
+                "retired_at",
+            ]
+        }
         // monthly_digest_generate / verify は failure 時のみ記録されるが、
         // error_code は必須ではなく、source_event_at のみが必須。
         AuditAction::MonthlyDigestGenerate | AuditAction::MonthlyDigestVerify => Vec::new(),
@@ -517,6 +566,7 @@ fn validate_metadata_values(
         "version",
         "old_key_version",
         "new_key_version",
+        "signature_key_version",
         "batch_size",
         "target_sequence_no",
     ] {
@@ -580,6 +630,20 @@ fn validate_metadata_values(
 
     if let Some(value) = object.get("job_name") {
         validate_non_blank_short_string("job_name", value, 96)?;
+    }
+
+    if let Some(value) = object.get("public_key_fingerprint") {
+        validate_hex_string("public_key_fingerprint", value, 64)?;
+    }
+
+    for key in ["created_at", "activated_at", "retired_at"] {
+        if let Some(value) = object.get(key) {
+            let text = value
+                .as_str()
+                .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+            SourceEventAt::parse(text)
+                .map_err(|_| AuditEventError::InvalidMetadataValue { key })?;
+        }
     }
 
     for key in ["detection_source", "dedupe_key", "notification_sink"] {
@@ -722,6 +786,26 @@ fn validate_non_blank_short_string(
         .as_str()
         .ok_or(AuditEventError::InvalidMetadataValue { key })?;
     if text.trim().is_empty() || text.len() > max_len {
+        return Err(AuditEventError::InvalidMetadataValue { key });
+    }
+
+    Ok(())
+}
+
+fn validate_hex_string(
+    key: &'static str,
+    value: &Value,
+    expected_len: usize,
+) -> Result<(), AuditEventError> {
+    let text = value
+        .as_str()
+        .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+
+    if text.len() != expected_len
+        || !text
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+    {
         return Err(AuditEventError::InvalidMetadataValue { key });
     }
 

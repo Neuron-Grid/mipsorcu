@@ -761,10 +761,10 @@ async fn run_archive_export_job(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LedgerVerificationSummary {
-    valid: bool,
-    checked_count: u64,
-    error_code: Option<&'static str>,
+pub(crate) struct LedgerVerificationSummary {
+    pub(crate) valid: bool,
+    pub(crate) checked_count: u64,
+    pub(crate) error_code: Option<&'static str>,
 }
 
 async fn verify_full_ledger_hash_chain(
@@ -777,7 +777,7 @@ async fn verify_full_ledger_hash_chain(
         .map_err(|_| "ledger_verification_join_failed")?
 }
 
-async fn verify_full_ledger_signatures(
+pub(crate) async fn verify_full_ledger_signatures(
     client: &SupabaseClient,
 ) -> Result<LedgerVerificationSummary, &'static str> {
     let (_chain_head, rows) = fetch_full_ledger_material_rows(client).await?;

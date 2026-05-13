@@ -112,8 +112,8 @@ impl LedgerVerificationMaterialRow {
             return Err(LedgerError::InvalidVerificationKey);
         }
 
-        // Accept both active and retired keys.
-        if pk_status != "active" && pk_status != "retired" {
+        // Accept lifecycle registry states. `retired` still verifies old signatures.
+        if pk_status != "created" && pk_status != "active" && pk_status != "retired" {
             return Err(LedgerError::InvalidVerificationKey);
         }
 
@@ -259,6 +259,11 @@ struct LedgerVerificationMaterialResponse {
         reason = "fields exist for serde(deny_unknown_fields) validation"
     )]
     pk_created_at: Option<String>,
+    #[expect(
+        dead_code,
+        reason = "fields exist for serde(deny_unknown_fields) validation"
+    )]
+    pk_activated_at: Option<String>,
     #[expect(
         dead_code,
         reason = "fields exist for serde(deny_unknown_fields) validation"

@@ -8,12 +8,10 @@ use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::{JwksCache, JwtVerifier, JwtVerifierConfig, fetch_jwks};
 use crate::incident::{DummyNotificationSink, IncidentRecorder};
 use crate::server::state::{AppState, ReadinessState};
-use crate::server::supabase::{
-    SupabaseAuditAppender, SupabaseClient, classify_register_public_key_error,
-};
+use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::{
     audit_report, auditor, background, config, digest, integrity_check, key_rotation, restore_test,
-    router, scheduler,
+    router, scheduler, signature_key,
 };
 use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
 
@@ -84,6 +82,18 @@ pub async fn run_entrypoint() {
             });
 
             if let Err(error) = audit_report::run_cli(config, command_args).await {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        Some((command, command_args)) if command == "signature-key" => {
+            init_tracing();
+            let config = config::load_config().unwrap_or_else(|error| {
+                tracing::error!(error = %error, "configuration loading failed");
+                std::process::exit(1);
+            });
+
+            if let Err(error) = signature_key::run_cli(config, command_args).await {
                 eprintln!("{error}");
                 std::process::exit(2);
             }
@@ -173,7 +183,7 @@ async fn run_server_with_config(config: config::AppConfig) {
     let app_fallback_store = fallback_store.clone();
     let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store.clone()));
     let ledger_signing_key = config.ledger_signing_key.clone();
-    register_ledger_signing_public_key_at_startup(&supabase_client, &ledger_signing_key).await;
+    ensure_active_ledger_signing_public_key_at_startup(&supabase_client, &ledger_signing_key).await;
     let ledger_appender = Arc::new(crate::server::ledger_appender::LedgerAppender::new(
         supabase_client.clone(),
         ledger_signing_key,
@@ -265,7 +275,7 @@ pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) -> bool 
     )
 }
 
-async fn register_ledger_signing_public_key_at_startup(
+async fn ensure_active_ledger_signing_public_key_at_startup(
     client: &SupabaseClient,
     signing_key: &crate::ledger::LedgerSigningKey,
 ) {
@@ -273,26 +283,16 @@ async fn register_ledger_signing_public_key_at_startup(
     let key_version = verification_key.key_version().get();
 
     match client
-        .register_ledger_signing_public_key(&verification_key)
+        .ensure_active_ledger_signing_public_key(&verification_key)
         .await
     {
-        Ok(outcome) => {
-            if outcome.replayed() {
-                tracing::info!(
-                    key_version,
-                    "ledger signing public key already registered (idempotent)"
-                );
-            } else {
-                tracing::info!(key_version, "ledger signing public key registered");
-            }
-        }
+        Ok(()) => tracing::info!(key_version, "ledger signing public key is active"),
         Err(error) => {
-            let classification = classify_register_public_key_error(&error);
             tracing::error!(
                 key_version,
-                error_code = classification.as_error_code(),
+                error_code = "ledger_signing_public_key_not_active",
                 upstream_status = error.upstream_status(),
-                "ledger signing public key registration failed"
+                "configured ledger signing public key is not active"
             );
             std::process::exit(1);
         }
@@ -306,6 +306,7 @@ fn usage() -> String {
         auditor::usage(),
         digest::usage(),
         audit_report::usage(),
+        signature_key::usage(),
     ]
     .join("\n")
 }

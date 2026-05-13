@@ -2,6 +2,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use super::canonical::LedgerCanonicalPayload;
@@ -192,6 +193,12 @@ impl LedgerVerifyingKey {
 
     pub fn as_bytes(&self) -> [u8; LEDGER_ED25519_PUBLIC_KEY_LENGTH] {
         self.verifying_key.to_bytes()
+    }
+
+    pub fn fingerprint_hex(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.as_bytes());
+        hex::encode(hasher.finalize())
     }
 
     pub(super) fn verify_payload(

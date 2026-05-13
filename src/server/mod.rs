@@ -17,6 +17,7 @@ mod router;
 pub mod runtime;
 mod scheduler;
 pub mod siem_forwarding;
+mod signature_key;
 pub mod state;
 pub mod supabase;
 pub(crate) mod use_cases;

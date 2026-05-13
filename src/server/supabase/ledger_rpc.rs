@@ -153,7 +153,7 @@ impl AppendAuditEventWithLedgerParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AppendLedgerEntryResponse {
+pub(super) struct AppendLedgerEntryResponse {
     ledger_entry_id: String,
     sequence_no: i64,
     entry_hash: String,

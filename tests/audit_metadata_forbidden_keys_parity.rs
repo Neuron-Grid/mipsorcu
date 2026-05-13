@@ -6,8 +6,7 @@ use mipsorcu::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
 };
 
-const LATEST_SIEM_MIGRATION_PATH: &str =
-    "supabase/migrations/1000_add_scheduler_job_audit_and_ledger.sql";
+const LATEST_SIEM_MIGRATION_PATH: &str = "supabase/migrations/1020_add_signature_key_lifecycle.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -502,6 +501,9 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::KeyRotationStart,
         AuditAction::KeyRotationReencrypt,
         AuditAction::KeyRotationComplete,
+        AuditAction::SignatureKeyCreated,
+        AuditAction::SignatureKeyActivated,
+        AuditAction::SignatureKeyRetired,
         AuditAction::MonthlyDigestGenerate,
         AuditAction::MonthlyDigestVerify,
         AuditAction::ArchiveExport,
@@ -509,6 +511,7 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::SiemForwardFailure,
         AuditAction::AuditReportGenerate,
         AuditAction::SchedulerJob,
+        AuditAction::IncidentDetected,
     ]
 }
 
@@ -572,6 +575,30 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "old_key_version",
                 "new_key_version",
                 "remaining_count",
+                "source_event_at",
+            ]
+        }
+        AuditAction::SignatureKeyCreated => {
+            vec![
+                "created_at",
+                "public_key_fingerprint",
+                "signature_key_version",
+                "source_event_at",
+            ]
+        }
+        AuditAction::SignatureKeyActivated => {
+            vec![
+                "activated_at",
+                "public_key_fingerprint",
+                "signature_key_version",
+                "source_event_at",
+            ]
+        }
+        AuditAction::SignatureKeyRetired => {
+            vec![
+                "public_key_fingerprint",
+                "retired_at",
+                "signature_key_version",
                 "source_event_at",
             ]
         }
