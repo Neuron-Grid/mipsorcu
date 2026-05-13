@@ -30,6 +30,8 @@ pub enum AuditAction {
     SiemForwardFailure,
     /// 監査レポート生成操作（成功・失敗両方の監査記録用）。
     AuditReportGenerate,
+    /// 監査担当者向け UI backend read-only API の閲覧操作。
+    AuditUiRead,
     /// 定期実行スケジューラ job の実行結果（成功・失敗両方の監査記録用）。
     SchedulerJob,
     /// インシデント検知（failure-only の監査）。
@@ -58,6 +60,7 @@ impl AuditAction {
             "digest_timestamping" => Ok(Self::DigestTimestamping),
             "siem_forward_failure" => Ok(Self::SiemForwardFailure),
             "audit_report_generate" => Ok(Self::AuditReportGenerate),
+            "audit_ui_read" => Ok(Self::AuditUiRead),
             "scheduler_job" => Ok(Self::SchedulerJob),
             "incident_detected" => Ok(Self::IncidentDetected),
             _ => Err(AuditEventError::UnknownAction {
@@ -87,6 +90,7 @@ impl AuditAction {
             Self::DigestTimestamping => "digest_timestamping",
             Self::SiemForwardFailure => "siem_forward_failure",
             Self::AuditReportGenerate => "audit_report_generate",
+            Self::AuditUiRead => "audit_ui_read",
             Self::SchedulerJob => "scheduler_job",
             Self::IncidentDetected => "incident_detected",
         }

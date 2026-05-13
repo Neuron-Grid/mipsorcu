@@ -670,6 +670,21 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "severity",
             ]
         }
+        AuditAction::AuditUiRead => {
+            vec![
+                "endpoint",
+                "method",
+                "resource",
+                "result_count",
+                "period_start",
+                "period_end",
+                "start_sequence_no",
+                "end_sequence_no",
+                "target_year_month",
+                "error_code",
+                "source_event_at",
+            ]
+        }
     };
     keys.sort();
     keys.into_iter().map(|s| s.to_owned()).collect()

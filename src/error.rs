@@ -397,6 +397,7 @@ impl From<KeyringError> for SecretWriteError {
 pub enum AuthorizationError {
     OwnerMismatch,
     NotCurrentVersion,
+    MissingAuditorRole,
 }
 
 impl fmt::Display for AuthorizationError {
@@ -407,6 +408,9 @@ impl fmt::Display for AuthorizationError {
             }
             Self::NotCurrentVersion => {
                 write!(formatter, "requested secret version is not current")
+            }
+            Self::MissingAuditorRole => {
+                write!(formatter, "actor is not allowed to read audit ui data")
             }
         }
     }

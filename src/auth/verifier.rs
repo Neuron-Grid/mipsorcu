@@ -89,6 +89,7 @@ impl JwtVerifier {
             token.claims.iss,
             token.claims.aud,
             token.claims.exp,
+            token.claims.mipsorcu_roles,
         ))
     }
 }
@@ -99,6 +100,8 @@ struct RegisteredJwtClaims {
     iss: String,
     aud: String,
     exp: u64,
+    #[serde(default)]
+    mipsorcu_roles: Vec<String>,
 }
 
 fn map_jwt_error(error: jsonwebtoken::errors::Error) -> JwtVerificationError {

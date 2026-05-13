@@ -35,6 +35,7 @@ pub struct VerifiedJwtClaims {
     issuer: String,
     audience: String,
     expires_at: u64,
+    mipsorcu_roles: Vec<String>,
 }
 
 impl VerifiedJwtClaims {
@@ -47,6 +48,7 @@ impl VerifiedJwtClaims {
             issuer: String::new(),
             audience: String::new(),
             expires_at: 0,
+            mipsorcu_roles: Vec::new(),
         }
     }
 
@@ -55,12 +57,14 @@ impl VerifiedJwtClaims {
         issuer: String,
         audience: String,
         expires_at: u64,
+        mipsorcu_roles: Vec<String>,
     ) -> Self {
         Self {
             subject_user_id,
             issuer,
             audience,
             expires_at,
+            mipsorcu_roles,
         }
     }
 
@@ -79,6 +83,16 @@ impl VerifiedJwtClaims {
     pub fn expires_at(&self) -> u64 {
         self.expires_at
     }
+
+    pub fn mipsorcu_roles(&self) -> &[String] {
+        &self.mipsorcu_roles
+    }
+
+    pub fn has_mipsorcu_role(&self, role: &str) -> bool {
+        self.mipsorcu_roles
+            .iter()
+            .any(|candidate| candidate == role)
+    }
 }
 
 impl fmt::Debug for VerifiedJwtClaims {
@@ -89,6 +103,7 @@ impl fmt::Debug for VerifiedJwtClaims {
             .field("issuer", &self.issuer)
             .field("audience", &self.audience)
             .field("expires_at", &self.expires_at)
+            .field("mipsorcu_roles", &self.mipsorcu_roles)
             .finish()
     }
 }

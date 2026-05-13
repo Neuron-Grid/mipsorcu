@@ -1,5 +1,6 @@
 mod audit_report_rpc;
 mod audit_rpc;
+mod audit_ui_rpc;
 mod client;
 mod digest_rpc;
 mod error;
@@ -22,6 +23,11 @@ pub use audit_report_rpc::{
     VerificationFailureReportItem,
 };
 pub use audit_rpc::SupabaseAuditAppender;
+pub use audit_ui_rpc::{
+    AuditUiAuditEventRow, AuditUiAuditEventsParams, AuditUiHashChainVerification,
+    AuditUiIntegrityStatusRow, AuditUiLedgerEntriesParams, AuditUiLedgerEntryRow,
+    AuditUiSecretInventoryRow, AuditUiVerificationFailureRow, AuditUiVerificationFailuresParams,
+};
 pub use client::SupabaseClient;
 pub use digest_rpc::{DigestRpcError, LedgerRangeForMonth, classify_digest_rpc_error};
 pub use error::SupabaseRpcError;

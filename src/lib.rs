@@ -31,23 +31,23 @@ pub use audit::{
     ArchiveExportMetadata, ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent,
     AuditEventAppender, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
     AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditReportGenerateMetadata, AuditResult,
-    AuditTrigger, AuthFailureMetadata, DecryptMetadata, DigestTimestampingMetadata,
-    EncryptCreateMetadata, EncryptRotateMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
-    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IncidentDetectedMetadata, IntegrityCheckMetadata,
-    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
-    LocalAuditFallbackStore, LocalAuditStoreError, MonthlyDigestGenerateMetadata,
-    MonthlyDigestVerifyMetadata, RequestId, ResendAuditSummary, RestoreTestMetadata,
-    RolloverArchive, RolloverOutcome, SchedulerJobMetadata, SiemForwardFailureMetadata,
-    SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata,
-    SweptArchive, VersionPurgeMetadata,
+    AuditTrigger, AuditUiReadMetadata, AuthFailureMetadata, DecryptMetadata,
+    DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
+    FORBIDDEN_AUDIT_METADATA_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
+    IncidentDetectedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
+    KeyRotationReencryptMetadata, KeyRotationStartMetadata, LocalAuditFallbackStore,
+    LocalAuditStoreError, MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RequestId,
+    ResendAuditSummary, RestoreTestMetadata, RolloverArchive, RolloverOutcome,
+    SchedulerJobMetadata, SiemForwardFailureMetadata, SignatureKeyActivatedMetadata,
+    SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata, SweptArchive, VersionPurgeMetadata,
 };
 pub use auth::{
     Jwk, Jwks, JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, RawJwt,
     VerifiedJwtClaims, fetch_jwks,
 };
 pub use authorization::{
-    authorize_current_version_decrypt, authorize_existing_secret_version_write,
-    authorize_new_secret_create,
+    authorize_audit_ui_read, authorize_current_version_decrypt,
+    authorize_existing_secret_version_write, authorize_new_secret_create,
 };
 pub use crypto::{
     ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, KeyWrapContext, MasterKeyRing, decrypt_secret,

@@ -6,8 +6,8 @@ use std::fmt;
 use serde_json::{Map, Value, json};
 
 pub use builders::{
-    ArchiveExportMetadata, AuditReportGenerateMetadata, AuthFailureMetadata, DecryptMetadata,
-    DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
+    ArchiveExportMetadata, AuditReportGenerateMetadata, AuditUiReadMetadata, AuthFailureMetadata,
+    DecryptMetadata, DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
     IncidentDetectedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
     KeyRotationReencryptMetadata, KeyRotationStartMetadata, MonthlyDigestGenerateMetadata,
     MonthlyDigestVerifyMetadata, RestoreTestMetadata, SchedulerJobMetadata,
@@ -398,6 +398,22 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            AuditAction::AuditUiRead => [
+                "endpoint",
+                "method",
+                "resource",
+                "result_count",
+                "period_start",
+                "period_end",
+                "start_sequence_no",
+                "end_sequence_no",
+                "target_year_month",
+                "error_code",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
             AuditAction::SchedulerJob => [
                 "duration_ms",
                 "error_code",
@@ -505,6 +521,7 @@ fn validate_required_metadata_keys(
         AuditAction::SiemForwardFailure => vec!["error_code"],
         // audit_report_generate は対象期間と出力形式が常に必須。
         AuditAction::AuditReportGenerate => vec!["format", "period_end", "period_start"],
+        AuditAction::AuditUiRead => vec!["endpoint", "method", "resource"],
         AuditAction::SchedulerJob => vec!["job_name", TRIGGER_KEY, "duration_ms"],
         AuditAction::IncidentDetected => vec![
             "incident_type",
@@ -556,6 +573,7 @@ fn validate_metadata_values(
         "sample_count",
         "processed_count",
         "remaining_count",
+        "result_count",
     ] {
         if let Some(value) = object.get(key) {
             validate_u64_value(key, value)?;
@@ -569,6 +587,8 @@ fn validate_metadata_values(
         "signature_key_version",
         "batch_size",
         "target_sequence_no",
+        "start_sequence_no",
+        "end_sequence_no",
     ] {
         if let Some(value) = object.get(key) {
             validate_positive_u64_value(key, value)?;
@@ -630,6 +650,16 @@ fn validate_metadata_values(
 
     if let Some(value) = object.get("job_name") {
         validate_non_blank_short_string("job_name", value, 96)?;
+    }
+
+    for key in ["endpoint", "resource"] {
+        if let Some(value) = object.get(key) {
+            validate_non_blank_short_string(key, value, 128)?;
+        }
+    }
+
+    if let Some(value) = object.get("method") {
+        validate_exact_string("method", value, "GET")?;
     }
 
     if let Some(value) = object.get("public_key_fingerprint") {
