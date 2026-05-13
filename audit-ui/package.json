@@ -8,13 +8,17 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test:e2e": "playwright test",
-    "test:guards": "node scripts/assert-readonly-ui.mjs"
+    "test:guards": "bun run scripts/assert-readonly-ui.ts",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "check": "biome check ."
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.75.0",
     "preact": "^10.27.2"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
     "@playwright/test": "^1.56.1",
     "@preact/preset-vite": "^2.10.2",
     "@types/node": "^24.8.1",

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { type Page, expect, test } from '@playwright/test';
 
 const forbiddenOperationPattern = /作成|更新|削除|復号|修復|再生成|decrypt|create|update|delete|repair|regenerate/i;
 
@@ -9,7 +9,7 @@ const forbiddenSecretValues = [
   'DO_NOT_SHOW_SERVICE_ROLE_KEY',
   'DO_NOT_SHOW_REQUEST_BODY',
   'DO_NOT_SHOW_RESPONSE_BODY',
-  'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdWRpdG9yIn0.signaturevalue'
+  'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdWRpdG9yIn0.signaturevalue',
 ];
 
 const installApiMocks = async (page: Page): Promise<void> => {
@@ -29,9 +29,9 @@ const installApiMocks = async (page: Page): Promise<void> => {
           email: 'auditor@example.test',
           app_metadata: { roles: ['auditor'] },
           user_metadata: {},
-          created_at: '2026-05-14T00:00:00Z'
-        }
-      })
+          created_at: '2026-05-14T00:00:00Z',
+        },
+      }),
     });
   });
 
@@ -51,13 +51,13 @@ const installApiMocks = async (page: Page): Promise<void> => {
             classification: 'confidential',
             current_version_id: '660e8400-e29b-41d4-a716-446655440001',
             secret_created_at: '2026-05-01T00:00:00Z',
-            secret_updated_at: '2026-05-02T00:00:00Z'
-          }
+            secret_updated_at: '2026-05-02T00:00:00Z',
+          },
         ],
         limit: 50,
         offset: 0,
-        has_more: false
-      })
+        has_more: false,
+      }),
     });
   });
 
@@ -85,15 +85,15 @@ const installApiMocks = async (page: Page): Promise<void> => {
               service_role_key: 'DO_NOT_SHOW_SERVICE_ROLE_KEY',
               jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdWRpdG9yIn0.signaturevalue',
               request_body: 'DO_NOT_SHOW_REQUEST_BODY',
-              response_body: 'DO_NOT_SHOW_RESPONSE_BODY'
+              response_body: 'DO_NOT_SHOW_RESPONSE_BODY',
             },
-            occurred_at: '2026-05-14T00:00:00Z'
-          }
+            occurred_at: '2026-05-14T00:00:00Z',
+          },
         ],
         limit: 50,
         offset: 0,
-        has_more: false
-      })
+        has_more: false,
+      }),
     });
   });
 
@@ -124,13 +124,13 @@ const installApiMocks = async (page: Page): Promise<void> => {
             signature: '22'.repeat(64),
             signature_algorithm: 'ed25519',
             signature_key_version: 1,
-            created_at: '2026-05-14T00:00:01Z'
-          }
+            created_at: '2026-05-14T00:00:01Z',
+          },
         ],
         limit: 50,
         offset: 0,
-        has_more: false
-      })
+        has_more: false,
+      }),
     });
   });
 
@@ -143,9 +143,9 @@ const installApiMocks = async (page: Page): Promise<void> => {
           chain_id: 'global',
           last_sequence_no: 42,
           last_entry_hash: '11'.repeat(32),
-          chain_state_updated_at: '2026-05-14T00:00:01Z'
-        }
-      ])
+          chain_state_updated_at: '2026-05-14T00:00:01Z',
+        },
+      ]),
     });
   });
 
@@ -161,8 +161,8 @@ const installApiMocks = async (page: Page): Promise<void> => {
         first_hash_mismatch_sequence_no: 42,
         first_hash_mismatch_detail: 'ledger_hash_mismatch',
         chain_head_sequence_no: 41,
-        chain_head_entry_hash: '00'.repeat(32)
-      })
+        chain_head_entry_hash: '00'.repeat(32),
+      }),
     });
   });
 
@@ -175,8 +175,8 @@ const installApiMocks = async (page: Page): Promise<void> => {
         checked_count: 42,
         start_sequence_no: 1,
         end_sequence_no: 42,
-        error_code: null
-      })
+        error_code: null,
+      }),
     });
   });
 
@@ -190,8 +190,8 @@ const installApiMocks = async (page: Page): Promise<void> => {
         start_sequence_no: null,
         end_sequence_no: null,
         entry_count: null,
-        error_code: 'monthly_digest_mismatch'
-      })
+        error_code: 'monthly_digest_mismatch',
+      }),
     });
   });
 
@@ -205,13 +205,13 @@ const installApiMocks = async (page: Page): Promise<void> => {
             code: 'ledger_hash_mismatch',
             occurred_at: '2026-05-14T00:00:00Z',
             sequence_no: 42,
-            source: 'hash_chain'
-          }
+            source: 'hash_chain',
+          },
         ],
         limit: 50,
         offset: 0,
-        has_more: false
-      })
+        has_more: false,
+      }),
     });
   });
 
@@ -235,16 +235,16 @@ const installApiMocks = async (page: Page): Promise<void> => {
           integrity_checks: [],
           monthly_digests: [],
           verification_failures: [],
-          signature_key_versions: []
+          signature_key_versions: [],
         },
         signature_verification: {
           valid: true,
           checked_count: 42,
           start_sequence_no: 1,
           end_sequence_no: 42,
-          error_code: null
-        }
-      })
+          error_code: null,
+        },
+      }),
     });
   });
 };
@@ -298,7 +298,7 @@ test('認可されていない閲覧では安全なエラーのみを表示す�
     await route.fulfill({
       status: 403,
       contentType: 'application/json',
-      body: JSON.stringify({ code: 'forbidden', request_id: '123e4567-e89b-42d3-a456-426614174000' })
+      body: JSON.stringify({ code: 'forbidden', request_id: '123e4567-e89b-42d3-a456-426614174000' }),
     });
   });
 

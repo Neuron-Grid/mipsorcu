@@ -38,3 +38,4 @@ audit-ui/node_modules/
 audit-ui/dist/
 audit-ui/playwright-report/
 audit-ui/test-results/
+audit-ui/bun.lockb

@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 
 const root = new URL('..', import.meta.url).pathname;
@@ -8,22 +8,22 @@ const forbiddenFetchMethods = [
   /method\s*:\s*['"]POST['"]/i,
   /method\s*:\s*['"]PUT['"]/i,
   /method\s*:\s*['"]PATCH['"]/i,
-  /method\s*:\s*['"]DELETE['"]/i
+  /method\s*:\s*['"]DELETE['"]/i,
 ];
 
 const forbiddenUiPatterns = [
   /作成|更新|削除|復号|修復|再生成/,
   /decrypt/i,
-  /createSecret|rotateSecret|deleteSecret|repair|regenerate/i
+  /createSecret|rotateSecret|deleteSecret|repair|regenerate/i,
 ];
 
 const allowedUiPatternFiles = new Set(['src/redaction.ts']);
 
 const writeFormPattern = /<form[\s\S]*?(secret|ledger|audit)/i;
 
-const walk = async (dir) => {
+const walk = async (dir: string): Promise<string[]> => {
   const entries = await readdir(dir, { withFileTypes: true });
-  const files = [];
+  const files: string[] = [];
   for (const entry of entries) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
@@ -35,7 +35,7 @@ const walk = async (dir) => {
   return files;
 };
 
-const failures = [];
+const failures: string[] = [];
 const files = await walk(srcDir);
 
 for (const file of files) {
