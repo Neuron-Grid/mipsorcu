@@ -60,6 +60,12 @@ pub use incident::{
     DummyNotificationSink, FailingNotificationSink, IncidentNotificationPayload,
     IncidentRecordError, IncidentRecordInput, IncidentRecordResult, IncidentRecorder,
     IncidentSeverity, IncidentType, NotificationResult, NotificationSink, NotificationSinkError,
+    archive_incident_input, archive_incident_type, audit_ui_forbidden_operation_input, dedupe_key,
+    digest_timestamping_incident_input, digest_timestamping_incident_type,
+    ledger_payload_contains_forbidden_key, ledger_secret_leak_suspected_input,
+    monthly_digest_incident_type, non_auditor_ledger_read_input,
+    record_audit_ui_forbidden_operation, record_ledger_secret_leak_suspected,
+    record_non_auditor_ledger_read, scheduler_incident_type, severity_for_incident,
 };
 pub use ledger::{
     DIGEST_GENERATED_BY, DIGEST_SCHEMA_VERSION_V1, DigestCanonicalBytes, DigestHash,
@@ -79,11 +85,12 @@ pub use read::{
     decrypt_current_secret_version, decrypt_current_secret_version_with_keyring,
 };
 pub use server::use_cases::export_digest_to_archive::{
-    ExportDigestToArchiveError, export_digest_to_archive, record_archive_export_failure_audit,
+    ExportDigestToArchiveError, export_digest_to_archive, export_digest_to_archive_with_incident,
+    record_archive_export_failure_audit,
 };
 pub use server::use_cases::request_timestamping_for_digest::{
     RequestTimestampingError, record_digest_timestamping_failure_audit,
-    request_timestamping_for_digest,
+    request_timestamping_for_digest, request_timestamping_for_digest_with_incident,
 };
 pub use siem::{
     FailingSiemSink, InMemorySiemSink, LocalSiemBufferError, LocalSiemFallbackBuffer,

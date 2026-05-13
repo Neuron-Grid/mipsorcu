@@ -13,7 +13,8 @@ use crate::audit::{
     SchedulerJobMetadata,
 };
 use crate::incident::{
-    IncidentRecordInput, IncidentType, dedupe_key, scheduler_incident_type, severity_for_incident,
+    IncidentRecordInput, IncidentType, dedupe_key, ledger_payload_contains_forbidden_key,
+    scheduler_incident_type, severity_for_incident,
 };
 use crate::ledger::{
     DigestHash, LedgerChainHead, LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult,
@@ -25,7 +26,7 @@ use crate::server::state::AppState;
 use crate::server::supabase::{
     LedgerVerificationMaterialRow, MonthlyDigestVerificationMaterials, SupabaseClient,
 };
-use crate::server::use_cases::export_digest_to_archive::export_digest_to_archive;
+use crate::server::use_cases::export_digest_to_archive::export_digest_to_archive_with_incident;
 use crate::server::use_cases::generate_monthly_digest::{
     GenerateMonthlyDigestInput, generate_monthly_digest, record_monthly_digest_failure_audit,
 };
@@ -723,10 +724,11 @@ async fn run_archive_export_job(
     let archive_request_id = RequestId::generate().map_err(|_| "scheduler_request_id_failed")?;
     let archived_at = SourceEventAt::now_utc().map_err(|_| "scheduler_source_event_at_failed")?;
     let archive_backend = LocalFileArchiveBackend::new(config.local_archive_dir.clone());
-    if export_digest_to_archive(
+    if export_digest_to_archive_with_incident(
         &archive_backend,
         &state.audit_recorder,
         &state.ledger_appender,
+        state.incident_recorder.as_ref(),
         &signed_digest,
         archive_request_id,
         archived_at,
@@ -734,7 +736,6 @@ async fn run_archive_export_job(
     .await
     .is_err()
     {
-        let incident_period = Some(period.clone());
         record_scheduler_job_result(
             state,
             ScheduledJobName::ArchiveExport,
@@ -744,14 +745,6 @@ async fn run_archive_export_job(
             elapsed_ms(started_at),
         )
         .await?;
-        record_scheduler_incident(
-            state,
-            ScheduledJobName::ArchiveExport,
-            IncidentType::ArchiveExportMismatch,
-            "archive_export_failed",
-            incident_period,
-        )
-        .await;
         return Err("archive_export_failed");
     }
 
@@ -822,6 +815,14 @@ fn verify_hash_chain_rows(
 ) -> Result<LedgerVerificationSummary, &'static str> {
     let mut entries: Vec<SignedLedgerEntry> = Vec::with_capacity(rows.len());
     for row in &rows {
+        if ledger_payload_contains_forbidden_key(&row.payload) {
+            return Ok(LedgerVerificationSummary {
+                valid: false,
+                checked_count: entry_count(entries.len()),
+                error_code: Some("ledger_payload_forbidden_key"),
+            });
+        }
+
         let entry = row
             .try_restore_signed_ledger_entry()
             .map_err(|_| "ledger_entry_restore_failed")?;
@@ -886,6 +887,14 @@ fn verify_signature_rows(
 ) -> Result<LedgerVerificationSummary, &'static str> {
     let mut checked_count = 0;
     for row in &rows {
+        if ledger_payload_contains_forbidden_key(&row.payload) {
+            return Ok(LedgerVerificationSummary {
+                valid: false,
+                checked_count,
+                error_code: Some("ledger_payload_forbidden_key"),
+            });
+        }
+
         let entry = row
             .try_restore_signed_ledger_entry()
             .map_err(|_| "ledger_entry_restore_failed")?;

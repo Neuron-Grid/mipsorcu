@@ -19,6 +19,7 @@ use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder, AuditResult,
     DigestTimestampingMetadata, RequestId,
 };
+use crate::incident::{IncidentRecorder, NotificationSink, digest_timestamping_incident_input};
 use crate::ledger::{
     LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
     SignedMonthlyDigest,
@@ -155,6 +156,49 @@ pub async fn request_timestamping_for_digest<S: TimestampingService>(
             Err(RequestTimestampingError::LedgerAppendFailed { code })
         }
     }
+}
+
+pub async fn request_timestamping_for_digest_with_incident<T, S>(
+    service: &T,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
+    ledger_appender: &Arc<LedgerAppender>,
+    incident_recorder: &IncidentRecorder<S>,
+    digest: &SignedMonthlyDigest,
+    request_id: RequestId,
+    requested_at: SourceEventAt,
+) -> Result<TimestampingToken, RequestTimestampingError>
+where
+    T: TimestampingService,
+    S: NotificationSink,
+{
+    let result = request_timestamping_for_digest(
+        service,
+        audit_recorder,
+        ledger_appender,
+        digest,
+        request_id,
+        requested_at,
+    )
+    .await;
+
+    if let Err(error) = &result {
+        let error_code = error.as_error_code();
+        if let Some(input) = digest_timestamping_incident_input(
+            "digest_timestamping_verify",
+            error_code,
+            &digest.period,
+        ) && let Err(record_error) = incident_recorder.record(input).await
+        {
+            tracing::error!(
+                period = digest.period.as_str(),
+                error_code,
+                error = %record_error,
+                "digest timestamping incident recording failed"
+            );
+        }
+    }
+
+    result
 }
 
 /// `TimestampingServiceError` を `audit_events.metadata_json.error_code` 用の

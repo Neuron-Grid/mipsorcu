@@ -20,6 +20,7 @@ use crate::audit::{
     ArchiveExportMetadata, AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder,
     AuditResult, RequestId,
 };
+use crate::incident::{IncidentRecorder, NotificationSink, archive_incident_input};
 use crate::ledger::{
     LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
     SignedMonthlyDigest,
@@ -110,6 +111,69 @@ pub async fn export_digest_to_archive<B: ArchiveBackend>(
         return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
     }
 
+    // ── 3.5. verify_object で外部アーカイブ不一致を検知する ──
+    match backend.verify_object(&key, &package).await {
+        Ok(crate::archive::ArchiveVerifyOutcome::Valid) => {}
+        Ok(crate::archive::ArchiveVerifyOutcome::NotFound) => {
+            let error_code = "archive_export_not_found".to_owned();
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                period = period.as_str(),
+                archive_key = key.as_str(),
+                error_code = %error_code,
+                "archive export verification did not find the stored object"
+            );
+            record_archive_export_failure_audit(
+                audit_recorder,
+                &request_id,
+                period,
+                &error_code,
+                &exported_at,
+            )
+            .await;
+            return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
+        }
+        Ok(crate::archive::ArchiveVerifyOutcome::ContentMismatch) => {
+            let error_code = "archive_export_content_mismatch".to_owned();
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                period = period.as_str(),
+                archive_key = key.as_str(),
+                error_code = %error_code,
+                "archive export verification detected content mismatch without auto-repair"
+            );
+            record_archive_export_failure_audit(
+                audit_recorder,
+                &request_id,
+                period,
+                &error_code,
+                &exported_at,
+            )
+            .await;
+            return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
+        }
+        Err(error) => {
+            let error_code = backend_error_code(&error);
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                period = period.as_str(),
+                archive_key = key.as_str(),
+                error = %error,
+                error_code = %error_code,
+                "archive export verification failed"
+            );
+            record_archive_export_failure_audit(
+                audit_recorder,
+                &request_id,
+                period,
+                &error_code,
+                &exported_at,
+            )
+            .await;
+            return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
+        }
+    }
+
     // ── 4. ledger entry を追記 ──
     let ledger_result = append_archive_exported_ledger_entry(
         ledger_appender,
@@ -153,6 +217,47 @@ pub async fn export_digest_to_archive<B: ArchiveBackend>(
             Err(ExportDigestToArchiveError::LedgerAppendFailed { code })
         }
     }
+}
+
+pub async fn export_digest_to_archive_with_incident<B, S>(
+    backend: &B,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
+    ledger_appender: &Arc<LedgerAppender>,
+    incident_recorder: &IncidentRecorder<S>,
+    digest: &SignedMonthlyDigest,
+    request_id: RequestId,
+    exported_at: SourceEventAt,
+) -> Result<ArchiveObjectKey, ExportDigestToArchiveError>
+where
+    B: ArchiveBackend,
+    S: NotificationSink,
+{
+    let result = export_digest_to_archive(
+        backend,
+        audit_recorder,
+        ledger_appender,
+        digest,
+        request_id,
+        exported_at,
+    )
+    .await;
+
+    if let Err(error) = &result {
+        let error_code = error.as_error_code();
+        if let Some(input) =
+            archive_incident_input("archive_export_verify", error_code, &digest.period)
+            && let Err(record_error) = incident_recorder.record(input).await
+        {
+            tracing::error!(
+                period = digest.period.as_str(),
+                error_code,
+                error = %record_error,
+                "archive incident recording failed"
+            );
+        }
+    }
+
+    result
 }
 
 /// `ArchiveBackendError` を `audit_events.metadata_json.error_code` 用の
@@ -757,6 +862,30 @@ mod tests {
         }
     }
 
+    struct MismatchAfterPutBackend;
+
+    impl ArchiveBackend for MismatchAfterPutBackend {
+        async fn put_object(
+            &self,
+            _key: &ArchiveObjectKey,
+            _package: &ArchiveExportPackage,
+        ) -> Result<(), ArchiveBackendError> {
+            Ok(())
+        }
+
+        async fn verify_object(
+            &self,
+            _key: &ArchiveObjectKey,
+            _package: &ArchiveExportPackage,
+        ) -> Result<ArchiveVerifyOutcome, ArchiveBackendError> {
+            Ok(ArchiveVerifyOutcome::ContentMismatch)
+        }
+
+        async fn list_objects(&self) -> Result<Vec<ArchiveObjectKey>, ArchiveBackendError> {
+            Ok(Vec::new())
+        }
+    }
+
     // ───────────────────────── Integration tests ─────────────────────────────
 
     #[tokio::test(flavor = "multi_thread")]
@@ -861,6 +990,57 @@ mod tests {
         assert_eq!(
             audit_request.body["p_metadata_json"]["error_code"],
             "archive_export_backend_failed"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_mismatch_records_failure_audit_and_does_not_auto_repair()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = spawn_mock_supabase(MockConfig {
+            chain_head_status: 200,
+            expected_requests: 1,
+        })?;
+        let supabase_client = test_supabase_client(server.url.clone());
+        let audit_recorder = test_audit_recorder(supabase_client.clone());
+        let ledger_appender = test_ledger_appender(supabase_client.clone());
+        let digest = test_signed_monthly_digest();
+
+        let result = export_digest_to_archive(
+            &MismatchAfterPutBackend,
+            &audit_recorder,
+            &ledger_appender,
+            &digest,
+            test_request_id(),
+            test_exported_at(),
+        )
+        .await;
+
+        match result {
+            Err(ExportDigestToArchiveError::BackendFailed { code }) => {
+                assert_eq!(code, "archive_export_content_mismatch");
+            }
+            other => panic!("expected ContentMismatch BackendFailed, got {other:?}"),
+        }
+
+        let requests = drain_requests(server)?;
+        assert_eq!(
+            requests.len(),
+            1,
+            "archive mismatch must only record failure audit and must not append repair ledger entries"
+        );
+        let audit_request = &requests[0];
+        assert_eq!(audit_request.body["p_action"], "archive_export");
+        assert_eq!(audit_request.body["p_result"], "failure");
+        assert_eq!(
+            audit_request.body["p_metadata_json"]["error_code"],
+            "archive_export_content_mismatch"
+        );
+        assert!(
+            !requests.iter().any(|request| request
+                .path
+                .ends_with("/rest/v1/rpc/rpc_append_ledger_entry")),
+            "mismatch detection must not auto-repair by writing ledger entries"
         );
         Ok(())
     }

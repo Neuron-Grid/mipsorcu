@@ -7,7 +7,8 @@ use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult, RequestId,
 };
 use crate::ledger::{
-    LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
+    FORBIDDEN_LEDGER_PAYLOAD_KEYS, LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult,
+    MonthlyDigestPeriod,
 };
 use crate::server::ledger_appender::{
     LedgerAppendDraft, LedgerAppendDraftParts, LedgerAppendError, LedgerAppender,
@@ -347,6 +348,7 @@ pub fn scheduler_incident_type(error_code: &str) -> Option<IncidentType> {
         "ledger_sequence_gap" => Some(IncidentType::SequenceGap),
         "ledger_signature_invalid" => Some(IncidentType::SignatureMismatch),
         "ledger_signature_key_missing" => Some(IncidentType::UnknownSignatureKey),
+        "ledger_payload_forbidden_key" => Some(IncidentType::LedgerSecretLeakSuspected),
         _ => None,
     }
 }
@@ -366,6 +368,192 @@ pub fn monthly_digest_incident_type(error_code: &str) -> Option<IncidentType> {
         | "chain_signature_invalid"
         | "chain_sequence_gap" => Some(IncidentType::MonthlyDigestMismatch),
         _ => None,
+    }
+}
+
+pub fn digest_timestamping_incident_type(error_code: &str) -> Option<IncidentType> {
+    match error_code {
+        "digest_timestamping_mismatch"
+        | "digest_timestamping_token_mismatch"
+        | "digest_timestamping_token_hash_mismatch"
+        | "digest_timestamping_verification_failed"
+        | "digest_timestamping_invalid_response"
+        | "digest_timestamped_append_failed" => Some(IncidentType::DigestTimestampingMismatch),
+        _ if error_code.starts_with("digest_timestamping_") => {
+            Some(IncidentType::DigestTimestampingMismatch)
+        }
+        _ => None,
+    }
+}
+
+pub fn digest_timestamping_incident_input(
+    detection_source: &str,
+    error_code: &str,
+    period: &MonthlyDigestPeriod,
+) -> Option<IncidentRecordInput> {
+    let incident_type = digest_timestamping_incident_type(error_code)?;
+    Some(
+        IncidentRecordInput::new(
+            incident_type,
+            severity_for_incident(incident_type),
+            detection_source,
+            dedupe_key(incident_type, detection_source, Some(period)),
+            error_code,
+        )
+        .with_target_year_month(period.clone()),
+    )
+}
+
+pub fn archive_incident_type(error_code: &str) -> Option<IncidentType> {
+    match error_code {
+        "archive_export_mismatch"
+        | "archive_export_content_mismatch"
+        | "archive_export_not_found"
+        | "archive_export_verify_failed"
+        | "archive_export_failed"
+        | "archive_exported_append_failed" => Some(IncidentType::ArchiveExportMismatch),
+        _ if error_code.starts_with("archive_export_") => Some(IncidentType::ArchiveExportMismatch),
+        _ => None,
+    }
+}
+
+pub fn archive_incident_input(
+    detection_source: &str,
+    error_code: &str,
+    period: &MonthlyDigestPeriod,
+) -> Option<IncidentRecordInput> {
+    let incident_type = archive_incident_type(error_code)?;
+    Some(
+        IncidentRecordInput::new(
+            incident_type,
+            severity_for_incident(incident_type),
+            detection_source,
+            dedupe_key(incident_type, detection_source, Some(period)),
+            error_code,
+        )
+        .with_target_year_month(period.clone()),
+    )
+}
+
+pub fn non_auditor_ledger_read_input(detection_source: &str) -> IncidentRecordInput {
+    let incident_type = IncidentType::NonAuditorLedgerRead;
+    IncidentRecordInput::new(
+        incident_type,
+        severity_for_incident(incident_type),
+        detection_source,
+        dedupe_key(incident_type, detection_source, None),
+        "non_auditor_ledger_read",
+    )
+}
+
+pub fn audit_ui_forbidden_operation_input(
+    detection_source: &str,
+    operation: &str,
+) -> IncidentRecordInput {
+    let incident_type = IncidentType::AuditUiForbiddenOperation;
+    IncidentRecordInput::new(
+        incident_type,
+        severity_for_incident(incident_type),
+        detection_source,
+        format!(
+            "{}:{detection_source}:{}",
+            incident_type.as_str(),
+            sanitize_dedupe_component(operation)
+        ),
+        "audit_ui_forbidden_operation",
+    )
+}
+
+pub fn ledger_secret_leak_suspected_input(
+    detection_source: &str,
+    sequence_no: Option<u64>,
+) -> IncidentRecordInput {
+    let incident_type = IncidentType::LedgerSecretLeakSuspected;
+    let mut input = IncidentRecordInput::new(
+        incident_type,
+        severity_for_incident(incident_type),
+        detection_source,
+        match sequence_no {
+            Some(sequence_no) => format!(
+                "{}:{detection_source}:{sequence_no}",
+                incident_type.as_str()
+            ),
+            None => dedupe_key(incident_type, detection_source, None),
+        },
+        "ledger_payload_forbidden_key",
+    );
+    if let Some(sequence_no) = sequence_no {
+        input = input.with_target_sequence_no(sequence_no);
+    }
+    input
+}
+
+pub fn ledger_payload_contains_forbidden_key(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, nested)| {
+            is_forbidden_ledger_payload_key(key) || ledger_payload_contains_forbidden_key(nested)
+        }),
+        Value::Array(values) => values.iter().any(ledger_payload_contains_forbidden_key),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+pub async fn record_non_auditor_ledger_read<S: NotificationSink>(
+    recorder: &IncidentRecorder<S>,
+    detection_source: &str,
+) -> Result<IncidentRecordResult, IncidentRecordError> {
+    recorder
+        .record(non_auditor_ledger_read_input(detection_source))
+        .await
+}
+
+pub async fn record_audit_ui_forbidden_operation<S: NotificationSink>(
+    recorder: &IncidentRecorder<S>,
+    detection_source: &str,
+    operation: &str,
+) -> Result<IncidentRecordResult, IncidentRecordError> {
+    recorder
+        .record(audit_ui_forbidden_operation_input(
+            detection_source,
+            operation,
+        ))
+        .await
+}
+
+pub async fn record_ledger_secret_leak_suspected<S: NotificationSink>(
+    recorder: &IncidentRecorder<S>,
+    detection_source: &str,
+    sequence_no: Option<u64>,
+) -> Result<IncidentRecordResult, IncidentRecordError> {
+    recorder
+        .record(ledger_secret_leak_suspected_input(
+            detection_source,
+            sequence_no,
+        ))
+        .await
+}
+
+fn is_forbidden_ledger_payload_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_lowercase();
+    FORBIDDEN_LEDGER_PAYLOAD_KEYS
+        .iter()
+        .any(|forbidden| normalized == *forbidden)
+}
+
+fn sanitize_dedupe_component(value: &str) -> String {
+    let mut sanitized = String::new();
+    for ch in value.chars().take(48) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
+            sanitized.push(ch);
+        } else if !sanitized.ends_with('_') {
+            sanitized.push('_');
+        }
+    }
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "unknown".to_owned()
+    } else {
+        sanitized.to_owned()
     }
 }
 
@@ -410,8 +598,11 @@ mod tests {
     use crate::ledger::MonthlyDigestPeriod;
 
     use super::{
-        dedupe_key, deliver_notification, monthly_digest_incident_type, scheduler_incident_type,
-        severity_for_incident,
+        archive_incident_input, archive_incident_type, audit_ui_forbidden_operation_input,
+        dedupe_key, deliver_notification, digest_timestamping_incident_input,
+        digest_timestamping_incident_type, ledger_payload_contains_forbidden_key,
+        ledger_secret_leak_suspected_input, monthly_digest_incident_type,
+        non_auditor_ledger_read_input, scheduler_incident_type, severity_for_incident,
     };
 
     #[tokio::test]
@@ -474,6 +665,10 @@ mod tests {
             scheduler_incident_type("ledger_signature_key_missing"),
             Some(IncidentType::UnknownSignatureKey)
         );
+        assert_eq!(
+            scheduler_incident_type("ledger_payload_forbidden_key"),
+            Some(IncidentType::LedgerSecretLeakSuspected)
+        );
         assert_eq!(scheduler_incident_type("other_error"), None);
     }
 
@@ -514,5 +709,80 @@ mod tests {
             ),
             "monthly_digest_mismatch:monthly_digest_verify:2026-05"
         );
+    }
+
+    #[test]
+    fn missing_t14_error_codes_map_to_incident_types() {
+        assert_eq!(
+            digest_timestamping_incident_type("digest_timestamping_token_hash_mismatch"),
+            Some(IncidentType::DigestTimestampingMismatch)
+        );
+        assert_eq!(
+            digest_timestamping_incident_type("digest_timestamped_append_failed"),
+            Some(IncidentType::DigestTimestampingMismatch)
+        );
+        assert_eq!(
+            archive_incident_type("archive_export_content_mismatch"),
+            Some(IncidentType::ArchiveExportMismatch)
+        );
+        assert_eq!(archive_incident_type("network_down"), None);
+
+        let period = MonthlyDigestPeriod::parse("2026-05").expect("valid test period");
+        let timestamping = digest_timestamping_incident_input(
+            "digest_timestamping_verify",
+            "digest_timestamping_token_hash_mismatch",
+            &period,
+        )
+        .expect("timestamping incident input");
+        assert_eq!(
+            timestamping.incident_type,
+            IncidentType::DigestTimestampingMismatch
+        );
+        assert_eq!(timestamping.target_year_month, Some(period.clone()));
+
+        let archive = archive_incident_input(
+            "archive_export_verify",
+            "archive_export_content_mismatch",
+            &period,
+        )
+        .expect("archive incident input");
+        assert_eq!(archive.incident_type, IncidentType::ArchiveExportMismatch);
+        assert_eq!(archive.target_year_month, Some(period));
+    }
+
+    #[test]
+    fn t14_manual_detection_inputs_are_stable_and_non_secret() {
+        let non_auditor = non_auditor_ledger_read_input("auditor_api_ledger_read");
+        assert_eq!(
+            non_auditor.incident_type,
+            IncidentType::NonAuditorLedgerRead
+        );
+        assert_eq!(non_auditor.error_code, "non_auditor_ledger_read");
+
+        let forbidden = audit_ui_forbidden_operation_input("audit_ui", "decrypt secret");
+        assert_eq!(
+            forbidden.incident_type,
+            IncidentType::AuditUiForbiddenOperation
+        );
+        assert_eq!(forbidden.error_code, "audit_ui_forbidden_operation");
+        assert!(forbidden.dedupe_key.contains("decrypt_secret"));
+
+        let leak = ledger_secret_leak_suspected_input("ledger_payload_scan", Some(42));
+        assert_eq!(leak.incident_type, IncidentType::LedgerSecretLeakSuspected);
+        assert_eq!(leak.target_sequence_no, Some(42));
+    }
+
+    #[test]
+    fn ledger_secret_leak_scan_detects_forbidden_keys_recursively() {
+        let value = serde_json::json!({
+            "outer": [{"plaintext": "redacted"}],
+        });
+        assert!(ledger_payload_contains_forbidden_key(&value));
+
+        let safe = serde_json::json!({
+            "incident_type": "hash_chain_mismatch",
+            "severity": "critical",
+        });
+        assert!(!ledger_payload_contains_forbidden_key(&safe));
     }
 }
