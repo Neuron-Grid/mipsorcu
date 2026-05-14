@@ -1,7 +1,6 @@
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import type { ComponentChildren } from "preact";
 import { useMemo, useState } from "preact/hooks";
-
 import { type AuditApiClient, AuditApiError, createAuditApiClient } from "./auditApi";
 import { type Credentials, createSupabaseAuthClient, signIn, signOut } from "./auth";
 import { loadConfig } from "./config";
@@ -21,6 +20,9 @@ import type {
     SummaryResponse,
     VerificationFailureRow,
 } from "./types/types";
+
+const GENERIC_ERROR_MESSAGE = "処理に失敗しました。設定または接続状態を確認してください。";
+const AUTH_ERROR_MESSAGE = "認証に失敗しました。入力または設定を確認してください。";
 
 type LoadState = "idle" | "loading" | "loaded" | "failed";
 
@@ -55,7 +57,7 @@ const safeErrorMessage = (error: unknown): string => {
             : `監査 API の読み取りに失敗しました: ${error.code} / request_id=${error.requestId}`;
     }
 
-    return "処理に失敗しました。設定または接続状態を確認してください。";
+    return GENERIC_ERROR_MESSAGE;
 };
 
 export const App = () => {
@@ -85,7 +87,7 @@ export const App = () => {
             const nextSession = await signIn(supabase, credentials);
             setSession(nextSession);
         } catch {
-            setAuthError("認証に失敗しました。入力または設定を確認してください。");
+            setAuthError(AUTH_ERROR_MESSAGE);
         } finally {
             setAuthLoading(false);
         }
@@ -595,11 +597,7 @@ const RestoreTestsTable = ({ rows }: { readonly rows: readonly RestoreTestReport
     </table>
 );
 
-const IntegrityChecksTable = ({
-    rows,
-}: {
-    readonly rows: readonly IntegrityCheckReportItem[];
-}) => (
+const IntegrityChecksTable = ({ rows }: { readonly rows: readonly IntegrityCheckReportItem[] }) => (
     <table>
         <thead>
             <tr>

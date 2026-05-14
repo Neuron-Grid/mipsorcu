@@ -1,4 +1,4 @@
-import { type Page, expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 const forbiddenOperationPattern =
     /作成|更新|削除|復号|修復|再生成|decrypt|create|update|delete|repair|regenerate/i;

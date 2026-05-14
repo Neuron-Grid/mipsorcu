@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
