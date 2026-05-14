@@ -13,7 +13,7 @@ getrandom = "0.4.2"
 hex = "0.4"
 hmac = "0.13"
 http = "1"
-jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
 libc = "0.2"
 reqwest = { version = "0.13", features = ["rustls", "json"] }
 serde = { version = "1.0.228", features = ["derive"] }

@@ -25,7 +25,7 @@ create table public.secret_aliases (
         alias_normalized = lower(btrim(alias))
     ),
     constraint secret_aliases_alias_not_uuid_v4 check (
-        alias_normalized !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{12}$'
+        alias_normalized !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
     ),
     constraint secret_aliases_owner_alias_unique unique (
         owner_user_id,
@@ -86,7 +86,7 @@ declare
     v_alias_normalized text := lower(btrim(p_alias));
 begin
     if p_secret_id is null
-        or p_secret_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{12}$'
+        or p_secret_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
         or p_owner_user_id is null
         or p_alias is null
         or p_alias_normalized is null
@@ -95,7 +95,7 @@ begin
         or v_alias !~ '^[A-Za-z0-9._-]{1,128}$'
         or p_alias_normalized <> v_alias_normalized
         or p_alias_normalized !~ '^[a-z0-9._-]{1,128}$'
-        or p_alias_normalized ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{12}$'
+        or p_alias_normalized ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
     then
         raise exception 'secret_alias_invalid'
             using errcode = '22023';

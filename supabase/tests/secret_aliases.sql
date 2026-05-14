@@ -164,58 +164,58 @@ select is(
     'created alias stores canonical secret_id, owner, alias, and normalized alias'
 );
 
-select like(
+select matches(
     test_helpers.try_create_secret_alias(
         '550e8400-e29b-41d4-a716-446655440000',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         'prod.api_1',
         'prod.api_1'
     ),
-    '%secret_alias_duplicate%',
+    'secret_alias_duplicate',
     'duplicate normalized alias is rejected per owner'
 );
 
-select like(
+select matches(
     test_helpers.try_create_secret_alias(
         '550e8400-e29b-41d4-a716-446655440000',
         'f47ac10b-58cc-4372-a567-0e02b2c3d480',
         'other-owner',
         'other-owner'
     ),
-    '%secret_alias_owner_mismatch%',
+    'secret_alias_owner_mismatch',
     'owner mismatch is rejected'
 );
 
-select like(
+select matches(
     test_helpers.try_create_secret_alias(
         '550e8400-e29b-41d4-a716-446655440000',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         '   ',
         ''
     ),
-    '%secret_alias_invalid%',
+    'secret_alias_invalid',
     'blank alias is rejected'
 );
 
-select like(
+select matches(
     test_helpers.try_create_secret_alias(
         '550e8400-e29b-41d4-a716-446655440000',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         repeat('a', 129),
         repeat('a', 129)
     ),
-    '%secret_alias_invalid%',
+    'secret_alias_invalid',
     'overlong alias is rejected'
 );
 
-select like(
+select matches(
     test_helpers.try_create_secret_alias(
         '550e8400-e29b-41d4-a716-446655440000',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         '750e8400-e29b-41d4-a716-446655440000',
         '750e8400-e29b-41d4-a716-446655440000'
     ),
-    '%secret_alias_invalid%',
+    'secret_alias_invalid',
     'UUID v4-looking alias is rejected'
 );
 
