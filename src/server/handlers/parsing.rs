@@ -1,9 +1,9 @@
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::server::dto::{CreateSecretRequest, RotateSecretRequest};
+use crate::server::dto::{CreateSecretAliasRequest, CreateSecretRequest, RotateSecretRequest};
 use crate::server::errors::ApiError;
-use crate::types::{Classification, CreatedAt, DeviceId, Plaintext, SecretId};
+use crate::types::{Classification, CreatedAt, DeviceId, Plaintext, SecretAlias, SecretRef};
 
 #[derive(Debug)]
 pub(super) struct ParsedCreateSecretRequest {
@@ -18,6 +18,11 @@ pub(super) struct ParsedRotateSecretRequest {
     pub(super) device_id: DeviceId,
     pub(super) plaintext: Plaintext,
     pub(super) created_at: CreatedAt,
+}
+
+#[derive(Debug)]
+pub(super) struct ParsedCreateSecretAliasRequest {
+    pub(super) alias: SecretAlias,
 }
 
 pub(super) fn parse_create_secret_request(
@@ -41,8 +46,16 @@ pub(super) fn parse_rotate_secret_request(
     })
 }
 
-pub(super) fn parse_secret_id(value: &str) -> Result<SecretId, ApiError> {
-    SecretId::parse(value).map_err(|error| ApiError::BadRequest(error.to_string()))
+pub(super) fn parse_create_secret_alias_request(
+    body: CreateSecretAliasRequest,
+) -> Result<ParsedCreateSecretAliasRequest, ApiError> {
+    Ok(ParsedCreateSecretAliasRequest {
+        alias: parse_secret_alias(&body.alias)?,
+    })
+}
+
+pub(super) fn parse_secret_ref(value: &str) -> Result<SecretRef, ApiError> {
+    SecretRef::parse(value).map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
 fn parse_classification(value: &str) -> Result<Classification, ApiError> {
@@ -51,6 +64,10 @@ fn parse_classification(value: &str) -> Result<Classification, ApiError> {
 
 fn parse_device_id(value: &str) -> Result<DeviceId, ApiError> {
     DeviceId::new(value).map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+fn parse_secret_alias(value: &str) -> Result<SecretAlias, ApiError> {
+    SecretAlias::new(value).map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
 fn parse_hex_plaintext(value: &str) -> Result<Plaintext, ApiError> {

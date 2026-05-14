@@ -5,6 +5,8 @@ use uuid::{Builder, Uuid, Version};
 
 use crate::error::{AadError, CryptoError, InputError};
 
+const SECRET_ALIAS_MAX_LEN: usize = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SecretId(Uuid);
 
@@ -37,6 +39,105 @@ impl SecretId {
     pub fn as_canonical_string(&self) -> String {
         self.0.hyphenated().to_string()
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct SecretAlias(String);
+
+impl SecretAlias {
+    pub fn new(value: &str) -> Result<Self, InputError> {
+        let trimmed = validate_secret_alias(value)?;
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn normalized(&self) -> AliasNormalized {
+        AliasNormalized(self.0.to_ascii_lowercase())
+    }
+}
+
+impl fmt::Debug for SecretAlias {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SecretAlias")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct AliasNormalized(String);
+
+impl AliasNormalized {
+    pub fn new(value: &str) -> Result<Self, InputError> {
+        let alias = SecretAlias::new(value)?;
+        Ok(alias.normalized())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AliasNormalized {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AliasNormalized")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum SecretRef {
+    Id(SecretId),
+    Alias(AliasNormalized),
+}
+
+impl SecretRef {
+    pub fn parse(value: &str) -> Result<Self, InputError> {
+        let trimmed = value.trim();
+        if let Ok(secret_id) = SecretId::parse(trimmed) {
+            return Ok(Self::Id(secret_id));
+        }
+
+        AliasNormalized::new(trimmed).map(Self::Alias)
+    }
+}
+
+impl fmt::Debug for SecretRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Id(secret_id) => formatter.debug_tuple("Id").field(secret_id).finish(),
+            Self::Alias(alias) => formatter.debug_tuple("Alias").field(alias).finish(),
+        }
+    }
+}
+
+fn validate_secret_alias(value: &str) -> Result<&str, InputError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || !trimmed.bytes().all(
+            |byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'),
+        )
+    {
+        return Err(InputError::InvalidSecretAlias);
+    }
+
+    if trimmed.len() > SECRET_ALIAS_MAX_LEN {
+        return Err(InputError::SecretAliasTooLong {
+            max: SECRET_ALIAS_MAX_LEN,
+        });
+    }
+
+    if SecretId::parse(trimmed).is_ok() {
+        return Err(InputError::SecretAliasLooksLikeUuid);
+    }
+
+    Ok(trimmed)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

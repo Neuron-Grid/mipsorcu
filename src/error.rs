@@ -101,6 +101,9 @@ impl std::error::Error for AadError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputError {
     InvalidDeviceId,
+    InvalidSecretAlias,
+    SecretAliasTooLong { max: usize },
+    SecretAliasLooksLikeUuid,
     SecretVersionOverflow,
 }
 
@@ -109,6 +112,18 @@ impl fmt::Display for InputError {
         match self {
             Self::InvalidDeviceId => {
                 write!(formatter, "device_id must not be empty or whitespace only")
+            }
+            Self::InvalidSecretAlias => {
+                write!(
+                    formatter,
+                    "secret alias must use only ASCII letters, digits, '.', '_', or '-'"
+                )
+            }
+            Self::SecretAliasTooLong { max } => {
+                write!(formatter, "secret alias must be at most {max} characters")
+            }
+            Self::SecretAliasLooksLikeUuid => {
+                write!(formatter, "secret alias must not be a UUID v4")
             }
             Self::SecretVersionOverflow => {
                 write!(formatter, "secret version cannot be incremented")

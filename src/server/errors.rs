@@ -14,6 +14,7 @@ pub enum ApiError {
     Unauthorized(String),
     Forbidden(String),
     NotFound(String),
+    Conflict(String),
     BadRequest(String),
     UnsupportedMediaType(String),
     PayloadTooLarge(String),
@@ -35,6 +36,7 @@ impl fmt::Display for ApiError {
             Self::Unauthorized(message) => write!(formatter, "unauthorized: {message}"),
             Self::Forbidden(message) => write!(formatter, "forbidden: {message}"),
             Self::NotFound(message) => write!(formatter, "not found: {message}"),
+            Self::Conflict(message) => write!(formatter, "conflict: {message}"),
             Self::BadRequest(message) => write!(formatter, "bad request: {message}"),
             Self::UnsupportedMediaType(message) => {
                 write!(formatter, "unsupported media type: {message}")
@@ -66,6 +68,7 @@ impl ApiError {
             Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::UnsupportedMediaType(_) => {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")

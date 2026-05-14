@@ -22,11 +22,24 @@ pub struct RotateSecretRequest {
     pub plaintext_hex: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSecretAliasRequest {
+    pub alias: String,
+}
+
 #[derive(Serialize)]
 pub struct RotateSecretResponse {
     pub secret_id: String,
     pub version: u32,
     pub secret_version_id: String,
+}
+
+#[derive(Serialize)]
+pub struct CreateSecretAliasResponse {
+    pub secret_id: String,
+    pub alias: String,
+    pub alias_normalized: String,
 }
 
 #[derive(Serialize)]

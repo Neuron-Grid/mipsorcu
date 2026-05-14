@@ -3,10 +3,12 @@ use crate::auth::{RawJwt, VerifiedJwtClaims};
 use crate::decrypt_current_secret_version_with_keyring;
 use crate::server::audit_reporter::{self, FailureAuditContext};
 use crate::server::errors::ApiError;
-use crate::server::read_model::{self, FetchCurrentSecretVersionError};
+use crate::server::read_model::{
+    self, FetchCurrentSecretVersionError, ResolveSecretRefError, resolve_secret_ref,
+};
 use crate::server::state::AppState;
 use crate::types::Plaintext;
-use crate::{SecretId, SecretVersion};
+use crate::{SecretId, SecretRef, SecretVersion};
 
 #[derive(Debug)]
 pub(in crate::server) struct DecryptSecretOutput {
@@ -32,11 +34,25 @@ impl DecryptSecretOutput {
 pub(in crate::server) async fn decrypt_secret(
     state: &AppState,
     request_id: &RequestId,
-    requested_secret_id: SecretId,
+    requested_secret_ref: SecretRef,
     raw_jwt: &RawJwt,
     claims: VerifiedJwtClaims,
 ) -> Result<DecryptSecretOutput, ApiError> {
     let actor_user_id = claims.subject_user_id().clone();
+    let requested_secret_id = match resolve_secret_ref(state, requested_secret_ref, raw_jwt).await {
+        Ok(secret_id) => secret_id,
+        Err(error) => {
+            let failure = FailureAuditContext::new(
+                state,
+                request_id,
+                Some(&actor_user_id),
+                None,
+                AuditAction::Decrypt,
+            );
+            record_secret_ref_resolution_failure(&failure, &error).await;
+            return Err(ApiError::from(error));
+        }
+    };
     let failure = FailureAuditContext::new(
         state,
         request_id,
@@ -136,4 +152,32 @@ async fn decrypt_prepared_input(
     .await
     .map_err(|error| ApiError::InternalError(error.to_string()))?
     .map_err(ApiError::from)
+}
+
+async fn record_secret_ref_resolution_failure(
+    failure: &FailureAuditContext<'_>,
+    error: &ResolveSecretRefError,
+) {
+    match error {
+        ResolveSecretRefError::Upstream(rpc_error) => {
+            failure.log_upstream_failure_without_error_value(rpc_error, "resolve_secret_ref");
+            if let Err(audit_err) = failure.record().await {
+                tracing::error!(
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
+        }
+        ResolveSecretRefError::Api(api_error) => {
+            if let Err(audit_err) = failure
+                .log_and_record(api_error, "resolve_secret_ref")
+                .await
+            {
+                tracing::error!(
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
+        }
+    }
 }

@@ -1,3 +1,4 @@
+mod alias;
 pub mod audit_ui;
 mod create;
 mod decrypt;
@@ -5,6 +6,7 @@ mod health;
 mod parsing;
 mod rotate;
 
+pub use alias::create_secret_alias;
 pub use create::create_secret;
 pub use decrypt::decrypt_secret;
 pub use health::{health_check, not_found, ready_check};

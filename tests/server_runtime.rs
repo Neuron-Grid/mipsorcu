@@ -544,6 +544,63 @@ fn spawn_supabase_read_and_audit_server(
     Ok((format!("http://{addr}"), receiver, thread))
 }
 
+fn spawn_supabase_alias_read_and_audit_server(
+    alias_body: String,
+    secret_versions_body: String,
+    audit_status: u16,
+    audit_body: &'static str,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let is_alias_read = request.path.starts_with("/rest/v1/secret_aliases");
+            let is_secret_read = request.path.starts_with("/rest/v1/secret_versions");
+            let is_ledger_chain_head = request.path.starts_with("/rest/v1/ledger_chain_state");
+            let response_body = if audit_status == 200
+                && !is_alias_read
+                && !is_secret_read
+                && !is_ledger_chain_head
+            {
+                Some(ledger_append_success_body(&request)?)
+            } else {
+                None
+            };
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if is_alias_read {
+                write_http_response(&mut stream, 200, "OK", &alias_body)?;
+            } else if is_secret_read {
+                write_http_response(&mut stream, 200, "OK", &secret_versions_body)?;
+            } else if is_ledger_chain_head {
+                write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
+            } else if audit_status == 200 {
+                let body = response_body.as_deref().unwrap_or(audit_body);
+                write_http_response(&mut stream, 200, "OK", body)?;
+            } else {
+                write_http_response(
+                    &mut stream,
+                    audit_status,
+                    "Internal Server Error",
+                    audit_body,
+                )?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
 fn spawn_supabase_read_failure_audit_server(
     secret_versions_body: String,
 ) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
@@ -566,6 +623,38 @@ fn spawn_supabase_read_failure_audit_server(
                 write_http_response(&mut stream, 200, "OK", &secret_versions_body)?;
             } else {
                 write_http_response(&mut stream, 200, "OK", r#""ok""#)?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_alias_create_server(
+    secret_versions_body: String,
+    alias_response_body: String,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let is_secret_read = request.path.starts_with("/rest/v1/secret_versions");
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if is_secret_read {
+                write_http_response(&mut stream, 200, "OK", &secret_versions_body)?;
+            } else {
+                write_http_response(&mut stream, 200, "OK", &alias_response_body)?;
             }
         }
 
@@ -1958,6 +2047,155 @@ async fn decrypt_endpoint_returns_plaintext_after_audit_and_ledger_append() {
         .join()
         .expect("Supabase test server thread should join")
         .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn decrypt_endpoint_resolves_alias_without_putting_alias_in_audit_or_logs() {
+    let alias = "prod-alias";
+    let plaintext = b"router alias secret";
+    let (secret_id, row_json) =
+        decrypt_row_json(plaintext).expect("decrypt row JSON should be constructed");
+    let alias_body = json!([{
+        "secret_id": secret_id,
+        "owner_user_id": OWNER_USER_ID,
+        "alias_normalized": alias,
+    }])
+    .to_string();
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_alias_read_and_audit_server(alias_body, row_json.to_string(), 200, r#"[]"#)
+            .expect("Supabase test server should start");
+    let fallback_path = temp_path("decrypt-alias-audit-ledger-success.jsonl");
+    let state = test_app_state(&supabase_url, fallback_path.clone())
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let log_buffer = SharedLogBuffer::default();
+    let subscriber = build_log_subscriber(log_buffer.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{alias}/decrypt"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("decrypt request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let json: Value = response
+        .json()
+        .await
+        .expect("decrypt response should be JSON");
+    assert_eq!(json["secret_id"], Value::String(secret_id.clone()));
+    assert_eq!(json["plaintext_hex"], Value::String(hex::encode(plaintext)));
+
+    let alias_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias read request should be captured");
+    let read_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret read request should be captured");
+    let chain_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("ledger chain head request should be captured");
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("audit and ledger append request should be captured");
+    assert!(alias_request.path.starts_with("/rest/v1/secret_aliases"));
+    assert!(read_request.path.starts_with("/rest/v1/secret_versions"));
+    assert!(
+        chain_request
+            .path
+            .starts_with("/rest/v1/ledger_chain_state")
+    );
+    assert!(
+        audit_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_append_audit_event_with_ledger")
+    );
+    assert!(
+        !audit_request
+            .body
+            .as_ref()
+            .is_some_and(|body| body.to_string().contains(alias))
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+
+    let logs = log_buffer.contents();
+    assert!(!logs.contains(alias));
+    assert!(!fallback_path.exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn create_alias_endpoint_returns_created_and_keeps_alias_out_of_logs() {
+    let alias = "Prod.API_1";
+    let (secret_id, row_json) =
+        decrypt_row_json(b"alias create seed").expect("decrypt row JSON should be constructed");
+    let alias_response_body = json!([{
+        "secret_id": secret_id,
+        "alias": alias,
+        "alias_normalized": "prod.api_1",
+    }])
+    .to_string();
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_alias_create_server(row_json.to_string(), alias_response_body)
+            .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("create-alias"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let log_buffer = SharedLogBuffer::default();
+    let subscriber = build_log_subscriber(log_buffer.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{secret_id}/aliases"))
+        .bearer_auth(&token)
+        .json(&json!({ "alias": alias }))
+        .send()
+        .await
+        .expect("create alias request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let json: Value = response
+        .json()
+        .await
+        .expect("create alias response should be JSON");
+    assert_eq!(json["secret_id"], Value::String(secret_id.clone()));
+    assert_eq!(json["alias"], Value::String(alias.to_owned()));
+    assert_eq!(
+        json["alias_normalized"],
+        Value::String("prod.api_1".to_owned())
+    );
+
+    let read_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret read request should be captured");
+    let create_alias_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("create alias request should be captured");
+    assert!(read_request.path.starts_with("/rest/v1/secret_versions"));
+    assert!(
+        create_alias_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_create_secret_alias")
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+
+    let logs = log_buffer.contents();
+    assert!(!logs.contains(alias));
+    assert!(!logs.contains("prod.api_1"));
 }
 
 #[tokio::test(flavor = "current_thread")]

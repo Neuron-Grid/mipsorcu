@@ -2,9 +2,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use tower_http::LatencyUnit;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
-use tower_http::trace::{
-    DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
-};
+use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 
 use crate::server::handlers;
 use crate::server::middleware;
@@ -15,12 +13,16 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/audit/v1", handlers::audit_ui::build_audit_read_router())
         .route("/v1/secrets", post(handlers::create_secret))
         .route(
-            "/v1/secrets/{secret_id}/versions",
+            "/v1/secrets/{secret_ref}/versions",
             post(handlers::rotate_secret),
         )
         .route(
-            "/v1/secrets/{secret_id}/decrypt",
+            "/v1/secrets/{secret_ref}/decrypt",
             post(handlers::decrypt_secret),
+        )
+        .route(
+            "/v1/secrets/{secret_ref}/aliases",
+            post(handlers::create_secret_alias),
         )
         .route("/health", get(handlers::health_check))
         .route("/ready", get(handlers::ready_check))
@@ -49,7 +51,9 @@ pub(crate) fn apply_standard_layers(router: Router<AppState>, state: AppState) -
         ]))
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().include_headers(false))
+                .make_span_with(|request: &http::Request<_>| {
+                    tracing::info_span!("http_request", method = %request.method())
+                })
                 .on_request(DefaultOnRequest::new().level(tracing::Level::INFO))
                 .on_response(
                     DefaultOnResponse::new()

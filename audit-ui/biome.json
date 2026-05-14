@@ -1,131 +1,142 @@
 {
-    "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-    "vcs": {
-        "enabled": true,
-        "clientKind": "git",
-        "useIgnoreFile": false,
-        "defaultBranch": "main"
-    },
-    "files": {
-        "ignoreUnknown": true,
-        "ignore": [
-            "node_modules",
-            ".next",
-            "dist",
-            "build",
-            "coverage",
-            "test-results",
-            "playwright-report",
-            ".turbo",
-            ".vercel",
-            ".wrangler",
-            "generated",
-            "supabase/.branches"
-        ]
-    },
-    "formatter": {
-        "enabled": true,
-        "formatWithErrors": false,
-        "indentStyle": "space",
-        "indentWidth": 4,
-        "lineWidth": 100,
-        "lineEnding": "lf",
-        "attributePosition": "auto",
-        "bracketSpacing": true
-    },
-    "javascript": {
-        "formatter": {
-            "quoteStyle": "double",
-            "jsxQuoteStyle": "double",
-            "semicolons": "always",
-            "trailingCommas": "all",
-            "arrowParentheses": "always"
-        }
-    },
-    "json": {
-        "formatter": {
-            "enabled": true,
-            "indentStyle": "space",
-            "indentWidth": 4
-        }
-    },
-    "organizeImports": {
-        "enabled": true
-    },
-    "linter": {
-        "enabled": true,
-        "rules": {
-            "recommended": true,
-            "security": {
-                "noDangerouslySetInnerHtml": "error",
-                "noGlobalEval": "error"
-            },
-            "suspicious": {
-                "noExplicitAny": "error",
-                "noConsole": "warn",
-                "noDebugger": "error"
-            },
-            "correctness": {
-                "noUnusedImports": "error",
-                "noUnusedVariables": "warn",
-                "noUndeclaredVariables": "error",
-                "useExhaustiveDependencies": "error"
-            },
-            "style": {
-                "noNonNullAssertion": "error",
-                "useImportType": "error",
-                "useExportType": "error",
-                "useNodejsImportProtocol": "error",
-                "useConst": "error"
-            },
-            "complexity": {
-                "noBannedTypes": "error",
-                "noUselessFragments": "warn"
-            }
-        }
-    },
-    "overrides": [
-        {
-            "include": [
-                "**/*.test.ts",
-                "**/*.test.tsx",
-                "**/*.spec.ts",
-                "**/*.spec.tsx",
-                "**/tests/**"
-            ],
-            "linter": {
-                "rules": {
-                    "suspicious": {
-                        "noConsole": "off"
-                    }
-                }
-            }
-        },
-        {
-            "include": [
-                "vite.config.ts",
-                "vitest.config.ts",
-                "next.config.ts",
-                "postcss.config.js",
-                "tailwind.config.ts"
-            ],
-            "linter": {
-                "rules": {
-                    "suspicious": {
-                        "noConsole": "off"
-                    }
-                }
-            }
-        },
-        {
-            "include": ["scripts/**/*.ts"],
-            "linter": {
-                "rules": {
-                    "suspicious": {
-                        "noConsole": "off"
-                    }
-                }
-            }
-        }
+  "$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": false,
+    "defaultBranch": "main"
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "**",
+      "!**/node_modules/**",
+      "!**/.next/**",
+      "!**/dist/**",
+      "!**/build/**",
+      "!**/coverage/**",
+      "!**/.turbo/**",
+      "!**/.vercel/**",
+      "!**/.wrangler/**",
+      "!**/generated/**",
+      "!**/supabase/.branches/**"
     ]
+  },
+  "formatter": {
+    "enabled": true,
+    "formatWithErrors": false,
+    "indentStyle": "space",
+    "indentWidth": 4,
+    "lineWidth": 100,
+    "lineEnding": "lf",
+    "attributePosition": "auto",
+    "bracketSpacing": true
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "jsxQuoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all",
+      "arrowParentheses": "always"
+    }
+  },
+  "json": {
+    "formatter": {
+      "enabled": true,
+      "indentStyle": "space",
+      "indentWidth": 4
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "security": {
+        "noSecrets": "warn",
+        "noDangerouslySetInnerHtml": "error",
+        "noGlobalEval": "error"
+      },
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noConsole": "warn",
+        "noDebugger": "error"
+      },
+      "correctness": {
+        "noUnusedImports": "error",
+        "noUnusedVariables": "warn",
+        "noUndeclaredVariables": "error",
+        "useExhaustiveDependencies": "error"
+      },
+      "style": {
+        "noNonNullAssertion": "error",
+        "useImportType": "error",
+        "useExportType": "error",
+        "useNodejsImportProtocol": "error",
+        "useConst": "error"
+      },
+      "complexity": {
+        "noBannedTypes": "error",
+        "noUselessFragments": "warn"
+      },
+      "nursery": {
+        "useExhaustiveSwitchCases": "warn"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/tests/**"
+      ],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": "off"
+          },
+          "nursery": {
+            "useTestHooksInOrder": "warn"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "vite.config.ts",
+        "vitest.config.ts",
+        "next.config.ts",
+        "postcss.config.js",
+        "tailwind.config.ts"
+      ],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "package.json"
+      ],
+      "json": {
+        "formatter": {
+          "expand": "auto"
+        }
+      }
+    }
+  ]
 }

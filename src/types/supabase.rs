@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::ledger::{
     LedgerChainHead, LedgerEntryId, LedgerHash, LedgerSequenceNo, SignedLedgerEntry,
 };
-use crate::{KeyVersion, SecretId, SecretVersion, SecretVersionId};
+use crate::{AliasNormalized, KeyVersion, SecretAlias, SecretId, SecretVersion, SecretVersionId};
 
 #[derive(Deserialize)]
 pub struct SecretVersionReadRow {
@@ -28,6 +28,46 @@ pub struct SecretReadJoin {
     pub current_version_id: String,
     pub owner_user_id: String,
     pub classification: String,
+}
+
+#[derive(Deserialize)]
+pub struct SecretAliasReadRow {
+    pub secret_id: String,
+    pub owner_user_id: String,
+    pub alias_normalized: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSecretAliasOutcome {
+    secret_id: SecretId,
+    alias: SecretAlias,
+    alias_normalized: AliasNormalized,
+}
+
+impl CreateSecretAliasOutcome {
+    pub(crate) fn new(
+        secret_id: SecretId,
+        alias: SecretAlias,
+        alias_normalized: AliasNormalized,
+    ) -> Self {
+        Self {
+            secret_id,
+            alias,
+            alias_normalized,
+        }
+    }
+
+    pub fn secret_id(&self) -> &SecretId {
+        &self.secret_id
+    }
+
+    pub fn alias(&self) -> &SecretAlias {
+        &self.alias
+    }
+
+    pub fn alias_normalized(&self) -> &AliasNormalized {
+        &self.alias_normalized
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2,7 +2,9 @@ use crate::audit::{AuditAction, RequestId};
 use crate::auth::{RawJwt, VerifiedJwtClaims};
 use crate::server::audit_reporter::FailureAuditContext;
 use crate::server::errors::ApiError;
-use crate::server::read_model::{self, FetchCurrentSecretVersionError};
+use crate::server::read_model::{
+    self, FetchCurrentSecretVersionError, ResolveSecretRefError, resolve_secret_ref,
+};
 use crate::server::state::AppState;
 use crate::{authorize_existing_secret_version_write, authorize_new_secret_create};
 
@@ -70,7 +72,21 @@ pub(in crate::server) async fn rotate_secret(
     command: RotateSecretCommand,
 ) -> Result<WriteSecretVersionOutput, ApiError> {
     let actor_user_id = claims.subject_user_id().clone();
-    let requested_secret_id = command.requested_secret_id.clone();
+    let requested_secret_id =
+        match resolve_secret_ref(state, command.requested_secret_ref.clone(), raw_jwt).await {
+            Ok(secret_id) => secret_id,
+            Err(error) => {
+                let failure = FailureAuditContext::new(
+                    state,
+                    request_id,
+                    Some(&actor_user_id),
+                    None,
+                    AuditAction::EncryptRotate,
+                );
+                record_secret_ref_resolution_failure(&failure, &error).await?;
+                return Err(ApiError::from(error));
+            }
+        };
     let failure = FailureAuditContext::new(
         state,
         request_id,
@@ -172,4 +188,34 @@ pub(in crate::server) async fn rotate_secret(
         Some(retention_snapshot),
     )
     .await
+}
+
+async fn record_secret_ref_resolution_failure(
+    failure: &FailureAuditContext<'_>,
+    error: &ResolveSecretRefError,
+) -> Result<(), crate::server::errors::ApiError> {
+    match error {
+        ResolveSecretRefError::Upstream(rpc_error) => {
+            failure.log_upstream_failure_without_error_value(rpc_error, "resolve_secret_ref");
+            if let Err(audit_err) = failure.record().await {
+                tracing::error!(
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
+        }
+        ResolveSecretRefError::Api(api_error) => {
+            if let Err(audit_err) = failure
+                .log_and_record(api_error, "resolve_secret_ref")
+                .await
+            {
+                tracing::error!(
+                    error = %audit_err,
+                    "failure audit recording also failed"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }

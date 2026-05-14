@@ -4,7 +4,8 @@ pub mod supabase;
 mod time;
 
 pub use ids::{
-    Classification, DeviceId, KeyVersion, OwnerUserId, SecretId, SecretVersion, SecretVersionId,
+    AliasNormalized, Classification, DeviceId, KeyVersion, OwnerUserId, SecretAlias, SecretId,
+    SecretRef, SecretVersion, SecretVersionId,
 };
 pub use secret_material::{
     Ciphertext, DATA_KEY_LENGTH, DataKey, ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH,

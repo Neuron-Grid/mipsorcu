@@ -104,11 +104,11 @@ pub use timestamping::{
     TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
 };
 pub use types::{
-    Ciphertext, Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,
+    AliasNormalized, Ciphertext, Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,
     ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH, ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_TAG_LENGTH,
     ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
-    NONCE_LENGTH, Nonce, OwnerUserId, Plaintext, SecretId, SecretVersion, SecretVersionId,
-    SourceEventAt,
+    NONCE_LENGTH, Nonce, OwnerUserId, Plaintext, SecretAlias, SecretId, SecretRef, SecretVersion,
+    SecretVersionId, SourceEventAt,
 };
 pub use write::{
     CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,

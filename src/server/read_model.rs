@@ -5,10 +5,10 @@ use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionI
 use crate::server::errors::ApiError;
 use crate::server::state::AppState;
 use crate::server::supabase::SupabaseRpcError;
-use crate::types::supabase::{RestoreTestSampleRow, SecretVersionReadRow};
+use crate::types::supabase::{RestoreTestSampleRow, SecretAliasReadRow, SecretVersionReadRow};
 use crate::types::{
     Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
-    SecretId, SecretVersion, SecretVersionId,
+    SecretId, SecretRef, SecretVersion, SecretVersionId,
 };
 use crate::write::CurrentSecretVersionState;
 
@@ -22,6 +22,20 @@ impl From<FetchCurrentSecretVersionError> for ApiError {
         match error {
             FetchCurrentSecretVersionError::Upstream(error) => Self::from(error),
             FetchCurrentSecretVersionError::Api(error) => error,
+        }
+    }
+}
+
+pub enum ResolveSecretRefError {
+    Upstream(SupabaseRpcError),
+    Api(ApiError),
+}
+
+impl From<ResolveSecretRefError> for ApiError {
+    fn from(error: ResolveSecretRefError) -> Self {
+        match error {
+            ResolveSecretRefError::Upstream(error) => Self::from(error),
+            ResolveSecretRefError::Api(error) => error,
         }
     }
 }
@@ -130,6 +144,56 @@ pub async fn fetch_current_secret_version(
     select_single_current_secret_version_row(rows)
         .and_then(parse_decrypt_row)
         .map_err(FetchCurrentSecretVersionError::Api)
+}
+
+pub async fn resolve_secret_ref(
+    state: &AppState,
+    secret_ref: SecretRef,
+    raw_jwt: &RawJwt,
+) -> Result<SecretId, ResolveSecretRefError> {
+    match secret_ref {
+        SecretRef::Id(secret_id) => Ok(secret_id),
+        SecretRef::Alias(alias_normalized) => {
+            let rows = state
+                .supabase_client
+                .resolve_secret_alias_for_user(&alias_normalized, raw_jwt)
+                .await
+                .map_err(ResolveSecretRefError::Upstream)?;
+
+            select_single_secret_alias_row(rows)
+                .and_then(parse_secret_alias_row)
+                .map_err(ResolveSecretRefError::Api)
+        }
+    }
+}
+
+fn select_single_secret_alias_row(
+    rows: Vec<SecretAliasReadRow>,
+) -> Result<SecretAliasReadRow, ApiError> {
+    match rows.len() {
+        0 => Err(ApiError::NotFound("secret not found".to_owned())),
+        1 => rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApiError::InternalInvariantViolation("missing alias row".to_owned())),
+        count => Err(ApiError::DbIntegrityViolation(format!(
+            "expected one secret alias row, got {count}"
+        ))),
+    }
+}
+
+fn parse_secret_alias_row(row: SecretAliasReadRow) -> Result<SecretId, ApiError> {
+    OwnerUserId::parse(&row.owner_user_id).map_err(|_| {
+        ApiError::DbIntegrityViolation("secret alias owner_user_id is invalid".to_owned())
+    })?;
+    let secret_id = SecretId::parse(&row.secret_id).map_err(|_| {
+        ApiError::DbIntegrityViolation("secret alias secret_id is invalid".to_owned())
+    })?;
+    let _alias_normalized = crate::AliasNormalized::new(&row.alias_normalized).map_err(|_| {
+        ApiError::DbIntegrityViolation("secret alias alias_normalized is invalid".to_owned())
+    })?;
+
+    Ok(secret_id)
 }
 
 fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, ApiError> {

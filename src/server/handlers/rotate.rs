@@ -8,22 +8,22 @@ use crate::server::middleware::{AuthenticatedUser, RequestContext, RequestJson};
 use crate::server::state::AppState;
 use crate::server::use_cases::write_secret_version::{self, RotateSecretCommand};
 
-use super::parsing::{ParsedRotateSecretRequest, parse_rotate_secret_request, parse_secret_id};
+use super::parsing::{ParsedRotateSecretRequest, parse_rotate_secret_request, parse_secret_ref};
 
 pub async fn rotate_secret(
     State(state): State<AppState>,
     request_context: RequestContext,
-    AxumPath(secret_id): AxumPath<String>,
+    AxumPath(secret_ref): AxumPath<String>,
     auth: AuthenticatedUser,
     RequestJson(body): RequestJson<RotateSecretRequest>,
 ) -> ServerResult<(StatusCode, Json<RotateSecretResponse>)> {
     let request_id = request_context.into_request_id();
 
-    let requested_secret_id =
-        parse_secret_id(&secret_id).map_err(|error| error.with_request_id(&request_id))?;
+    let requested_secret_ref =
+        parse_secret_ref(&secret_ref).map_err(|error| error.with_request_id(&request_id))?;
     let request =
         parse_rotate_secret_request(body).map_err(|error| error.with_request_id(&request_id))?;
-    let command = rotate_secret_command(requested_secret_id, request);
+    let command = rotate_secret_command(requested_secret_ref, request);
     let output = write_secret_version::rotate_secret(
         &state,
         &request_id,
@@ -45,11 +45,11 @@ pub async fn rotate_secret(
 }
 
 fn rotate_secret_command(
-    requested_secret_id: crate::SecretId,
+    requested_secret_ref: crate::SecretRef,
     request: ParsedRotateSecretRequest,
 ) -> RotateSecretCommand {
     RotateSecretCommand::new(
-        requested_secret_id,
+        requested_secret_ref,
         request.device_id,
         request.plaintext,
         request.created_at,

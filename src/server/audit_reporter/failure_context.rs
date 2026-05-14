@@ -146,4 +146,57 @@ impl<'a> FailureAuditContext<'a> {
             }
         }
     }
+
+    pub fn log_upstream_failure_without_error_value(
+        &self,
+        error: &SupabaseRpcError,
+        stage: &'static str,
+    ) {
+        match (self.target_secret_id, error.upstream_status()) {
+            (Some(secret_id), Some(upstream_status)) => {
+                tracing::error!(
+                    request_id = %self.request_id.as_canonical_string(),
+                    secret_id = %secret_id.as_canonical_string(),
+                    action = self.action.as_str(),
+                    result = "failure",
+                    error_code = "upstream_dependency_failed",
+                    upstream_status,
+                    stage,
+                    "request handling failed"
+                );
+            }
+            (Some(secret_id), None) => {
+                tracing::error!(
+                    request_id = %self.request_id.as_canonical_string(),
+                    secret_id = %secret_id.as_canonical_string(),
+                    action = self.action.as_str(),
+                    result = "failure",
+                    error_code = "upstream_dependency_failed",
+                    stage,
+                    "request handling failed"
+                );
+            }
+            (None, Some(upstream_status)) => {
+                tracing::error!(
+                    request_id = %self.request_id.as_canonical_string(),
+                    action = self.action.as_str(),
+                    result = "failure",
+                    error_code = "upstream_dependency_failed",
+                    upstream_status,
+                    stage,
+                    "request handling failed"
+                );
+            }
+            (None, None) => {
+                tracing::error!(
+                    request_id = %self.request_id.as_canonical_string(),
+                    action = self.action.as_str(),
+                    result = "failure",
+                    error_code = "upstream_dependency_failed",
+                    stage,
+                    "request handling failed"
+                );
+            }
+        }
+    }
 }

@@ -1,3 +1,4 @@
+mod alias_rpc;
 mod audit_report_rpc;
 mod audit_rpc;
 mod audit_ui_rpc;
@@ -17,6 +18,7 @@ mod secret_rpc;
 mod verify_digest_rpc;
 mod write_secret_rpc;
 
+pub use alias_rpc::{CreateSecretAliasRpcError, classify_create_secret_alias_error};
 pub use audit_report_rpc::{
     AuditReportSummary, HashChainVerificationSummary, IntegrityCheckReportItem,
     MonthlyDigestReportItem, RestoreTestReportItem, SignatureKeyVersionReportItem,
@@ -44,9 +46,10 @@ pub use verify_digest_rpc::{
 };
 
 pub use crate::types::supabase::{
-    AppendLedgerEntryOutcome, IntegrityCheckSummary, IntegrityCheckViolationSummary,
-    KeyRotationApplyOutcome, KeyRotationApplyRow, KeyRotationBatchRow, KeyRotationCompleteOutcome,
-    KeyRotationStatus, LedgerAppendRpcFailure, LedgerEntryRpcParams, RestoreTestSampleRow,
-    SecretReadJoin, SecretVersionReadRow, SecretVersionRetentionSnapshot,
-    WriteSecretVersionOutcome, WriteSecretVersionParams,
+    AppendLedgerEntryOutcome, CreateSecretAliasOutcome, IntegrityCheckSummary,
+    IntegrityCheckViolationSummary, KeyRotationApplyOutcome, KeyRotationApplyRow,
+    KeyRotationBatchRow, KeyRotationCompleteOutcome, KeyRotationStatus, LedgerAppendRpcFailure,
+    LedgerEntryRpcParams, RestoreTestSampleRow, SecretAliasReadRow, SecretReadJoin,
+    SecretVersionReadRow, SecretVersionRetentionSnapshot, WriteSecretVersionOutcome,
+    WriteSecretVersionParams,
 };

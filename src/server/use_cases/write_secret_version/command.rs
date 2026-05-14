@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::SecretId;
+use crate::SecretRef;
 use crate::types::{Classification, CreatedAt, DeviceId, Plaintext};
 
 pub(in crate::server) struct CreateSecretCommand {
@@ -39,7 +39,7 @@ impl fmt::Debug for CreateSecretCommand {
 }
 
 pub(in crate::server) struct RotateSecretCommand {
-    pub(super) requested_secret_id: SecretId,
+    pub(super) requested_secret_ref: SecretRef,
     pub(super) device_id: DeviceId,
     pub(super) plaintext: Plaintext,
     pub(super) created_at: CreatedAt,
@@ -47,13 +47,13 @@ pub(in crate::server) struct RotateSecretCommand {
 
 impl RotateSecretCommand {
     pub(in crate::server) fn new(
-        requested_secret_id: SecretId,
+        requested_secret_ref: SecretRef,
         device_id: DeviceId,
         plaintext: Plaintext,
         created_at: CreatedAt,
     ) -> Self {
         Self {
-            requested_secret_id,
+            requested_secret_ref,
             device_id,
             plaintext,
             created_at,
@@ -65,7 +65,7 @@ impl fmt::Debug for RotateSecretCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RotateSecretCommand")
-            .field("requested_secret_id", &self.requested_secret_id)
+            .field("requested_secret_ref", &self.requested_secret_ref)
             .field("device_id", &self.device_id)
             .field("plaintext", &"<redacted>")
             .field("created_at", &self.created_at)
