@@ -17,7 +17,7 @@ import type {
     SignatureVerification,
     SummaryResponse,
     VerificationFailureRow,
-} from "./types";
+} from "./types/types";
 
 type LoadState = "idle" | "loading" | "loaded" | "failed";
 

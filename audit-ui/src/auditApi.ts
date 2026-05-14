@@ -10,7 +10,7 @@ import type {
     SignatureVerification,
     SummaryResponse,
     VerificationFailureRow,
-} from "./types";
+} from "./types/types";
 
 export class AuditApiError extends Error {
     readonly code: string;
