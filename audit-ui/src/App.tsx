@@ -10,10 +10,13 @@ import type {
     AuditEventRow,
     AuditSecret,
     HashChainVerification,
+    IntegrityCheckReportItem,
     IntegrityStatusRow,
     LedgerEntryRow,
+    MonthlyDigestReportItem,
     MonthlyDigestVerification,
     PageResponse,
+    RestoreTestReportItem,
     SignatureVerification,
     SummaryResponse,
     VerificationFailureRow,
@@ -291,6 +294,21 @@ const Dashboard = ({ data }: { readonly data: DashboardData }) => (
         <Section title="integrity status" badge={`${data.integrityStatus.length} 件`}>
             <IntegrityTable rows={data.integrityStatus} />
         </Section>
+        <Section
+            title="monthly digests"
+            badge={`${data.summary.summary.monthly_digests.length} 件`}
+        >
+            <MonthlyDigestsTable rows={data.summary.summary.monthly_digests} />
+        </Section>
+        <Section title="restore tests" badge={`${data.summary.summary.restore_tests.length} 件`}>
+            <RestoreTestsTable rows={data.summary.summary.restore_tests} />
+        </Section>
+        <Section
+            title="integrity checks"
+            badge={`${data.summary.summary.integrity_checks.length} 件`}
+        >
+            <IntegrityChecksTable rows={data.summary.summary.integrity_checks} />
+        </Section>
         <Section title="検証失敗箇所" badge={`${data.failures.items.length} 件`}>
             <FailuresTable rows={data.failures.items} />
         </Section>
@@ -341,16 +359,30 @@ const VerificationCards = ({
         />
         <StatusCard
             title="restore / integrity"
-            ok={summary.summary.failure_count === 0 && summary.signature_verification.valid}
+            ok={isReportVerificationValid(summary)}
             details={[
                 `audit_events=${summary.summary.audit_event_count}`,
                 `ledger_entries=${summary.summary.ledger_entry_count}`,
-                `failures=${summary.summary.failure_count}`,
+                `verification_failures=${summary.summary.verification_failures.length}`,
+                `restore_tests=${summary.summary.restore_tests.length}`,
+                `integrity_checks=${summary.summary.integrity_checks.length}`,
             ]}
-            errorCode={summary.signature_verification.error_code}
+            errorCode={
+                summary.signature_verification.error_code ??
+                summary.summary.verification_failures[0]?.code ??
+                null
+            }
         />
     </section>
 );
+
+const isReportVerificationValid = (summary: SummaryResponse): boolean =>
+    summary.summary.verification_failures.length === 0 &&
+    summary.summary.restore_tests.every((row) => row.result === "success") &&
+    summary.summary.integrity_checks.every(
+        (row) => row.result === "success" && row.violation_count === 0,
+    ) &&
+    summary.signature_verification.valid;
 
 type StatusCardProps = {
     readonly title: string;
@@ -386,7 +418,7 @@ const Section = ({ title, badge, children }: SectionProps) => (
             <h2>{title}</h2>
             <span class="badge">{badge}</span>
         </div>
-        {children}
+        <div class="table-scroll">{children}</div>
     </section>
 );
 
@@ -504,6 +536,99 @@ const IntegrityTable = ({ rows }: { readonly rows: readonly IntegrityStatusRow[]
                     <td>{row.last_sequence_no}</td>
                     <td>{row.last_entry_hash}</td>
                     <td>{row.chain_state_updated_at}</td>
+                </tr>
+            ))}
+        </tbody>
+    </table>
+);
+
+const MonthlyDigestsTable = ({ rows }: { readonly rows: readonly MonthlyDigestReportItem[] }) => (
+    <table>
+        <thead>
+            <tr>
+                <th>target_year_month</th>
+                <th>sequence_no</th>
+                <th>range</th>
+                <th>entry_count</th>
+                <th>digest_hash</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows.map((row) => (
+                <tr key={`${row.target_year_month}-${row.sequence_no}`}>
+                    <td>{row.target_year_month}</td>
+                    <td>{row.sequence_no}</td>
+                    <td>{`${row.start_sequence_no}..${row.end_sequence_no}`}</td>
+                    <td>{row.entry_count}</td>
+                    <td>{row.digest_hash}</td>
+                </tr>
+            ))}
+        </tbody>
+    </table>
+);
+
+const RestoreTestsTable = ({ rows }: { readonly rows: readonly RestoreTestReportItem[] }) => (
+    <table>
+        <thead>
+            <tr>
+                <th>occurred_at</th>
+                <th>result</th>
+                <th>sample_count</th>
+                <th>duration_ms</th>
+                <th>trigger</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows.map((row) => (
+                <tr
+                    key={`${row.occurred_at}-${row.sample_count}`}
+                    class={row.result === "success" ? undefined : "row--failure"}
+                >
+                    <td>{row.occurred_at}</td>
+                    <td>{row.result}</td>
+                    <td>{row.sample_count}</td>
+                    <td>{row.duration_ms}</td>
+                    <td>{row.trigger ?? "-"}</td>
+                </tr>
+            ))}
+        </tbody>
+    </table>
+);
+
+const IntegrityChecksTable = ({
+    rows,
+}: {
+    readonly rows: readonly IntegrityCheckReportItem[];
+}) => (
+    <table>
+        <thead>
+            <tr>
+                <th>occurred_at</th>
+                <th>result</th>
+                <th>violation_count</th>
+                <th>checked counts</th>
+                <th>duration_ms</th>
+                <th>trigger</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows.map((row) => (
+                <tr
+                    key={`${row.occurred_at}-${row.checked_audit_event_count}`}
+                    class={
+                        row.result !== "success" || row.violation_count > 0
+                            ? "row--failure"
+                            : undefined
+                    }
+                >
+                    <td>{row.occurred_at}</td>
+                    <td>{row.result}</td>
+                    <td>{row.violation_count}</td>
+                    <td>
+                        {`audit_events=${row.checked_audit_event_count}, secrets=${row.checked_secret_count}, secret_versions=${row.checked_secret_version_count}`}
+                    </td>
+                    <td>{row.duration_ms}</td>
+                    <td>{row.trigger ?? "-"}</td>
                 </tr>
             ))}
         </tbody>

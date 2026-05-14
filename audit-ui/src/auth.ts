@@ -1,4 +1,4 @@
-import { createClient, type Session, type SupabaseClient } from "@supabase/supabase-js";
+import { type Session, type SupabaseClient, createClient } from "@supabase/supabase-js";
 
 import type { AppConfig } from "./config";
 

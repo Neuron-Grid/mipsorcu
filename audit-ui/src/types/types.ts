@@ -93,22 +93,66 @@ export type VerificationFailureRow = {
     readonly source: string;
 };
 
+export type HashChainVerificationSummary = {
+    readonly checked_count: number;
+    readonly detail: string | null;
+    readonly valid: boolean;
+};
+
+export type IntegrityCheckReportItem = {
+    readonly checked_audit_event_count: number;
+    readonly checked_secret_count: number;
+    readonly checked_secret_version_count: number;
+    readonly duration_ms: number;
+    readonly occurred_at: string;
+    readonly result: string;
+    readonly trigger: string | null;
+    readonly violation_count: number;
+};
+
+export type MonthlyDigestReportItem = {
+    readonly digest_hash: string;
+    readonly end_sequence_no: number;
+    readonly entry_count: number;
+    readonly sequence_no: number;
+    readonly start_sequence_no: number;
+    readonly target_year_month: string;
+};
+
+export type RestoreTestReportItem = {
+    readonly duration_ms: number;
+    readonly occurred_at: string;
+    readonly result: string;
+    readonly sample_count: number;
+    readonly trigger: string | null;
+};
+
+export type SignatureKeyVersionReportItem = {
+    readonly key_version: number;
+    readonly status: string;
+};
+
+export type VerificationFailureReportItem = {
+    readonly code: string;
+    readonly occurred_at: string;
+    readonly sequence_no: number | null;
+    readonly source: string;
+};
+
 export type AuditReportSummary = {
     readonly audit_event_count: number;
+    readonly hash_chain_verification: HashChainVerificationSummary;
+    readonly integrity_checks: readonly IntegrityCheckReportItem[];
     readonly ledger_entry_count: number;
-    readonly secret_count: number;
-    readonly failure_count: number;
-    readonly sequence_start: number | null;
-    readonly sequence_end: number | null;
-    readonly period_start: string;
+    readonly monthly_digests: readonly MonthlyDigestReportItem[];
     readonly period_end: string;
-    readonly hash_chain: unknown;
-    readonly signatures: unknown;
-    readonly restore_tests: readonly unknown[];
-    readonly integrity_checks: readonly unknown[];
-    readonly monthly_digests: readonly unknown[];
-    readonly verification_failures: readonly unknown[];
-    readonly signature_key_versions: readonly unknown[];
+    readonly period_start: string;
+    readonly restore_tests: readonly RestoreTestReportItem[];
+    readonly secret_count: number;
+    readonly sequence_end: number | null;
+    readonly sequence_start: number | null;
+    readonly signature_key_versions: readonly SignatureKeyVersionReportItem[];
+    readonly verification_failures: readonly VerificationFailureReportItem[];
 };
 
 export type SummaryResponse = {
