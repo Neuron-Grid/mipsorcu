@@ -1,14 +1,14 @@
-import type { DashboardProps } from "../types/ui";
-import { Section } from "./Section";
-import { AuditEventsTable } from "./tables/AuditEventsTable";
-import { FailuresTable } from "./tables/FailuresTable";
-import { IntegrityChecksTable } from "./tables/IntegrityChecksTable";
-import { IntegrityTable } from "./tables/IntegrityTable";
-import { LedgerEntriesTable } from "./tables/LedgerEntriesTable";
-import { MonthlyDigestsTable } from "./tables/MonthlyDigestsTable";
-import { RestoreTestsTable } from "./tables/RestoreTestsTable";
-import { SecretsTable } from "./tables/SecretsTable";
-import { VerificationCards } from "./VerificationCards";
+import { Section } from "@/components/Section";
+import { AuditEventsTable } from "@/components/tables/AuditEventsTable";
+import { FailuresTable } from "@/components/tables/FailuresTable";
+import { IntegrityChecksTable } from "@/components/tables/IntegrityChecksTable";
+import { IntegrityTable } from "@/components/tables/IntegrityTable";
+import { LedgerEntriesTable } from "@/components/tables/LedgerEntriesTable";
+import { MonthlyDigestsTable } from "@/components/tables/MonthlyDigestsTable";
+import { RestoreTestsTable } from "@/components/tables/RestoreTestsTable";
+import { SecretsTable } from "@/components/tables/SecretsTable";
+import { VerificationCards } from "@/components/VerificationCards";
+import type { DashboardProps } from "@/types/ui";
 
 export const Dashboard = ({ data }: DashboardProps) => (
     <div class="dashboard" data-testid="audit-dashboard">

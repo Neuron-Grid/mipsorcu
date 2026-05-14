@@ -1,4 +1,5 @@
-import type { AppConfig } from "../config";
+import { appendQuery, fetchReadOnlyJson } from "@/api/http";
+import type { AppConfig } from "@/config";
 import type {
     AuditEventRow,
     AuditSecret,
@@ -10,8 +11,7 @@ import type {
     SignatureVerification,
     SummaryResponse,
     VerificationFailureRow,
-} from "../types/types";
-import { appendQuery, fetchReadOnlyJson } from "./http";
+} from "@/types/types";
 
 export type AuditApiClient = {
     readonly listSecrets: () => Promise<PageResponse<AuditSecret>>;

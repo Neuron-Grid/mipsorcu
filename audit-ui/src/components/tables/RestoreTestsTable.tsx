@@ -1,4 +1,4 @@
-import type { RestoreTestsTableProps } from "../../types/ui";
+import type { RestoreTestsTableProps } from "@/types/ui";
 
 export const RestoreTestsTable = ({ rows }: RestoreTestsTableProps) => (
     <table>

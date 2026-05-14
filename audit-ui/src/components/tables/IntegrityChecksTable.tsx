@@ -1,4 +1,4 @@
-import type { IntegrityChecksTableProps } from "../../types/ui";
+import type { IntegrityChecksTableProps } from "@/types/ui";
 
 export const IntegrityChecksTable = ({ rows }: IntegrityChecksTableProps) => (
     <table>

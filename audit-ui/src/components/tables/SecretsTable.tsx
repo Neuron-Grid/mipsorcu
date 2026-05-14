@@ -1,4 +1,4 @@
-import type { SecretsTableProps } from "../../types/ui";
+import type { SecretsTableProps } from "@/types/ui";
 
 export const SecretsTable = ({ rows }: SecretsTableProps) => (
     <table>

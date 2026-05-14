@@ -1,6 +1,6 @@
-import { isReportVerificationValid, nullableDetail, rangeDetail } from "../lib/verification";
-import type { VerificationCardsProps } from "../types/ui";
-import { StatusCard } from "./StatusCard";
+import { StatusCard } from "@/components/StatusCard";
+import { isReportVerificationValid, nullableDetail, rangeDetail } from "@/lib/verification";
+import type { VerificationCardsProps } from "@/types/ui";
 
 export const VerificationCards = ({
     hashChain,

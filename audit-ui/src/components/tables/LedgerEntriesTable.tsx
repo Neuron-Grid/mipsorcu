@@ -1,5 +1,5 @@
-import { safeJsonText } from "../../redaction";
-import type { LedgerEntriesTableProps } from "../../types/ui";
+import { safeJsonText } from "@/redaction";
+import type { LedgerEntriesTableProps } from "@/types/ui";
 
 export const LedgerEntriesTable = ({ rows }: LedgerEntriesTableProps) => (
     <table>

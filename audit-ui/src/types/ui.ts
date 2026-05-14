@@ -1,5 +1,5 @@
 import type { ComponentChildren } from "preact";
-import type { Credentials } from "../auth";
+import type { Credentials } from "@/auth";
 import type {
     AuditEventRow,
     AuditSecret,
@@ -14,7 +14,7 @@ import type {
     SignatureVerification,
     SummaryResponse,
     VerificationFailureRow,
-} from "./types";
+} from "@/types/types";
 
 export type LoadState = "idle" | "loading" | "loaded" | "failed";
 

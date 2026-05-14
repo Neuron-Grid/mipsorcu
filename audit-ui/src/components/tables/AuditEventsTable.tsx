@@ -1,5 +1,5 @@
-import { safeJsonText } from "../../redaction";
-import type { AuditEventsTableProps } from "../../types/ui";
+import { safeJsonText } from "@/redaction";
+import type { AuditEventsTableProps } from "@/types/ui";
 
 export const AuditEventsTable = ({ rows }: AuditEventsTableProps) => (
     <table>

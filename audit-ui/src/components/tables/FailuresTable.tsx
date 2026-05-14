@@ -1,4 +1,4 @@
-import type { FailuresTableProps } from "../../types/ui";
+import type { FailuresTableProps } from "@/types/ui";
 
 export const FailuresTable = ({ rows }: FailuresTableProps) => (
     <table>

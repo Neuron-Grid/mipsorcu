@@ -1,4 +1,4 @@
-import { AuditApiError } from "../api/error";
+import { AuditApiError } from "@/api/error";
 
 export const GENERIC_ERROR_MESSAGE = "処理に失敗しました。設定または接続状態を確認してください。";
 export const AUTH_ERROR_MESSAGE = "認証に失敗しました。入力または設定を確認してください。";

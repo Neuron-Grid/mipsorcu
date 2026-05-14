@@ -1,6 +1,6 @@
 import { createClient, type Session, type SupabaseClient } from "@supabase/supabase-js";
 
-import type { AppConfig } from "./config";
+import type { AppConfig } from "@/config";
 
 export type AuthState = {
     readonly session: Session | null;

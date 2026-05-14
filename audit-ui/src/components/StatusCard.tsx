@@ -1,4 +1,4 @@
-import type { StatusCardProps } from "../types/ui";
+import type { StatusCardProps } from "@/types/ui";
 
 export const StatusCard = ({ title, ok, details, errorCode }: StatusCardProps) => (
     <article class={ok ? "status-card status-card--ok" : "status-card status-card--failure"}>

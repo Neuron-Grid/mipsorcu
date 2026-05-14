@@ -1,13 +1,13 @@
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import { useMemo, useState } from "preact/hooks";
-import { type AuditApiClient, createAuditApiClient } from "./api/client";
-import { type Credentials, createSupabaseAuthClient, signIn, signOut } from "./auth";
-import { Dashboard } from "./components/Dashboard";
-import { SignInPanel } from "./components/SignInPanel";
-import { loadConfig } from "./config";
-import { currentYearMonth, daysAgoIso, nowIso } from "./lib/datetime";
-import { AUTH_ERROR_MESSAGE, safeErrorMessage } from "./lib/errors";
-import type { DashboardData, LoadState } from "./types/ui";
+import { type AuditApiClient, createAuditApiClient } from "@/api/client";
+import { type Credentials, createSupabaseAuthClient, signIn, signOut } from "@/auth";
+import { Dashboard } from "@/components/Dashboard";
+import { SignInPanel } from "@/components/SignInPanel";
+import { loadConfig } from "@/config";
+import { currentYearMonth, daysAgoIso, nowIso } from "@/lib/datetime";
+import { AUTH_ERROR_MESSAGE, safeErrorMessage } from "@/lib/errors";
+import type { DashboardData, LoadState } from "@/types/ui";
 
 const config = loadConfig();
 

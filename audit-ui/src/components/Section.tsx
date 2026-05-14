@@ -1,4 +1,4 @@
-import type { SectionProps } from "../types/ui";
+import type { SectionProps } from "@/types/ui";
 
 export const Section = ({ title, badge, children }: SectionProps) => (
     <section class="panel">

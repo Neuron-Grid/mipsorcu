@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import type { SignInPanelProps } from "../types/ui";
+import type { SignInPanelProps } from "@/types/ui";
 
 export const SignInPanel = ({ isLoading, errorMessage, onSignIn }: SignInPanelProps) => {
     const [email, setEmail] = useState("");

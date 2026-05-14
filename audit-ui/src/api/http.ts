@@ -1,5 +1,5 @@
-import type { AppConfig } from "../config";
-import { AuditApiError } from "./error";
+import { AuditApiError } from "@/api/error";
+import type { AppConfig } from "@/config";
 
 export const appendQuery = (path: string, params: Record<string, string | null>): string => {
     const query = new URLSearchParams();

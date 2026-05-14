@@ -1,4 +1,4 @@
-import type { MonthlyDigestsTableProps } from "../../types/ui";
+import type { MonthlyDigestsTableProps } from "@/types/ui";
 
 export const MonthlyDigestsTable = ({ rows }: MonthlyDigestsTableProps) => (
     <table>

@@ -1,4 +1,4 @@
-import type { SummaryResponse } from "../types/types";
+import type { SummaryResponse } from "@/types/types";
 
 export const isReportVerificationValid = (summary: SummaryResponse): boolean =>
     summary.summary.verification_failures.length === 0 &&
