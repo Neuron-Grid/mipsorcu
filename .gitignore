@@ -32,6 +32,7 @@ Cargo.lock
 .history
 .ionide
 .env
+.env.container
 supabase/.temp/
 supabase/.branches
 audit-ui/node_modules/
