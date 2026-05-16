@@ -85,6 +85,8 @@ from test_helpers.write_secret_version_fixture(
     'dd'
 );
 
+-- Freeze the restore-test sample before the later service_role write adds
+-- another current version to the fixture data set.
 create temp table restore_test_sample_result as
 select *
 from public.rpc_sample_restore_test(2);
@@ -130,12 +132,12 @@ select is(
 
 select ok(
     has_table_privilege('authenticated', 'public.secrets', 'select'),
-    'authenticated can select secrets through RLS'
+    'authenticated has direct select privilege on secrets'
 );
 
 select ok(
     has_table_privilege('authenticated', 'public.secret_versions', 'select'),
-    'authenticated can select secret_versions through RLS'
+    'authenticated has direct select privilege on secret_versions'
 );
 
 select is(
@@ -282,7 +284,7 @@ select is(
 
 select is(
     (
-        with expected_rpc(function_signature) as (
+        with expected_secret_store_rpc(function_signature) as (
             values
                 (
                     'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure
@@ -313,23 +315,127 @@ select is(
             select c.relowner
             from pg_class c
             where c.oid = 'public.secrets'::regclass
+        ),
+        actual_secret_store_rpc(function_signature) as (
+            select p.oid::regprocedure
+            from pg_proc p
+            join pg_namespace n on n.oid = p.pronamespace
+            cross join table_owner t
+            where n.nspname = 'public'
+                and p.proname in (
+                    'rpc_write_secret_version',
+                    'rpc_append_audit_event',
+                    'rpc_sample_restore_test',
+                    'rpc_integrity_check',
+                    'rpc_key_rotation_status',
+                    'rpc_list_key_rotation_batch',
+                    'rpc_apply_key_rotation_batch',
+                    'rpc_complete_key_rotation'
+                )
+                and p.prosecdef
+                and p.proowner = t.relowner
+                and pg_get_userbyid(p.proowner) not in (
+                    'anon',
+                    'authenticated',
+                    'service_role'
+                )
+                and has_function_privilege(
+                    'service_role',
+                    p.oid,
+                    'execute'
+                )
         )
         select count(*)::integer
-        from expected_rpc e
-        join pg_proc p on p.oid = e.function_signature
-        cross join table_owner t
-        where p.prosecdef
-            and p.proowner = t.relowner
-            and pg_get_userbyid(p.proowner) not in (
-                'anon',
-                'authenticated',
-                'service_role'
-            )
+        from (
+            select function_signature
+            from expected_secret_store_rpc
+            except
+            select function_signature
+            from actual_secret_store_rpc
+        ) missing_rpc
     ),
-    8,
-    'service-role RPCs are SECURITY DEFINER and owned by the schema/table owner, not runtime roles'
+    0,
+    'expected secret-store RPCs are SECURITY DEFINER, owner-held, and executable by service_role'
 );
 
+select is(
+    (
+        with expected_secret_store_rpc(function_signature) as (
+            values
+                (
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure
+                ),
+                (
+                    'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)'::regprocedure
+                ),
+                (
+                    'public.rpc_sample_restore_test(integer)'::regprocedure
+                ),
+                (
+                    'public.rpc_integrity_check()'::regprocedure
+                ),
+                (
+                    'public.rpc_key_rotation_status(integer)'::regprocedure
+                ),
+                (
+                    'public.rpc_list_key_rotation_batch(integer,integer)'::regprocedure
+                ),
+                (
+                    'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)'::regprocedure
+                ),
+                (
+                    'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)'::regprocedure
+                )
+        ),
+        table_owner as (
+            select c.relowner
+            from pg_class c
+            where c.oid = 'public.secrets'::regclass
+        ),
+        actual_secret_store_rpc(function_signature) as (
+            select p.oid::regprocedure
+            from pg_proc p
+            join pg_namespace n on n.oid = p.pronamespace
+            cross join table_owner t
+            where n.nspname = 'public'
+                and p.proname in (
+                    'rpc_write_secret_version',
+                    'rpc_append_audit_event',
+                    'rpc_sample_restore_test',
+                    'rpc_integrity_check',
+                    'rpc_key_rotation_status',
+                    'rpc_list_key_rotation_batch',
+                    'rpc_apply_key_rotation_batch',
+                    'rpc_complete_key_rotation'
+                )
+                and p.prosecdef
+                and p.proowner = t.relowner
+                and pg_get_userbyid(p.proowner) not in (
+                    'anon',
+                    'authenticated',
+                    'service_role'
+                )
+                and has_function_privilege(
+                    'service_role',
+                    p.oid,
+                    'execute'
+                )
+        )
+        select count(*)::integer
+        from (
+            select function_signature
+            from actual_secret_store_rpc
+            except
+            select function_signature
+            from expected_secret_store_rpc
+        ) unexpected_rpc
+    ),
+    0,
+    'secret-store RPC scope has no unexpected service_role executable overloads'
+);
+
+-- These queries exercise RLS row visibility under authenticated user context;
+-- the ACL assertions above only verify direct table grants.
 set local role authenticated;
 set local "request.jwt.claim.sub" = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 
@@ -352,6 +458,7 @@ select is(
 );
 
 reset role;
+reset "request.jwt.claim.sub";
 
 set local role authenticated;
 set local "request.jwt.claim.sub" = 'f47ac10b-58cc-4372-a567-0e02b2c3d480';
@@ -385,7 +492,10 @@ select is(
 );
 
 reset role;
+reset "request.jwt.claim.sub";
 
+-- service_role has BYPASSRLS; this block verifies the RPC boundary and direct
+-- privilege surface, not RLS row filtering.
 set local role service_role;
 
 select is(
@@ -470,31 +580,145 @@ select ok(
     'authenticated cannot execute future public functions by default'
 );
 
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)',
-        'execute'
+select is(
+    (
+        with expected_function_privilege(
+            role_name,
+            function_signature,
+            expected_execute
+        ) as (
+            values
+                (
+                    'anon',
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure,
+                    false
+                ),
+                (
+                    'authenticated',
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure,
+                    false
+                ),
+                (
+                    'service_role',
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure,
+                    true
+                ),
+                (
+                    'anon',
+                    'public.rpc_sample_restore_test(integer)'::regprocedure,
+                    false
+                ),
+                (
+                    'authenticated',
+                    'public.rpc_sample_restore_test(integer)'::regprocedure,
+                    false
+                ),
+                (
+                    'service_role',
+                    'public.rpc_sample_restore_test(integer)'::regprocedure,
+                    true
+                ),
+                (
+                    'anon',
+                    'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)'::regprocedure,
+                    false
+                ),
+                (
+                    'authenticated',
+                    'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)'::regprocedure,
+                    false
+                ),
+                (
+                    'service_role',
+                    'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)'::regprocedure,
+                    true
+                ),
+                (
+                    'anon',
+                    'public.rpc_integrity_check()'::regprocedure,
+                    false
+                ),
+                (
+                    'authenticated',
+                    'public.rpc_integrity_check()'::regprocedure,
+                    false
+                ),
+                (
+                    'service_role',
+                    'public.rpc_integrity_check()'::regprocedure,
+                    true
+                ),
+                (
+                    'anon',
+                    'public.rpc_key_rotation_status(integer)'::regprocedure,
+                    false
+                ),
+                (
+                    'authenticated',
+                    'public.rpc_key_rotation_status(integer)'::regprocedure,
+                    false
+                ),
+                (
+                    'service_role',
+                    'public.rpc_key_rotation_status(integer)'::regprocedure,
+                    true
+                ),
+                (
+                    'anon',
+                    'public.rpc_list_key_rotation_batch(integer,integer)'::regprocedure,
+                    false
+                ),
+                (
+                    'authenticated',
+                    'public.rpc_list_key_rotation_batch(integer,integer)'::regprocedure,
+                    false
+                ),
+                (
+                    'service_role',
+                    'public.rpc_list_key_rotation_batch(integer,integer)'::regprocedure,
+                    true
+                ),
+                (
+                    'anon',
+                    'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)'::regprocedure,
+                    false
+                ),
+                (
+                    'authenticated',
+                    'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)'::regprocedure,
+                    false
+                ),
+                (
+                    'service_role',
+                    'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)'::regprocedure,
+                    true
+                ),
+                (
+                    'anon',
+                    'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)'::regprocedure,
+                    false
+                ),
+                (
+                    'authenticated',
+                    'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)'::regprocedure,
+                    false
+                ),
+                (
+                    'service_role',
+                    'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)'::regprocedure,
+                    true
+                )
+        )
+        select count(*)::integer
+        from expected_function_privilege e
+        where has_function_privilege(
+            e.role_name,
+            e.function_signature,
+            'execute'
+        ) is distinct from e.expected_execute
     ),
-    'anon cannot execute write RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)',
-        'execute'
-    ),
-    'authenticated cannot execute write RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)',
-        'execute'
-    ),
-    'service_role can execute write RPC'
+    0,
+    'secret-store RPC execute grants match the expected runtime role matrix'
 );
 
 select is(
@@ -581,195 +805,6 @@ select is(
     ),
     0,
     'restore test sample RPC returns the current version for single-version secrets'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_sample_restore_test(integer)',
-        'execute'
-    ),
-    'anon cannot execute restore test sample RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_sample_restore_test(integer)',
-        'execute'
-    ),
-    'authenticated cannot execute restore test sample RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_sample_restore_test(integer)',
-        'execute'
-    ),
-    'service_role can execute restore test sample RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)',
-        'execute'
-    ),
-    'anon cannot execute append audit RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)',
-        'execute'
-    ),
-    'authenticated cannot execute append audit RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)',
-        'execute'
-    ),
-    'service_role can execute append audit RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_integrity_check()',
-        'execute'
-    ),
-    'anon cannot execute integrity check RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_integrity_check()',
-        'execute'
-    ),
-    'authenticated cannot execute integrity check RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_integrity_check()',
-        'execute'
-    ),
-    'service_role can execute integrity check RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_key_rotation_status(integer)',
-        'execute'
-    ),
-    'anon cannot execute key rotation status RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_key_rotation_status(integer)',
-        'execute'
-    ),
-    'authenticated cannot execute key rotation status RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_key_rotation_status(integer)',
-        'execute'
-    ),
-    'service_role can execute key rotation status RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_list_key_rotation_batch(integer,integer)',
-        'execute'
-    ),
-    'anon cannot execute list key rotation batch RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_list_key_rotation_batch(integer,integer)',
-        'execute'
-    ),
-    'authenticated cannot execute list key rotation batch RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_list_key_rotation_batch(integer,integer)',
-        'execute'
-    ),
-    'service_role can execute list key rotation batch RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)',
-        'execute'
-    ),
-    'anon cannot execute apply key rotation batch RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)',
-        'execute'
-    ),
-    'authenticated cannot execute apply key rotation batch RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)',
-        'execute'
-    ),
-    'service_role can execute apply key rotation batch RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'anon',
-        'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)',
-        'execute'
-    ),
-    'anon cannot execute complete key rotation RPC'
-);
-
-select ok(
-    not has_function_privilege(
-        'authenticated',
-        'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)',
-        'execute'
-    ),
-    'authenticated cannot execute complete key rotation RPC'
-);
-
-select ok(
-    has_function_privilege(
-        'service_role',
-        'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)',
-        'execute'
-    ),
-    'service_role can execute complete key rotation RPC'
 );
 
 select * from finish();
