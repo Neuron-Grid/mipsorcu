@@ -435,6 +435,14 @@ select ok(
 );
 
 select ok(
+    not public.ledger_payload_is_valid(
+        'scheduler_job_completed',
+        '{"duration_ms":12,"job_name":"monthly_digest_generate","trigger":"scheduled"}'::jsonb
+    ),
+    'ledger payload guard rejects scheduled trigger removed in T00'
+);
+
+select ok(
     public.ledger_payload_is_valid(
         'incident_detected',
         jsonb_build_object(

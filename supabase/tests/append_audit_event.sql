@@ -740,6 +740,29 @@ select ok(
     'direct audit_events insert rejects auth_failure with key_version'
 );
 
+set local mipsorcu.audit_metadata_allowlist_mode = 'strict';
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-0000000000ff',
+        '00000000-0000-4000-8000-0000000000ff',
+        null,
+        null,
+        'scheduler_job',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'test-job',
+            'trigger', 'scheduled',
+            'duration_ms', 0,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects scheduled trigger'
+);
+
 select * from finish();
 
 rollback;
