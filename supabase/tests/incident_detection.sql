@@ -57,27 +57,22 @@ returns jsonb
 language sql
 immutable
 as $$
-    select jsonb_build_object(
-        'p_ledger_entry_id', p_ledger_entry_id::text,
-        'p_sequence_no', p_sequence_no,
-        'p_entry_type', 'incident_detected',
-        'p_source_event_at', p_source_event_at,
-        'p_request_id', p_request_id::text,
-        'p_source_event_id', p_source_event_id::text,
-        'p_target_secret_id', '',
-        'p_target_secret_version_id', '',
-        'p_actor_user_id', '',
-        'p_actor_device_id', '',
-        'p_result', 'failure',
-        'p_error_code', p_error_code,
-        'p_payload', p_payload,
-        'p_canonicalization_version', 1,
-        'p_previous_entry_hash', '\x' || p_previous_hash,
-        'p_entry_hash', '\x' || p_entry_hash,
-        'p_hash_algorithm', 'sha-256',
-        'p_signature', '\x' || repeat('aa', 64),
-        'p_signature_algorithm', 'ed25519',
-        'p_signature_key_version', 1
+    select test_helpers.ledger_entry_json(
+        p_ledger_entry_id,
+        p_sequence_no,
+        'incident_detected',
+        p_source_event_at,
+        p_request_id::text,
+        p_source_event_id::text,
+        '',
+        '',
+        '',
+        '',
+        'failure',
+        p_error_code,
+        p_payload,
+        p_previous_hash,
+        p_entry_hash
     );
 $$;
 

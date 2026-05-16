@@ -27,27 +27,22 @@ create function test_helpers.append_test_ledger_entry(
 returns void
 language sql
 as $$
-    select rpc_append_ledger_entry_from_jsonb(jsonb_build_object(
-        'p_ledger_entry_id',           p_id::text,
-        'p_sequence_no',               p_seq,
-        'p_entry_type',                p_type,
-        'p_source_event_at',           p_at,
-        'p_request_id',                '00000000-0000-4000-8000-aaaaaaaaaaaa',
-        'p_source_event_id',           '',
-        'p_target_secret_id',          '',
-        'p_target_secret_version_id',  '',
-        'p_actor_user_id',             '',
-        'p_actor_device_id',           '',
-        'p_result',                    'success',
-        'p_error_code',                '',
-        'p_payload',                   p_payload,
-        'p_canonicalization_version',  1,
-        'p_previous_entry_hash',       '\x' || p_prev_hash,
-        'p_entry_hash',                '\x' || p_hash,
-        'p_hash_algorithm',            'sha-256',
-        'p_signature',                 '\x' || repeat('aa', 64),
-        'p_signature_algorithm',       'ed25519',
-        'p_signature_key_version',     1
+    select rpc_append_ledger_entry_from_jsonb(test_helpers.ledger_entry_json(
+        p_id,
+        p_seq,
+        p_type,
+        p_at,
+        '00000000-0000-4000-8000-aaaaaaaaaaaa',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'success',
+        '',
+        p_payload,
+        p_prev_hash,
+        p_hash
     ));
 $$;
 

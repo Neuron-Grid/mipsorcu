@@ -6,152 +6,83 @@ select no_plan();
 
 create temp table first_write_result as
 select *
-from public.rpc_write_secret_version(
+from test_helpers.write_secret_version_fixture(
     '00000000-0000-4000-8000-000000000001',
     'encrypt_create',
     '550e8400-e29b-41d4-a716-446655440000',
     'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-    'confidential',
-    'sbc-device-1',
     '2026-04-08T12:00:00Z',
     1,
-    decode(repeat('aa', 32), 'hex'),
-    decode(repeat('bb', 73), 'hex'),
-    1,
-    'xchacha20-poly1305',
-    decode(repeat('01', 24), 'hex'),
-    test_helpers.aad_context(
-        '550e8400-e29b-41d4-a716-446655440000',
-        1,
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        '2026-04-08T12:00:00Z'
-    )
+    'aa',
+    '01'
 );
 
 create temp table second_write_result as
 select *
-from public.rpc_write_secret_version(
+from test_helpers.write_secret_version_fixture(
     '00000000-0000-4000-8000-000000000010',
     'encrypt_rotate',
     '550e8400-e29b-41d4-a716-446655440000',
     'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-    'confidential',
-    'sbc-device-1',
     '2026-04-08T12:01:00Z',
     2,
-    decode(repeat('a2', 32), 'hex'),
-    decode(repeat('bb', 73), 'hex'),
-    1,
-    'xchacha20-poly1305',
-    decode(repeat('02', 24), 'hex'),
-    test_helpers.aad_context(
-        '550e8400-e29b-41d4-a716-446655440000',
-        2,
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        '2026-04-08T12:01:00Z'
-    )
+    'a2',
+    '02'
 );
 
 create temp table third_write_result as
 select *
-from public.rpc_write_secret_version(
+from test_helpers.write_secret_version_fixture(
     '00000000-0000-4000-8000-000000000011',
     'encrypt_rotate',
     '550e8400-e29b-41d4-a716-446655440000',
     'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-    'confidential',
-    'sbc-device-1',
     '2026-04-08T12:02:00Z',
     3,
-    decode(repeat('a3', 32), 'hex'),
-    decode(repeat('bb', 73), 'hex'),
-    1,
-    'xchacha20-poly1305',
-    decode(repeat('03', 24), 'hex'),
-    test_helpers.aad_context(
-        '550e8400-e29b-41d4-a716-446655440000',
-        3,
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        '2026-04-08T12:02:00Z'
-    )
+    'a3',
+    '03'
 );
 
 create temp table fourth_write_result as
 select *
-from public.rpc_write_secret_version(
+from test_helpers.write_secret_version_fixture(
     '00000000-0000-4000-8000-000000000012',
     'encrypt_rotate',
     '550e8400-e29b-41d4-a716-446655440000',
     'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-    'confidential',
-    'sbc-device-1',
     '2026-04-08T12:03:00Z',
     4,
-    decode(repeat('a4', 32), 'hex'),
-    decode(repeat('bb', 73), 'hex'),
-    1,
-    'xchacha20-poly1305',
-    decode(repeat('04', 24), 'hex'),
-    test_helpers.aad_context(
-        '550e8400-e29b-41d4-a716-446655440000',
-        4,
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        '2026-04-08T12:03:00Z'
-    )
+    'a4',
+    '04'
 );
 
 create temp table fifth_write_result as
 select *
-from public.rpc_write_secret_version(
+from test_helpers.write_secret_version_fixture(
     '00000000-0000-4000-8000-000000000013',
     'encrypt_rotate',
     '550e8400-e29b-41d4-a716-446655440000',
     'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-    'confidential',
-    'sbc-device-1',
     '2026-04-08T12:04:00Z',
     5,
-    decode(repeat('a5', 32), 'hex'),
-    decode(repeat('bb', 73), 'hex'),
-    1,
-    'xchacha20-poly1305',
-    decode(repeat('05', 24), 'hex'),
-    test_helpers.aad_context(
-        '550e8400-e29b-41d4-a716-446655440000',
-        5,
-        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
-        'confidential',
-        '2026-04-08T12:04:00Z'
-    )
+    'a5',
+    '05'
 );
 
 create temp table other_owner_write_result as
 select *
-from public.rpc_write_secret_version(
+from test_helpers.write_secret_version_fixture(
     '00000000-0000-4000-8000-000000000014',
     'encrypt_create',
     '650e8400-e29b-41d4-a716-446655440000',
     'f47ac10b-58cc-4372-a567-0e02b2c3d480',
-    'confidential',
-    'sbc-device-2',
     '2026-04-08T12:00:00Z',
     1,
-    decode(repeat('cc', 32), 'hex'),
-    decode(repeat('dd', 73), 'hex'),
-    1,
-    'xchacha20-poly1305',
-    decode(repeat('11', 24), 'hex'),
-    test_helpers.aad_context(
-        '650e8400-e29b-41d4-a716-446655440000',
-        1,
-        'f47ac10b-58cc-4372-a567-0e02b2c3d480',
-        'confidential',
-        '2026-04-08T12:00:00Z'
-    )
+    'cc',
+    '11',
+    'sbc-device-2',
+    'confidential',
+    'dd'
 );
 
 create temp table restore_test_sample_result as
@@ -259,7 +190,7 @@ select is(
 
 select is(
     (
-        select bool_and(c.relrowsecurity and c.relforcerowsecurity)
+        select count(*)::integer
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where n.nspname = 'public'
@@ -268,8 +199,10 @@ select is(
                 'secret_versions',
                 'audit_events'
             )
+            and c.relrowsecurity
+            and c.relforcerowsecurity
     ),
-    true,
+    3,
     'secret store tables enable and force row level security'
 );
 
@@ -349,16 +282,32 @@ select is(
 
 select is(
     (
-        with expected_rpc(proname) as (
+        with expected_rpc(function_signature) as (
             values
-                ('rpc_write_secret_version'),
-                ('rpc_append_audit_event'),
-                ('rpc_sample_restore_test'),
-                ('rpc_integrity_check'),
-                ('rpc_key_rotation_status'),
-                ('rpc_list_key_rotation_batch'),
-                ('rpc_apply_key_rotation_batch'),
-                ('rpc_complete_key_rotation')
+                (
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure
+                ),
+                (
+                    'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)'::regprocedure
+                ),
+                (
+                    'public.rpc_sample_restore_test(integer)'::regprocedure
+                ),
+                (
+                    'public.rpc_integrity_check()'::regprocedure
+                ),
+                (
+                    'public.rpc_key_rotation_status(integer)'::regprocedure
+                ),
+                (
+                    'public.rpc_list_key_rotation_batch(integer,integer)'::regprocedure
+                ),
+                (
+                    'public.rpc_apply_key_rotation_batch(uuid,integer,integer,jsonb,uuid,text,jsonb)'::regprocedure
+                ),
+                (
+                    'public.rpc_complete_key_rotation(uuid,integer,integer,uuid,text,jsonb)'::regprocedure
+                )
         ),
         table_owner as (
             select c.relowner
@@ -367,11 +316,9 @@ select is(
         )
         select count(*)::integer
         from expected_rpc e
-        join pg_proc p on p.proname = e.proname
-        join pg_namespace n on n.oid = p.pronamespace
+        join pg_proc p on p.oid = e.function_signature
         cross join table_owner t
-        where n.nspname = 'public'
-            and p.prosecdef
+        where p.prosecdef
             and p.proowner = t.relowner
             and pg_get_userbyid(p.proowner) not in (
                 'anon',
@@ -382,6 +329,62 @@ select is(
     8,
     'service-role RPCs are SECURITY DEFINER and owned by the schema/table owner, not runtime roles'
 );
+
+set local role authenticated;
+set local "request.jwt.claim.sub" = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+
+select is(
+    (select count(*)::integer from public.secrets),
+    1,
+    'RLS exposes only owned secrets to authenticated owner'
+);
+
+select is(
+    (select count(*)::integer from public.secret_versions),
+    1,
+    'RLS exposes only current secret version to authenticated owner'
+);
+
+select is(
+    (select max(version) from public.secret_versions),
+    5,
+    'RLS exposes current version rather than historical versions'
+);
+
+reset role;
+
+set local role authenticated;
+set local "request.jwt.claim.sub" = 'f47ac10b-58cc-4372-a567-0e02b2c3d480';
+
+select is(
+    (select count(*)::integer from public.secrets),
+    1,
+    'RLS exposes only owned secrets to other authenticated owner'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.secrets
+        where id = '550e8400-e29b-41d4-a716-446655440000'
+    ),
+    0,
+    'RLS hides another owner secret'
+);
+
+select is(
+    (select count(*)::integer from public.secret_versions),
+    1,
+    'RLS exposes only current secret version to other authenticated owner'
+);
+
+select is(
+    (select max(version) from public.secret_versions),
+    1,
+    'RLS exposes other owner current version only'
+);
+
+reset role;
 
 set local role service_role;
 
