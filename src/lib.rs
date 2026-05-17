@@ -5,6 +5,7 @@
 )]
 
 pub mod aad;
+pub mod alias;
 pub mod archive;
 pub mod audit;
 pub mod auth;
@@ -21,6 +22,7 @@ pub mod types;
 pub mod write;
 
 pub use aad::AadV1;
+pub use alias::{AliasInput, AliasInputError, NormalizedAlias};
 pub use archive::{
     ARCHIVE_SCHEMA_VERSION, ArchiveBackend, ArchiveBackendError, ArchiveExportPackage,
     ArchiveObjectKey, ArchiveVerifyOutcome, InMemoryArchiveBackend, LocalFileArchiveBackend,
