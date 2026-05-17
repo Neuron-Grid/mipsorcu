@@ -2,6 +2,7 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 
+use crate::audit::AuditTrigger;
 use crate::types::SourceEventAt;
 
 use super::canonical::CanonicalPayloadObject;
@@ -349,12 +350,19 @@ fn validate_classification_value(key: &str, value: &Value) -> Result<(), LedgerE
 }
 
 fn validate_trigger_value(key: &str, value: &Value) -> Result<(), LedgerError> {
-    match value.as_str() {
-        Some("background" | "cli" | "scheduled" | "startup") => Ok(()),
-        _ => Err(LedgerError::InvalidPayloadField {
-            key: key.to_owned(),
-            expected: "one of background, cli, scheduled, startup",
-        }),
+    let trigger = value
+        .as_str()
+        .ok_or_else(|| invalid_trigger_payload_field(key))?;
+
+    AuditTrigger::parse(trigger)
+        .map(|_| ())
+        .map_err(|_| invalid_trigger_payload_field(key))
+}
+
+fn invalid_trigger_payload_field(key: &str) -> LedgerError {
+    LedgerError::InvalidPayloadField {
+        key: key.to_owned(),
+        expected: "one of background, cli, startup",
     }
 }
 

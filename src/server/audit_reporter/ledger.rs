@@ -90,6 +90,13 @@ fn metadata_str<'a>(value: &'a Value, key: &'static str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
+fn restore_test_trigger(metadata: &Value) -> Result<&str, crate::LedgerError> {
+    metadata_str(metadata, "trigger").ok_or_else(|| crate::LedgerError::InvalidPayloadField {
+        key: "trigger".to_owned(),
+        expected: "one of background, cli, startup",
+    })
+}
+
 fn event_source_event_at(event: &AuditEvent) -> Result<crate::SourceEventAt, crate::LedgerError> {
     event
         .source_event_at()
@@ -105,7 +112,7 @@ pub(super) fn build_restore_test_ledger_draft(
     let metadata = event.metadata_json().as_value();
     let sample_count = metadata_u64(metadata, "sample_count");
     let duration_ms = metadata_u64(metadata, "duration_ms");
-    let trigger = metadata_str(metadata, "trigger").unwrap_or("scheduled");
+    let trigger = restore_test_trigger(metadata)?;
     let (success_count, failure_count) = match event.result() {
         AuditResult::Success => (sample_count, 0),
         AuditResult::Failure => (0, metadata_u64(metadata, "failure_count").max(1)),
@@ -167,4 +174,27 @@ pub(super) fn build_integrity_check_ledger_draft(
         error_code: ledger_error_code_from_metadata(event, "integrity_check_failed"),
         payload,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn restore_test_trigger_rejects_missing_value() {
+        let metadata = json!({
+            "phase": "verify",
+            "sample_count": 1,
+            "duration_ms": 0
+        });
+
+        let result = restore_test_trigger(&metadata);
+
+        assert!(matches!(
+            result,
+            Err(crate::LedgerError::InvalidPayloadField { key, .. }) if key == "trigger"
+        ));
+    }
 }

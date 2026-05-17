@@ -321,6 +321,41 @@ fn scheduler_job_completed_payload_accepts_valid_job_name() -> TestResult {
 }
 
 #[test]
+fn scheduler_job_completed_payload_accepts_supported_triggers() -> TestResult {
+    for trigger in ["startup", "background", "cli"] {
+        let payload = LedgerPayload::new(
+            LedgerEntryType::SchedulerJobCompleted,
+            json!({
+                "duration_ms": 12,
+                "job_name": "monthly_digest_generate",
+                "trigger": trigger
+            }),
+        )?;
+
+        assert_eq!(payload.as_value()["trigger"], trigger);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn scheduler_job_completed_payload_rejects_scheduled_trigger() {
+    let result = LedgerPayload::new(
+        LedgerEntryType::SchedulerJobCompleted,
+        json!({
+            "duration_ms": 12,
+            "job_name": "monthly_digest_generate",
+            "trigger": "scheduled"
+        }),
+    );
+
+    assert!(matches!(
+        result,
+        Err(LedgerError::InvalidPayloadField { key, .. }) if key == "trigger"
+    ));
+}
+
+#[test]
 fn scheduler_job_completed_payload_rejects_invalid_job_name() {
     let blank = LedgerPayload::new(
         LedgerEntryType::SchedulerJobCompleted,

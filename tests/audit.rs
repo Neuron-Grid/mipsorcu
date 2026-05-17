@@ -470,6 +470,10 @@ fn metadata_accepts_only_known_trigger_values() -> TestResult<()> {
     assert!(AuditMetadata::new(json!({ "trigger": "background" })).is_ok());
     assert!(AuditMetadata::new(json!({ "trigger": "cli" })).is_ok());
     assert!(matches!(
+        AuditMetadata::new(json!({ "trigger": "scheduled" })),
+        Err(AuditEventError::InvalidTrigger { value }) if value == "scheduled"
+    ));
+    assert!(matches!(
         AuditMetadata::new(json!({ "trigger": "manual" })),
         Err(AuditEventError::InvalidTrigger { value }) if value == "manual"
     ));
@@ -478,6 +482,33 @@ fn metadata_accepts_only_known_trigger_values() -> TestResult<()> {
         Err(AuditEventError::InvalidTrigger { .. })
     ));
     assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"trigger"));
+
+    Ok(())
+}
+
+#[test]
+fn restore_test_event_rejects_missing_trigger_before_ledger_generation() -> TestResult<()> {
+    let result = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+        action: AuditAction::RestoreTest,
+        target_secret_id: Some(SecretId::parse(TARGET_SECRET_ID)?),
+        result: AuditResult::Success,
+        key_version: Some(KeyVersion::new(1)?),
+        metadata_json: AuditMetadata::new(json!({
+            "phase": "verify",
+            "sample_count": 1,
+            "duration_ms": 0,
+            "source_event_at": SOURCE_EVENT_AT
+        }))?,
+    });
+
+    assert!(matches!(
+        result,
+        Err(AuditEventError::MissingMetadataKey { key }) if key == "trigger"
+    ));
 
     Ok(())
 }

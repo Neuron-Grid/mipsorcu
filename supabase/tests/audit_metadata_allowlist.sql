@@ -786,6 +786,31 @@ select is(
 
 select is(
     test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-0000000001ff',
+        '00000000-0000-4000-8000-0000000001ff',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'restore_test',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        1,
+        jsonb_build_object(
+            'phase', 'verify',
+            'sample_count', 0,
+            'trigger', 'scheduled',
+            'duration_ms', 0,
+            'error_code', 'sample_fetch_failed',
+            'failed_version', null,
+            'reason', 'no_current_secret_versions',
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'restore_test rejects scheduled trigger removed in T00'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
         '10000000-0000-4000-8000-000000000132',
         '00000000-0000-4000-8000-000000000132',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',

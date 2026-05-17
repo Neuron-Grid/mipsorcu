@@ -1,14 +1,17 @@
-use std::collections::HashSet;
 use mipsorcu::audit::AuditTrigger;
+use std::collections::HashSet;
 
 /// Rust 側 AuditTrigger の語彙が SQL 側の許容値と一致することを検証
 #[test]
 fn rust_audit_trigger_values_match_sql_allowlist() {
-    let rust_values: HashSet<&str> =
-        [AuditTrigger::Startup, AuditTrigger::Background, AuditTrigger::Cli]
-            .iter()
-            .map(|t| t.as_str())
-            .collect();
+    let rust_values: HashSet<&str> = [
+        AuditTrigger::Startup,
+        AuditTrigger::Background,
+        AuditTrigger::Cli,
+    ]
+    .iter()
+    .map(|t| t.as_str())
+    .collect();
 
     let expected: HashSet<&str> = ["startup", "background", "cli"].iter().cloned().collect();
 
