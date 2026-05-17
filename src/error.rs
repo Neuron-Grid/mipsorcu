@@ -201,6 +201,7 @@ pub enum CryptoError {
     InvalidMasterKeyLength { actual: usize },
     InvalidNonceLength { actual: usize },
     InvalidKeyVersion { value: u32 },
+    UnsupportedAliasFingerprintSchemaVersion { value: u32 },
     InvalidEncryptedDataKeyLength { actual: usize },
     UnsupportedEncryptedDataKeyVersion { version: u8 },
     EmptyCiphertext,
@@ -229,6 +230,10 @@ impl fmt::Debug for CryptoError {
                 .finish(),
             Self::InvalidKeyVersion { value } => formatter
                 .debug_struct("InvalidKeyVersion")
+                .field("value", value)
+                .finish(),
+            Self::UnsupportedAliasFingerprintSchemaVersion { value } => formatter
+                .debug_struct("UnsupportedAliasFingerprintSchemaVersion")
                 .field("value", value)
                 .finish(),
             Self::InvalidEncryptedDataKeyLength { actual } => formatter
@@ -272,6 +277,12 @@ impl fmt::Display for CryptoError {
                 write!(
                     formatter,
                     "key version must be positive: actual value {value}"
+                )
+            }
+            Self::UnsupportedAliasFingerprintSchemaVersion { value } => {
+                write!(
+                    formatter,
+                    "unsupported alias fingerprint schema version: {value}"
                 )
             }
             Self::InvalidEncryptedDataKeyLength { actual } => {

@@ -102,6 +102,80 @@ impl fmt::Debug for MasterKey {
     }
 }
 
+pub struct AliasEncryptionKey([u8; MASTER_KEY_LENGTH]);
+
+impl AliasEncryptionKey {
+    pub fn from_bytes(bytes: [u8; MASTER_KEY_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() != MASTER_KEY_LENGTH {
+            return Err(CryptoError::InvalidMasterKeyLength {
+                actual: bytes.len(),
+            });
+        }
+
+        let mut alias_encryption_key = [0u8; MASTER_KEY_LENGTH];
+        alias_encryption_key.copy_from_slice(bytes);
+
+        Ok(Self(alias_encryption_key))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; MASTER_KEY_LENGTH] {
+        &self.0
+    }
+}
+
+impl Drop for AliasEncryptionKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for AliasEncryptionKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AliasEncryptionKey(<redacted>)")
+    }
+}
+
+pub struct AliasFingerprintKey([u8; MASTER_KEY_LENGTH]);
+
+impl AliasFingerprintKey {
+    pub fn from_bytes(bytes: [u8; MASTER_KEY_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() != MASTER_KEY_LENGTH {
+            return Err(CryptoError::InvalidMasterKeyLength {
+                actual: bytes.len(),
+            });
+        }
+
+        let mut alias_fingerprint_key = [0u8; MASTER_KEY_LENGTH];
+        alias_fingerprint_key.copy_from_slice(bytes);
+
+        Ok(Self(alias_fingerprint_key))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; MASTER_KEY_LENGTH] {
+        &self.0
+    }
+}
+
+impl Drop for AliasFingerprintKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for AliasFingerprintKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AliasFingerprintKey(<redacted>)")
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct EncryptedDataKey(Vec<u8>);
 

@@ -1,8 +1,10 @@
 use mipsorcu::{
-    ALGORITHM_XCHACHA20_POLY1305, AadV1, Ciphertext, CryptoError, DATA_KEY_LENGTH, DataKey,
+    ALGORITHM_XCHACHA20_POLY1305, AadV1, AliasEncryptionKey, AliasFingerprintKey,
+    AliasFingerprintSchemaVersion, Ciphertext, CryptoError, DATA_KEY_LENGTH, DataKey,
     ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KeyVersion,
     KeyWrapContext, KeyringError, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, NONCE_LENGTH, Nonce,
-    Plaintext, SecretId, decrypt_secret, encrypt_secret, unwrap_data_key, wrap_data_key,
+    Plaintext, SecretAliasId, SecretId, decrypt_secret, encrypt_secret, unwrap_data_key,
+    wrap_data_key,
 };
 
 fn sample_aad() -> Result<AadV1, CryptoError> {
@@ -195,12 +197,60 @@ fn master_key_parse_rejects_invalid_lengths() {
 }
 
 #[test]
+fn alias_keys_parse_reject_invalid_lengths() {
+    assert!(matches!(
+        AliasEncryptionKey::parse(&[0u8; MASTER_KEY_LENGTH - 1]),
+        Err(CryptoError::InvalidMasterKeyLength { actual }) if actual == MASTER_KEY_LENGTH - 1
+    ));
+    assert!(matches!(
+        AliasFingerprintKey::parse(&[0u8; MASTER_KEY_LENGTH + 1]),
+        Err(CryptoError::InvalidMasterKeyLength { actual }) if actual == MASTER_KEY_LENGTH + 1
+    ));
+    assert!(AliasEncryptionKey::parse(&[0u8; MASTER_KEY_LENGTH]).is_ok());
+    assert!(AliasFingerprintKey::parse(&[0u8; MASTER_KEY_LENGTH]).is_ok());
+}
+
+#[test]
+fn alias_key_debug_redacts_key_material() {
+    let encryption_key = AliasEncryptionKey::from_bytes([3u8; MASTER_KEY_LENGTH]);
+    let fingerprint_key = AliasFingerprintKey::from_bytes([4u8; MASTER_KEY_LENGTH]);
+
+    assert_eq!(
+        format!("{encryption_key:?}"),
+        "AliasEncryptionKey(<redacted>)"
+    );
+    assert_eq!(
+        format!("{fingerprint_key:?}"),
+        "AliasFingerprintKey(<redacted>)"
+    );
+}
+
+#[test]
 fn key_version_rejects_zero() {
     assert!(matches!(
         KeyVersion::new(0),
         Err(CryptoError::InvalidKeyVersion { value }) if value == 0
     ));
     assert_eq!(KeyVersion::new(1).map(KeyVersion::get), Ok(1));
+}
+
+#[test]
+fn alias_fingerprint_schema_version_rejects_zero() {
+    assert!(matches!(
+        AliasFingerprintSchemaVersion::new(0),
+        Err(CryptoError::InvalidKeyVersion { value }) if value == 0
+    ));
+    assert!(matches!(
+        AliasFingerprintSchemaVersion::new(2),
+        Err(CryptoError::UnsupportedAliasFingerprintSchemaVersion { value }) if value == 2
+    ));
+    assert_eq!(AliasFingerprintSchemaVersion::V1.get(), 1);
+}
+
+#[test]
+fn secret_alias_id_requires_uuid_v4() {
+    assert!(SecretAliasId::parse("550e8400-e29b-11d4-a716-446655440000").is_err());
+    assert!(SecretAliasId::parse("750e8400-e29b-41d4-a716-446655440000").is_ok());
 }
 
 #[test]

@@ -8,7 +8,8 @@ use super::audit_fallback::{
 };
 use super::constants::{
     DEFAULT_AUDIT_FALLBACK_PATH, DEFAULT_DOTENV_PATH, DEFAULT_LISTEN_ADDR,
-    DEFAULT_SCHEDULER_LOCAL_ARCHIVE_DIR, DEFAULT_SIEM_BUFFER_PATH,
+    DEFAULT_SCHEDULER_LOCAL_ARCHIVE_DIR, DEFAULT_SIEM_BUFFER_PATH, ENV_ALIAS_ENCRYPTION_KEY,
+    ENV_ALIAS_ENCRYPTION_KEY_VERSION, ENV_ALIAS_FINGERPRINT_KEY, ENV_ALIAS_FINGERPRINT_KEY_VERSION,
     ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES, ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED,
     ENV_AUDIT_FALLBACK_ARCHIVE_DIR, ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS,
     ENV_AUDIT_FALLBACK_PATH, ENV_AUDIT_FALLBACK_ROTATE_SIZE_BYTES,
@@ -32,7 +33,7 @@ use super::http::{
     parse_http_rate_limit_requests, parse_http_rate_limit_window, parse_jwks_refresh_interval,
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
 };
-use super::keyring::load_master_key_ring;
+use super::keyring::{load_master_key_ring, parse_fixed_length_key_hex, parse_key_version_config};
 use super::ledger_signing::load_ledger_signing_key;
 use super::model::AppConfig;
 use super::operational_checks::{
@@ -45,6 +46,7 @@ use super::scheduler::{
     parse_scheduler_startup_delay,
 };
 use super::siem::{parse_siem_long_failure_threshold, parse_siem_resend_interval};
+use crate::{AliasEncryptionKey, AliasFingerprintKey};
 
 pub fn load_config() -> Result<AppConfig, ConfigError> {
     let dotenv = load_dotenv_file(Path::new(DEFAULT_DOTENV_PATH))?;
@@ -68,6 +70,22 @@ where
         })?;
 
     let master_key_ring = load_master_key_ring(dotenv, get_process_var)?;
+    let alias_encryption_key = AliasEncryptionKey::from_bytes(parse_fixed_length_key_hex(
+        ENV_ALIAS_ENCRYPTION_KEY,
+        &required_var(ENV_ALIAS_ENCRYPTION_KEY, dotenv, get_process_var)?,
+    )?);
+    let alias_encryption_key_version = parse_key_version_config(
+        ENV_ALIAS_ENCRYPTION_KEY_VERSION,
+        &required_var(ENV_ALIAS_ENCRYPTION_KEY_VERSION, dotenv, get_process_var)?,
+    )?;
+    let alias_fingerprint_key = AliasFingerprintKey::from_bytes(parse_fixed_length_key_hex(
+        ENV_ALIAS_FINGERPRINT_KEY,
+        &required_var(ENV_ALIAS_FINGERPRINT_KEY, dotenv, get_process_var)?,
+    )?);
+    let alias_fingerprint_key_version = parse_key_version_config(
+        ENV_ALIAS_FINGERPRINT_KEY_VERSION,
+        &required_var(ENV_ALIAS_FINGERPRINT_KEY_VERSION, dotenv, get_process_var)?,
+    )?;
 
     let supabase_url = required_var(ENV_SUPABASE_URL, dotenv, get_process_var)?;
     let supabase_service_role_key =
@@ -222,6 +240,10 @@ where
     Ok(AppConfig {
         listen_addr,
         master_key_ring,
+        alias_encryption_key,
+        alias_encryption_key_version,
+        alias_fingerprint_key,
+        alias_fingerprint_key_version,
         supabase_url,
         supabase_service_role_key,
         supabase_publishable_key,

@@ -3,14 +3,18 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::MasterKeyRing;
 use crate::ledger::LedgerSigningKey;
+use crate::{AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MasterKeyRing};
 
 use super::constants::SECONDS_PER_DAY;
 
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
     pub master_key_ring: MasterKeyRing,
+    pub alias_encryption_key: AliasEncryptionKey,
+    pub alias_encryption_key_version: KeyVersion,
+    pub alias_fingerprint_key: AliasFingerprintKey,
+    pub alias_fingerprint_key_version: KeyVersion,
     pub supabase_url: String,
     pub supabase_service_role_key: String,
     pub supabase_publishable_key: String,
@@ -55,6 +59,16 @@ impl fmt::Debug for AppConfig {
             .debug_struct("AppConfig")
             .field("listen_addr", &self.listen_addr)
             .field("master_key_ring", &self.master_key_ring)
+            .field("alias_encryption_key", &"<redacted>")
+            .field(
+                "alias_encryption_key_version",
+                &self.alias_encryption_key_version,
+            )
+            .field("alias_fingerprint_key", &"<redacted>")
+            .field(
+                "alias_fingerprint_key_version",
+                &self.alias_fingerprint_key_version,
+            )
             .field("supabase_url", &self.supabase_url)
             .field("supabase_service_role_key", &"<redacted>")
             .field("supabase_publishable_key", &"<redacted>")

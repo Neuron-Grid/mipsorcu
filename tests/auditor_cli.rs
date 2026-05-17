@@ -112,6 +112,16 @@ fn run_auditor_verify(
         .env_clear()
         .env("MIPSORCU_MASTER_KEY_DIR", &key_dir)
         .env("MIPSORCU_ACTIVE_KEY_VERSION", "1")
+        .env(
+            "MIPSORCU_ALIAS_ENCRYPTION_KEY",
+            hex::encode([3u8; MASTER_KEY_LENGTH]),
+        )
+        .env("MIPSORCU_ALIAS_ENCRYPTION_KEY_VERSION", "1")
+        .env(
+            "MIPSORCU_ALIAS_FINGERPRINT_KEY",
+            hex::encode([4u8; MASTER_KEY_LENGTH]),
+        )
+        .env("MIPSORCU_ALIAS_FINGERPRINT_KEY_VERSION", "1")
         .env("MIPSORCU_SUPABASE_URL", supabase_url)
         .env("MIPSORCU_SUPABASE_SERVICE_ROLE_KEY", SERVICE_ROLE_KEY)
         .env("MIPSORCU_SUPABASE_PUBLISHABLE_KEY", PUBLISHABLE_KEY)

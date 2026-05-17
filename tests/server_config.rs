@@ -15,8 +15,8 @@ use mipsorcu::server::config::{
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
 };
 use mipsorcu::{
-    KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
-    MASTER_KEY_LENGTH, MasterKey, MasterKeyRing,
+    AliasEncryptionKey, AliasFingerprintKey, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
+    LedgerSignatureKeyVersion, LedgerSigningKey, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing,
 };
 
 fn base_dotenv() -> HashMap<String, String> {
@@ -26,6 +26,22 @@ fn base_dotenv() -> HashMap<String, String> {
             hex::encode([7u8; MASTER_KEY_LENGTH]),
         ),
         ("MIPSORCU_KEY_VERSION".to_owned(), "1".to_owned()),
+        (
+            "MIPSORCU_ALIAS_ENCRYPTION_KEY".to_owned(),
+            hex::encode([3u8; MASTER_KEY_LENGTH]),
+        ),
+        (
+            "MIPSORCU_ALIAS_ENCRYPTION_KEY_VERSION".to_owned(),
+            "1".to_owned(),
+        ),
+        (
+            "MIPSORCU_ALIAS_FINGERPRINT_KEY".to_owned(),
+            hex::encode([4u8; MASTER_KEY_LENGTH]),
+        ),
+        (
+            "MIPSORCU_ALIAS_FINGERPRINT_KEY_VERSION".to_owned(),
+            "1".to_owned(),
+        ),
         (
             "MIPSORCU_SUPABASE_URL".to_owned(),
             "https://from-dotenv.supabase.co".to_owned(),
@@ -125,6 +141,70 @@ fn load_config_from_sources_prefers_process_env_over_dotenv() {
 
     assert_eq!(config.listen_addr, "127.0.0.1:4000".parse().unwrap());
     assert_eq!(config.supabase_url, "https://from-process.supabase.co");
+}
+
+#[test]
+fn load_config_requires_alias_encryption_key() {
+    let mut dotenv = base_dotenv();
+    dotenv.remove("MIPSORCU_ALIAS_ENCRYPTION_KEY");
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let result = load_config_from_sources(&get_process_var, &dotenv);
+
+    assert!(matches!(
+        result,
+        Err(ConfigError::MissingVar { name })
+            if name == "MIPSORCU_ALIAS_ENCRYPTION_KEY"
+    ));
+}
+
+#[test]
+fn load_config_requires_alias_encryption_key_version() {
+    let mut dotenv = base_dotenv();
+    dotenv.remove("MIPSORCU_ALIAS_ENCRYPTION_KEY_VERSION");
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let result = load_config_from_sources(&get_process_var, &dotenv);
+
+    assert!(matches!(
+        result,
+        Err(ConfigError::MissingVar { name })
+            if name == "MIPSORCU_ALIAS_ENCRYPTION_KEY_VERSION"
+    ));
+}
+
+#[test]
+fn load_config_requires_alias_fingerprint_key() {
+    let mut dotenv = base_dotenv();
+    dotenv.remove("MIPSORCU_ALIAS_FINGERPRINT_KEY");
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let result = load_config_from_sources(&get_process_var, &dotenv);
+
+    assert!(matches!(
+        result,
+        Err(ConfigError::MissingVar { name })
+            if name == "MIPSORCU_ALIAS_FINGERPRINT_KEY"
+    ));
+}
+
+#[test]
+fn load_config_requires_alias_fingerprint_key_version() {
+    let mut dotenv = base_dotenv();
+    dotenv.remove("MIPSORCU_ALIAS_FINGERPRINT_KEY_VERSION");
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let result = load_config_from_sources(&get_process_var, &dotenv);
+
+    assert!(matches!(
+        result,
+        Err(ConfigError::MissingVar { name })
+            if name == "MIPSORCU_ALIAS_FINGERPRINT_KEY_VERSION"
+    ));
 }
 
 #[test]
@@ -771,6 +851,10 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
             MasterKey::parse(&master_key_bytes).expect("master key should parse"),
         )
         .expect("master keyring should be valid"),
+        alias_encryption_key: AliasEncryptionKey::from_bytes([3u8; MASTER_KEY_LENGTH]),
+        alias_encryption_key_version: key_version,
+        alias_fingerprint_key: AliasFingerprintKey::from_bytes([4u8; MASTER_KEY_LENGTH]),
+        alias_fingerprint_key_version: key_version,
         supabase_url: "https://example.supabase.co".to_owned(),
         supabase_service_role_key: "service-role-secret".to_owned(),
         supabase_publishable_key: "publishable-secret".to_owned(),
@@ -858,6 +942,10 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("scheduler_poll_interval_seconds"));
     assert!(output.contains("3600"));
     assert!(output.contains("scheduler_local_archive_dir"));
+    assert!(output.contains("alias_encryption_key"));
+    assert!(output.contains("alias_fingerprint_key"));
     assert!(!output.contains("service-role-secret"));
     assert!(!output.contains("publishable-secret"));
+    assert!(!output.contains("3, 3"));
+    assert!(!output.contains("4, 4"));
 }

@@ -41,6 +41,40 @@ impl SecretId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SecretAliasId(Uuid);
+
+impl SecretAliasId {
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| CryptoError::RandomnessUnavailable)?;
+        let uuid = Builder::from_random_bytes(bytes).into_uuid();
+
+        Ok(Self(uuid))
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AadError> {
+        let uuid = Uuid::parse_str(value).map_err(|_| AadError::InvalidUuid {
+            field: "secret_alias_id",
+            value: value.to_owned(),
+        })?;
+
+        if uuid.get_version() != Some(Version::Random) {
+            return Err(AadError::InvalidUuidVersion {
+                field: "secret_alias_id",
+                value: value.to_owned(),
+                expected: "v4",
+            });
+        }
+
+        Ok(Self(uuid))
+    }
+
+    pub fn as_canonical_string(&self) -> String {
+        self.0.hyphenated().to_string()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SecretAlias(String);
 
@@ -277,6 +311,28 @@ impl KeyVersion {
         NonZeroU32::new(value)
             .map(Self)
             .ok_or(CryptoError::InvalidKeyVersion { value })
+    }
+
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AliasFingerprintSchemaVersion(NonZeroU32);
+
+impl AliasFingerprintSchemaVersion {
+    pub const V1: Self = Self(NonZeroU32::MIN);
+
+    pub fn new(value: u32) -> Result<Self, CryptoError> {
+        let value = NonZeroU32::new(value).ok_or(CryptoError::InvalidKeyVersion { value })?;
+        if value != Self::V1.0 {
+            return Err(CryptoError::UnsupportedAliasFingerprintSchemaVersion {
+                value: value.get(),
+            });
+        }
+
+        Ok(Self(value))
     }
 
     pub fn get(self) -> u32 {

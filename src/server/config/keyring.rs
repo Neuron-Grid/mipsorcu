@@ -2,8 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::MasterKeyRing;
+use crate::error::CryptoError;
 use crate::error::KeyringError;
-use crate::types::{KeyVersion, MasterKey};
+use crate::types::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
+use zeroize::Zeroize;
 
 use super::constants::{
     ENV_ACTIVE_KEY_VERSION, ENV_KEY_VERSION, ENV_MASTER_KEY, ENV_MASTER_KEY_DIR,
@@ -117,19 +119,42 @@ fn parse_master_key_file_entry(
     Ok((key_version, master_key))
 }
 
-fn parse_master_key_hex(name: &'static str, value: &str) -> Result<MasterKey, ConfigError> {
-    let master_key_bytes = hex::decode(value).map_err(|error| ConfigError::InvalidValue {
+pub(super) fn parse_master_key_hex(
+    name: &'static str,
+    value: &str,
+) -> Result<MasterKey, ConfigError> {
+    parse_fixed_length_key_hex(name, value).map(MasterKey::from_bytes)
+}
+
+pub(super) fn parse_fixed_length_key_hex(
+    name: &'static str,
+    value: &str,
+) -> Result<[u8; MASTER_KEY_LENGTH], ConfigError> {
+    let mut key_bytes = hex::decode(value).map_err(|error| ConfigError::InvalidValue {
         name,
         reason: error.to_string(),
     })?;
 
-    MasterKey::parse(&master_key_bytes).map_err(|error| ConfigError::InvalidValue {
-        name,
-        reason: error.to_string(),
-    })
+    if key_bytes.len() != MASTER_KEY_LENGTH {
+        let actual = key_bytes.len();
+        key_bytes.zeroize();
+        return Err(ConfigError::InvalidValue {
+            name,
+            reason: CryptoError::InvalidMasterKeyLength { actual }.to_string(),
+        });
+    }
+
+    let mut parsed = [0u8; MASTER_KEY_LENGTH];
+    parsed.copy_from_slice(&key_bytes);
+    key_bytes.zeroize();
+
+    Ok(parsed)
 }
 
-fn parse_key_version_config(name: &'static str, value: &str) -> Result<KeyVersion, ConfigError> {
+pub(super) fn parse_key_version_config(
+    name: &'static str,
+    value: &str,
+) -> Result<KeyVersion, ConfigError> {
     let parsed = value
         .parse::<u32>()
         .map_err(|error| ConfigError::InvalidValue {
