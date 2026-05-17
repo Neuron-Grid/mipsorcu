@@ -22,7 +22,11 @@ pub mod types;
 pub mod write;
 
 pub use aad::AadV1;
-pub use alias::{AliasInput, AliasInputError, NormalizedAlias};
+pub use alias::{
+    ALIAS_AAD_VERSION_V1, ALIAS_FINGERPRINT_LENGTH, ALIAS_FINGERPRINT_SCHEMA_VERSION_V1,
+    ALIAS_MAX_LENGTH, AliasAadV1, AliasFingerprint, AliasInput, AliasInputError, EncryptedAlias,
+    NormalizedAlias, compute_alias_fingerprint, decrypt_alias, encrypt_alias,
+};
 pub use archive::{
     ARCHIVE_SCHEMA_VERSION, ArchiveBackend, ArchiveBackendError, ArchiveExportPackage,
     ArchiveObjectKey, ArchiveVerifyOutcome, InMemoryArchiveBackend, LocalFileArchiveBackend,

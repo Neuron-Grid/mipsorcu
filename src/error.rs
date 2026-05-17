@@ -199,6 +199,8 @@ impl std::error::Error for JwtVerificationError {}
 pub enum CryptoError {
     InvalidDataKeyLength { actual: usize },
     InvalidMasterKeyLength { actual: usize },
+    InvalidAliasEncryptionKeyLength { actual: usize },
+    InvalidAliasFingerprintLength { actual: usize },
     InvalidNonceLength { actual: usize },
     InvalidKeyVersion { value: u32 },
     UnsupportedAliasFingerprintSchemaVersion { value: u32 },
@@ -209,6 +211,7 @@ pub enum CryptoError {
     AadFailed,
     EncryptionFailed,
     DecryptionFailed,
+    FingerprintComputationFailed,
     KeyWrapFailed,
     KeyUnwrapFailed,
 }
@@ -222,6 +225,14 @@ impl fmt::Debug for CryptoError {
                 .finish(),
             Self::InvalidMasterKeyLength { actual } => formatter
                 .debug_struct("InvalidMasterKeyLength")
+                .field("actual", actual)
+                .finish(),
+            Self::InvalidAliasEncryptionKeyLength { actual } => formatter
+                .debug_struct("InvalidAliasEncryptionKeyLength")
+                .field("actual", actual)
+                .finish(),
+            Self::InvalidAliasFingerprintLength { actual } => formatter
+                .debug_struct("InvalidAliasFingerprintLength")
                 .field("actual", actual)
                 .finish(),
             Self::InvalidNonceLength { actual } => formatter
@@ -249,6 +260,9 @@ impl fmt::Debug for CryptoError {
             Self::AadFailed => formatter.write_str("AadFailed"),
             Self::EncryptionFailed => formatter.write_str("EncryptionFailed"),
             Self::DecryptionFailed => formatter.write_str("DecryptionFailed"),
+            Self::FingerprintComputationFailed => {
+                formatter.write_str("FingerprintComputationFailed")
+            }
             Self::KeyWrapFailed => formatter.write_str("KeyWrapFailed"),
             Self::KeyUnwrapFailed => formatter.write_str("KeyUnwrapFailed"),
         }
@@ -268,6 +282,18 @@ impl fmt::Display for CryptoError {
                 write!(
                     formatter,
                     "master key must be 32 bytes: actual length {actual}"
+                )
+            }
+            Self::InvalidAliasEncryptionKeyLength { actual } => {
+                write!(
+                    formatter,
+                    "alias encryption key must be 32 bytes: actual length {actual}"
+                )
+            }
+            Self::InvalidAliasFingerprintLength { actual } => {
+                write!(
+                    formatter,
+                    "alias fingerprint must be 32 bytes: actual length {actual}"
                 )
             }
             Self::InvalidNonceLength { actual } => {
@@ -311,6 +337,9 @@ impl fmt::Display for CryptoError {
             }
             Self::DecryptionFailed => {
                 write!(formatter, "decryption failed")
+            }
+            Self::FingerprintComputationFailed => {
+                write!(formatter, "alias fingerprint computation failed")
             }
             Self::KeyWrapFailed => {
                 write!(formatter, "data key wrapping failed")
