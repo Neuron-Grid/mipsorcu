@@ -1,0 +1,10 @@
+[sqruff]
+dialect = postgres
+exclude_rules = LT01
+max_line_length = 100
+
+
+[sqruff:indentation]
+indent_unit = space
+tab_space_size = 4
+indented_joins = True
