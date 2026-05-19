@@ -219,6 +219,23 @@ fn audit_action_accepts_auth_failure() -> TestResult<()> {
 }
 
 #[test]
+fn audit_action_accepts_secret_alias_actions() -> TestResult<()> {
+    for (value, action) in [
+        ("secret_alias_create", AuditAction::SecretAliasCreate),
+        ("secret_alias_update", AuditAction::SecretAliasUpdate),
+        ("secret_alias_delete", AuditAction::SecretAliasDelete),
+        ("secret_alias_list", AuditAction::SecretAliasList),
+    ] {
+        assert_eq!(AuditAction::parse(value)?, action);
+        assert_eq!(action.as_str(), value);
+        assert!(!action.is_write_success_only());
+        assert!(!action.is_failure_only());
+    }
+
+    Ok(())
+}
+
+#[test]
 fn audit_event_rejects_unknown_action_and_result() {
     assert!(matches!(
         AuditAction::parse("unknown"),

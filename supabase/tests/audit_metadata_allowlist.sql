@@ -1326,6 +1326,172 @@ select is(
 );
 
 select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001200',
+        '00000000-0000-4000-8000-000000001200',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_create',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'alias_fingerprint', repeat('aa', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'secret_alias_create success accepts valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001201',
+        '00000000-0000-4000-8000-000000001201',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_update',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'old_alias_fingerprint', repeat('aa', 32),
+            'new_alias_fingerprint', repeat('bb', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'secret_alias_update success accepts valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001202',
+        '00000000-0000-4000-8000-000000001202',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_delete',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'alias_fingerprint', repeat('aa', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'secret_alias_delete success accepts valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001203',
+        '00000000-0000-4000-8000-000000001203',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_list',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'result_count', 3,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'secret_alias_list success accepts valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001204',
+        '00000000-0000-4000-8000-000000001204',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_create',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'alias_fingerprint', repeat('aa', 32),
+            'alias_fingerprint_key_version', 1,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'secret_alias_create rejects missing schema version'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001205',
+        '00000000-0000-4000-8000-000000001205',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_update',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'old_alias_fingerprint', repeat('aa', 32),
+            'new_alias_fingerprint', repeat('bb', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-06-01T03:00:00Z',
+            'extra', 'bad'
+        )
+    ),
+    'invalid_rpc_input',
+    'secret_alias_update rejects unknown metadata key'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001206',
+        '00000000-0000-4000-8000-000000001206',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_delete',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'alias_fingerprint', repeat('aa', 31),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'secret_alias_delete rejects invalid fingerprint length'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001207',
+        '00000000-0000-4000-8000-000000001207',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_list',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'result_count', -1,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'secret_alias_list rejects negative result_count'
+);
+
+select is(
     has_function_privilege(
         'anon',
         'public.audit_metadata_has_invalid_value_for_action(text, text, jsonb)',

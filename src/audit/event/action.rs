@@ -36,6 +36,14 @@ pub enum AuditAction {
     SchedulerJob,
     /// インシデント検知（failure-only の監査）。
     IncidentDetected,
+    /// 暗号化済み secret alias の作成。
+    SecretAliasCreate,
+    /// 暗号化済み secret alias の更新。
+    SecretAliasUpdate,
+    /// 暗号化済み secret alias の削除。
+    SecretAliasDelete,
+    /// owner scope の secret alias 一覧取得。
+    SecretAliasList,
 }
 
 impl AuditAction {
@@ -63,6 +71,10 @@ impl AuditAction {
             "audit_ui_read" => Ok(Self::AuditUiRead),
             "scheduler_job" => Ok(Self::SchedulerJob),
             "incident_detected" => Ok(Self::IncidentDetected),
+            "secret_alias_create" => Ok(Self::SecretAliasCreate),
+            "secret_alias_update" => Ok(Self::SecretAliasUpdate),
+            "secret_alias_delete" => Ok(Self::SecretAliasDelete),
+            "secret_alias_list" => Ok(Self::SecretAliasList),
             _ => Err(AuditEventError::UnknownAction {
                 value: value.to_owned(),
             }),
@@ -93,6 +105,10 @@ impl AuditAction {
             Self::AuditUiRead => "audit_ui_read",
             Self::SchedulerJob => "scheduler_job",
             Self::IncidentDetected => "incident_detected",
+            Self::SecretAliasCreate => "secret_alias_create",
+            Self::SecretAliasUpdate => "secret_alias_update",
+            Self::SecretAliasDelete => "secret_alias_delete",
+            Self::SecretAliasList => "secret_alias_list",
         }
     }
 

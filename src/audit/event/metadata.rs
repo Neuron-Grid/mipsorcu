@@ -441,6 +441,41 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            AuditAction::SecretAliasCreate => [
+                "alias_fingerprint",
+                "alias_fingerprint_key_version",
+                "alias_fingerprint_schema_version",
+                "error_code",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            AuditAction::SecretAliasUpdate => [
+                "old_alias_fingerprint",
+                "new_alias_fingerprint",
+                "alias_fingerprint_key_version",
+                "alias_fingerprint_schema_version",
+                "error_code",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            AuditAction::SecretAliasDelete => [
+                "alias_fingerprint",
+                "alias_fingerprint_key_version",
+                "alias_fingerprint_schema_version",
+                "error_code",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            AuditAction::SecretAliasList => ["result_count", "error_code", SOURCE_EVENT_AT_KEY]
+                .iter()
+                .cloned()
+                .collect(),
         };
 
         for key in object.keys() {
@@ -532,6 +567,23 @@ fn validate_required_metadata_keys(
             "notification_result",
             "error_code",
         ],
+        AuditAction::SecretAliasCreate => vec![
+            "alias_fingerprint",
+            "alias_fingerprint_key_version",
+            "alias_fingerprint_schema_version",
+        ],
+        AuditAction::SecretAliasUpdate => vec![
+            "old_alias_fingerprint",
+            "new_alias_fingerprint",
+            "alias_fingerprint_key_version",
+            "alias_fingerprint_schema_version",
+        ],
+        AuditAction::SecretAliasDelete => vec![
+            "alias_fingerprint",
+            "alias_fingerprint_key_version",
+            "alias_fingerprint_schema_version",
+        ],
+        AuditAction::SecretAliasList => vec!["result_count"],
     };
 
     if require_source_event_at {
@@ -589,6 +641,8 @@ fn validate_metadata_values(
         "target_sequence_no",
         "start_sequence_no",
         "end_sequence_no",
+        "alias_fingerprint_key_version",
+        "alias_fingerprint_schema_version",
     ] {
         if let Some(value) = object.get(key) {
             validate_positive_u64_value(key, value)?;
@@ -664,6 +718,16 @@ fn validate_metadata_values(
 
     if let Some(value) = object.get("public_key_fingerprint") {
         validate_hex_string("public_key_fingerprint", value, 64)?;
+    }
+
+    for key in [
+        "alias_fingerprint",
+        "old_alias_fingerprint",
+        "new_alias_fingerprint",
+    ] {
+        if let Some(value) = object.get(key) {
+            validate_hex_string(key, value, 64)?;
+        }
     }
 
     for key in ["created_at", "activated_at", "retired_at"] {

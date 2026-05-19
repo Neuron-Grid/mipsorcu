@@ -6,8 +6,8 @@ use mipsorcu::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
 };
 
-const LATEST_SIEM_MIGRATION_PATH: &str =
-    "supabase/migrations/1000_add_scheduler_job_audit_and_ledger.sql";
+const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
+    "supabase/migrations/1210_extend_audit_actions_for_alias.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -18,7 +18,7 @@ const ALLOWLIST_END_MARKER: &str = "-- ACTION_ALLOWLIST_END";
 
 #[test]
 fn forbidden_keys_parity_between_rust_and_sql() {
-    let migration = fs::read_to_string(LATEST_SIEM_MIGRATION_PATH)
+    let migration = fs::read_to_string(LATEST_AUDIT_METADATA_MIGRATION_PATH)
         .expect("forbidden-keys migration should be readable");
     let sql_keys = extract_sql_forbidden_keys(&migration);
     let rust_keys = FORBIDDEN_AUDIT_METADATA_KEYS
@@ -34,7 +34,7 @@ fn allowlist_parity_between_rust_and_sql() {
     // 最新の allowlist migration が audit_metadata_has_unknown_key_for_action の最新定義を持つ。
     // 新 action を追加する場合は最新 migration の ACTION_ALLOWLIST_START/END 内と
     // rust_allowlist_for_action_result（このファイル内）の両方を更新すること。
-    let migration = fs::read_to_string(LATEST_SIEM_MIGRATION_PATH)
+    let migration = fs::read_to_string(LATEST_AUDIT_METADATA_MIGRATION_PATH)
         .expect("allowlist migration should be readable");
     let sql_allowlist = extract_sql_allowlist(&migration);
 
@@ -70,7 +70,7 @@ fn allowlist_parity_between_rust_and_sql() {
 #[test]
 fn integrity_check_violation_summary_allowlist_parity() {
     // 最新 migration は完全な関数定義（violation_summary キーを含む）を保持する。
-    let migration = fs::read_to_string(LATEST_SIEM_MIGRATION_PATH)
+    let migration = fs::read_to_string(LATEST_AUDIT_METADATA_MIGRATION_PATH)
         .expect("allowlist migration should be readable");
     let sql_summary = extract_sql_violation_summary_keys(&migration);
     let rust_summary = INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST
@@ -198,6 +198,69 @@ fn rust_allowlist_rejects_decrypt_failure_without_attempted_secret_id_unknown() 
     assert!(
         result.is_ok(),
         "decrypt failure with only source_event_at should pass: {result:?}"
+    );
+}
+
+#[test]
+fn rust_allowlist_accepts_secret_alias_metadata() {
+    let create_metadata = serde_json::json!({
+        "alias_fingerprint": "aa".repeat(32),
+        "alias_fingerprint_key_version": 1,
+        "alias_fingerprint_schema_version": 1,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    });
+    let create_audit = AuditMetadata::new(create_metadata).unwrap();
+    assert!(
+        create_audit
+            .validate_allowlist_for_action(AuditAction::SecretAliasCreate, AuditResult::Success)
+            .is_ok()
+    );
+
+    let update_metadata = serde_json::json!({
+        "old_alias_fingerprint": "aa".repeat(32),
+        "new_alias_fingerprint": "bb".repeat(32),
+        "alias_fingerprint_key_version": 1,
+        "alias_fingerprint_schema_version": 1,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    });
+    let update_audit = AuditMetadata::new(update_metadata).unwrap();
+    assert!(
+        update_audit
+            .validate_allowlist_for_action(AuditAction::SecretAliasUpdate, AuditResult::Success)
+            .is_ok()
+    );
+
+    let list_metadata = serde_json::json!({
+        "result_count": 3,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    });
+    let list_audit = AuditMetadata::new(list_metadata).unwrap();
+    assert!(
+        list_audit
+            .validate_allowlist_for_action(AuditAction::SecretAliasList, AuditResult::Success)
+            .is_ok()
+    );
+}
+
+#[test]
+fn rust_allowlist_rejects_invalid_secret_alias_metadata() {
+    let metadata = serde_json::json!({
+        "alias_fingerprint": "aa".repeat(31),
+        "alias_fingerprint_key_version": 1,
+        "alias_fingerprint_schema_version": 1,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    });
+    let audit = AuditMetadata::new(metadata).unwrap();
+    let result =
+        audit.validate_allowlist_for_action(AuditAction::SecretAliasCreate, AuditResult::Success);
+    assert!(
+        matches!(
+            result,
+            Err(mipsorcu::AuditEventError::InvalidMetadataValue {
+                key: "alias_fingerprint"
+            })
+        ),
+        "invalid alias fingerprint should be rejected: {result:?}"
     );
 }
 
@@ -513,6 +576,10 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::AuditReportGenerate,
         AuditAction::SchedulerJob,
         AuditAction::IncidentDetected,
+        AuditAction::SecretAliasCreate,
+        AuditAction::SecretAliasUpdate,
+        AuditAction::SecretAliasDelete,
+        AuditAction::SecretAliasList,
     ]
 }
 
@@ -669,6 +736,37 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "target_year_month",
                 "severity",
             ]
+        }
+        AuditAction::SecretAliasCreate => {
+            vec![
+                "alias_fingerprint",
+                "alias_fingerprint_key_version",
+                "alias_fingerprint_schema_version",
+                "error_code",
+                "source_event_at",
+            ]
+        }
+        AuditAction::SecretAliasUpdate => {
+            vec![
+                "old_alias_fingerprint",
+                "new_alias_fingerprint",
+                "alias_fingerprint_key_version",
+                "alias_fingerprint_schema_version",
+                "error_code",
+                "source_event_at",
+            ]
+        }
+        AuditAction::SecretAliasDelete => {
+            vec![
+                "alias_fingerprint",
+                "alias_fingerprint_key_version",
+                "alias_fingerprint_schema_version",
+                "error_code",
+                "source_event_at",
+            ]
+        }
+        AuditAction::SecretAliasList => {
+            vec!["error_code", "result_count", "source_event_at"]
         }
         AuditAction::AuditUiRead => {
             vec![

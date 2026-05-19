@@ -115,6 +115,38 @@ select is(
     'secret_aliases.created_at has no DB default'
 );
 
+select ok(
+    (
+        select exists (
+            select 1
+            from pg_constraint c
+            join pg_class t on t.oid = c.conrelid
+            join pg_namespace n on n.oid = t.relnamespace
+            where n.nspname = 'public'
+                and t.relname = 'secret_aliases'
+                and c.conname = 'secret_aliases_owner_alias_fingerprint_unique'
+                and c.contype = 'u'
+        )
+    ),
+    '(owner_user_id, alias_fingerprint) is unique'
+);
+
+select ok(
+    (
+        select exists (
+            select 1
+            from pg_constraint c
+            join pg_class t on t.oid = c.conrelid
+            join pg_namespace n on n.oid = t.relnamespace
+            where n.nspname = 'public'
+                and t.relname = 'secret_aliases'
+                and c.conname = 'secret_aliases_owner_secret_unique'
+                and c.contype = 'u'
+        )
+    ),
+    '(owner_user_id, secret_id) is unique for MVP cardinality'
+);
+
 select is(
     (
         select count(*)::integer
@@ -153,14 +185,20 @@ select is(
                 ('anon', 'insert'),
                 ('anon', 'update'),
                 ('anon', 'delete'),
+                ('anon', 'truncate'),
+                ('anon', 'references'),
                 ('authenticated', 'select'),
                 ('authenticated', 'insert'),
                 ('authenticated', 'update'),
                 ('authenticated', 'delete'),
+                ('authenticated', 'truncate'),
+                ('authenticated', 'references'),
                 ('service_role', 'select'),
                 ('service_role', 'insert'),
                 ('service_role', 'update'),
-                ('service_role', 'delete')
+                ('service_role', 'delete'),
+                ('service_role', 'truncate'),
+                ('service_role', 'references')
             ) as table_privileges(role_name, privilege_name)
             where has_table_privilege(
                 table_privileges.role_name,
