@@ -111,7 +111,7 @@ impl AliasEncryptionKey {
 
     pub fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.len() != MASTER_KEY_LENGTH {
-            return Err(CryptoError::InvalidMasterKeyLength {
+            return Err(CryptoError::InvalidAliasEncryptionKeyLength {
                 actual: bytes.len(),
             });
         }
@@ -148,7 +148,7 @@ impl AliasFingerprintKey {
 
     pub fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.len() != MASTER_KEY_LENGTH {
-            return Err(CryptoError::InvalidMasterKeyLength {
+            return Err(CryptoError::InvalidAliasFingerprintKeyLength {
                 actual: bytes.len(),
             });
         }

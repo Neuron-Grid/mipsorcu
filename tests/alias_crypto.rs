@@ -209,6 +209,56 @@ fn decrypt_fails_when_secret_alias_id_differs() -> Result<(), CryptoError> {
 }
 
 #[test]
+fn decrypt_fails_when_secret_id_differs() -> Result<(), CryptoError> {
+    let key = sample_encryption_key();
+    let aad = sample_aad()?;
+    let alias = sample_alias().map_err(|_| CryptoError::EncryptionFailed)?;
+    let encrypted = encrypt_alias(&key, &aad, &alias)?;
+    let tampered_aad = AliasAadV1::new(
+        SecretAliasId::parse(SECRET_ALIAS_ID)?,
+        SecretId::parse("650e8400-e29b-41d4-a716-446655440000")?,
+        OwnerUserId::parse(OWNER_USER_ID)?,
+        KeyVersion::new(1)?,
+    );
+
+    let result = decrypt_alias(
+        &key,
+        &tampered_aad,
+        encrypted.nonce(),
+        encrypted.ciphertext(),
+    );
+
+    assert!(matches!(result, Err(CryptoError::DecryptionFailed)));
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_fails_when_owner_user_id_differs() -> Result<(), CryptoError> {
+    let key = sample_encryption_key();
+    let aad = sample_aad()?;
+    let alias = sample_alias().map_err(|_| CryptoError::EncryptionFailed)?;
+    let encrypted = encrypt_alias(&key, &aad, &alias)?;
+    let tampered_aad = AliasAadV1::new(
+        SecretAliasId::parse(SECRET_ALIAS_ID)?,
+        SecretId::parse(SECRET_ID)?,
+        OwnerUserId::parse(ALT_OWNER_USER_ID)?,
+        KeyVersion::new(1)?,
+    );
+
+    let result = decrypt_alias(
+        &key,
+        &tampered_aad,
+        encrypted.nonce(),
+        encrypted.ciphertext(),
+    );
+
+    assert!(matches!(result, Err(CryptoError::DecryptionFailed)));
+
+    Ok(())
+}
+
+#[test]
 fn decrypt_fails_when_alias_key_version_differs() -> Result<(), CryptoError> {
     let key = sample_encryption_key();
     let aad = sample_aad()?;

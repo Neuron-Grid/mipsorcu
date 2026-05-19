@@ -200,11 +200,13 @@ fn master_key_parse_rejects_invalid_lengths() {
 fn alias_keys_parse_reject_invalid_lengths() {
     assert!(matches!(
         AliasEncryptionKey::parse(&[0u8; MASTER_KEY_LENGTH - 1]),
-        Err(CryptoError::InvalidMasterKeyLength { actual }) if actual == MASTER_KEY_LENGTH - 1
+        Err(CryptoError::InvalidAliasEncryptionKeyLength { actual })
+            if actual == MASTER_KEY_LENGTH - 1
     ));
     assert!(matches!(
         AliasFingerprintKey::parse(&[0u8; MASTER_KEY_LENGTH + 1]),
-        Err(CryptoError::InvalidMasterKeyLength { actual }) if actual == MASTER_KEY_LENGTH + 1
+        Err(CryptoError::InvalidAliasFingerprintKeyLength { actual })
+            if actual == MASTER_KEY_LENGTH + 1
     ));
     assert!(AliasEncryptionKey::parse(&[0u8; MASTER_KEY_LENGTH]).is_ok());
     assert!(AliasFingerprintKey::parse(&[0u8; MASTER_KEY_LENGTH]).is_ok());

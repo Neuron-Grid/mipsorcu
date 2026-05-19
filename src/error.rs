@@ -200,6 +200,7 @@ pub enum CryptoError {
     InvalidDataKeyLength { actual: usize },
     InvalidMasterKeyLength { actual: usize },
     InvalidAliasEncryptionKeyLength { actual: usize },
+    InvalidAliasFingerprintKeyLength { actual: usize },
     InvalidAliasFingerprintLength { actual: usize },
     InvalidNonceLength { actual: usize },
     InvalidKeyVersion { value: u32 },
@@ -229,6 +230,10 @@ impl fmt::Debug for CryptoError {
                 .finish(),
             Self::InvalidAliasEncryptionKeyLength { actual } => formatter
                 .debug_struct("InvalidAliasEncryptionKeyLength")
+                .field("actual", actual)
+                .finish(),
+            Self::InvalidAliasFingerprintKeyLength { actual } => formatter
+                .debug_struct("InvalidAliasFingerprintKeyLength")
                 .field("actual", actual)
                 .finish(),
             Self::InvalidAliasFingerprintLength { actual } => formatter
@@ -288,6 +293,12 @@ impl fmt::Display for CryptoError {
                 write!(
                     formatter,
                     "alias encryption key must be 32 bytes: actual length {actual}"
+                )
+            }
+            Self::InvalidAliasFingerprintKeyLength { actual } => {
+                write!(
+                    formatter,
+                    "alias fingerprint key must be 32 bytes: actual length {actual}"
                 )
             }
             Self::InvalidAliasFingerprintLength { actual } => {
