@@ -217,9 +217,24 @@ select ok(
 );
 
 select ok(
+    to_regprocedure('public.rpc_create_secret_alias(uuid, uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, timestamptz)') is null,
+    'encrypted create RPC without source_event_at is removed'
+);
+
+select ok(
+    to_regprocedure('public.rpc_update_secret_alias(uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb)') is null,
+    'encrypted update RPC without source_event_at is removed'
+);
+
+select ok(
+    to_regprocedure('public.rpc_delete_secret_alias(uuid, uuid, uuid)') is null,
+    'encrypted delete RPC without source_event_at is removed'
+);
+
+select ok(
     has_function_privilege(
         'service_role',
-        'public.rpc_create_secret_alias(uuid, uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, timestamptz)',
+        'public.rpc_create_secret_alias(uuid, uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, timestamptz, text)',
         'execute'
     ),
     'service_role can execute encrypted create RPC'
@@ -228,7 +243,7 @@ select ok(
 select ok(
     has_function_privilege(
         'service_role',
-        'public.rpc_update_secret_alias(uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb)',
+        'public.rpc_update_secret_alias(uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, text)',
         'execute'
     ),
     'service_role can execute encrypted update RPC'
@@ -237,7 +252,7 @@ select ok(
 select ok(
     has_function_privilege(
         'service_role',
-        'public.rpc_delete_secret_alias(uuid, uuid, uuid)',
+        'public.rpc_delete_secret_alias(uuid, uuid, uuid, text)',
         'execute'
     ),
     'service_role can execute encrypted delete RPC'
@@ -266,14 +281,14 @@ select is(
         select exists (
             select 1
             from (values
-                ('authenticated', 'public.rpc_create_secret_alias(uuid, uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, timestamptz)'),
-                ('authenticated', 'public.rpc_update_secret_alias(uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb)'),
-                ('authenticated', 'public.rpc_delete_secret_alias(uuid, uuid, uuid)'),
+                ('authenticated', 'public.rpc_create_secret_alias(uuid, uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, timestamptz, text)'),
+                ('authenticated', 'public.rpc_update_secret_alias(uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, text)'),
+                ('authenticated', 'public.rpc_delete_secret_alias(uuid, uuid, uuid, text)'),
                 ('authenticated', 'public.rpc_list_secret_aliases(uuid, uuid, integer, integer)'),
                 ('authenticated', 'public.rpc_resolve_secret_alias(uuid, bytea)'),
-                ('anon', 'public.rpc_create_secret_alias(uuid, uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, timestamptz)'),
-                ('anon', 'public.rpc_update_secret_alias(uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb)'),
-                ('anon', 'public.rpc_delete_secret_alias(uuid, uuid, uuid)'),
+                ('anon', 'public.rpc_create_secret_alias(uuid, uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, timestamptz, text)'),
+                ('anon', 'public.rpc_update_secret_alias(uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, text)'),
+                ('anon', 'public.rpc_delete_secret_alias(uuid, uuid, uuid, text)'),
                 ('anon', 'public.rpc_list_secret_aliases(uuid, uuid, integer, integer)'),
                 ('anon', 'public.rpc_resolve_secret_alias(uuid, bytea)')
             ) as function_privileges(role_name, signature)

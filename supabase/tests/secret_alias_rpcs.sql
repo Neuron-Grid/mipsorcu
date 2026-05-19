@@ -40,7 +40,8 @@ create function test_helpers.try_create_secret_alias(
     p_alias_fingerprint_key_version integer,
     p_alias_fingerprint_schema_version integer,
     p_aad_context jsonb,
-    p_created_at timestamptz
+    p_created_at timestamptz,
+    p_source_event_at text
 )
 returns text
 language plpgsql
@@ -59,7 +60,8 @@ begin
         p_alias_fingerprint_key_version,
         p_alias_fingerprint_schema_version,
         p_aad_context,
-        p_created_at
+        p_created_at,
+        p_source_event_at
     );
 
     return 'ok';
@@ -79,7 +81,8 @@ create function test_helpers.try_update_secret_alias(
     p_new_alias_fingerprint bytea,
     p_alias_fingerprint_key_version integer,
     p_alias_fingerprint_schema_version integer,
-    p_aad_context jsonb
+    p_aad_context jsonb,
+    p_source_event_at text
 )
 returns text
 language plpgsql
@@ -96,7 +99,8 @@ begin
         p_new_alias_fingerprint,
         p_alias_fingerprint_key_version,
         p_alias_fingerprint_schema_version,
-        p_aad_context
+        p_aad_context,
+        p_source_event_at
     );
 
     return 'ok';
@@ -109,7 +113,8 @@ $$;
 create function test_helpers.try_delete_secret_alias(
     p_request_id uuid,
     p_secret_alias_id uuid,
-    p_owner_user_id uuid
+    p_owner_user_id uuid,
+    p_source_event_at text
 )
 returns text
 language plpgsql
@@ -119,7 +124,8 @@ begin
     from public.rpc_delete_secret_alias(
         p_request_id,
         p_secret_alias_id,
-        p_owner_user_id
+        p_owner_user_id,
+        p_source_event_at
     );
 
     return 'ok';
@@ -201,6 +207,7 @@ select is(
             (select owner_user_id from secret_alias_rpc_fixtures),
             1
         ),
+        '2026-04-08T12:03:00Z',
         '2026-04-08T12:03:00Z'
     ),
     'ok',
@@ -232,6 +239,7 @@ select is(
 select ok(
     (
         select metadata_json ? 'alias_fingerprint'
+            and metadata_json ? 'source_event_at'
             and not (metadata_json ?| array['alias', 'alias_normalized', 'plain_text', 'plaintext'])
         from public.audit_events
         where action = 'secret_alias_create'
@@ -239,7 +247,7 @@ select ok(
             and target_secret_id = (select secret_id from secret_alias_rpc_fixtures)
         limit 1
     ),
-    'create alias audit records fingerprint but no plaintext alias metadata'
+    'create alias audit records fingerprint and source_event_at but no plaintext alias metadata'
 );
 
 select is(
@@ -260,6 +268,7 @@ select is(
             (select owner_user_id from secret_alias_rpc_fixtures),
             1
         ),
+        '2026-04-08T12:04:00Z',
         '2026-04-08T12:04:00Z'
     ),
     'alias_conflict',
@@ -284,6 +293,7 @@ select is(
             (select owner_user_id from secret_alias_rpc_fixtures),
             1
         ),
+        '2026-04-08T12:05:00Z',
         '2026-04-08T12:05:00Z'
     ),
     'alias_conflict',
@@ -308,6 +318,7 @@ select is(
             (select other_user_id from secret_alias_rpc_fixtures),
             1
         ),
+        '2026-04-08T12:06:00Z',
         '2026-04-08T12:06:00Z'
     ),
     'owner_mismatch',
@@ -332,6 +343,7 @@ select is(
             (select owner_user_id from secret_alias_rpc_fixtures),
             1
         ),
+        '2026-04-08T12:07:00Z',
         '2026-04-08T12:07:00Z'
     ),
     'secret_not_found',
@@ -356,6 +368,7 @@ select is(
             (select owner_user_id from secret_alias_rpc_fixtures),
             1
         ),
+        '2026-04-08T12:08:00Z',
         '2026-04-08T12:08:00Z'
     ),
     'invalid_rpc_input',
@@ -380,6 +393,7 @@ select is(
             (select owner_user_id from secret_alias_rpc_fixtures),
             1
         ),
+        '2026-04-08T12:09:00Z',
         '2026-04-08T12:09:00Z'
     ),
     'invalid_rpc_input',
@@ -404,6 +418,7 @@ select is(
             (select owner_user_id from secret_alias_rpc_fixtures),
             1
         ) || jsonb_build_object('extra', 'bad'),
+        '2026-04-08T12:10:00Z',
         '2026-04-08T12:10:00Z'
     ),
     'invalid_rpc_input',
@@ -428,10 +443,36 @@ select is(
             (select owner_user_id from secret_alias_rpc_fixtures),
             1
         ),
+        '2026-04-08T12:11:00Z',
         '2026-04-08T12:11:00Z'
     ),
     'invalid_rpc_input',
     'create alias rejects AAD row mismatch'
+);
+
+select is(
+    test_helpers.try_create_secret_alias(
+        '00000000-0000-4000-8000-000000000310',
+        '850e8400-e29b-41d4-a716-446655440110',
+        (select second_secret_id from secret_alias_rpc_fixtures),
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        decode(repeat('aa', 32), 'hex'),
+        decode(repeat('bb', 24), 'hex'),
+        1,
+        decode(repeat('19', 32), 'hex'),
+        1,
+        1,
+        test_helpers.alias_aad_context(
+            '850e8400-e29b-41d4-a716-446655440110',
+            (select second_secret_id from secret_alias_rpc_fixtures),
+            (select owner_user_id from secret_alias_rpc_fixtures),
+            1
+        ),
+        '2026-04-08T12:12:00Z',
+        '2026-04-08T12:12:00+00:00'
+    ),
+    'invalid_rpc_input',
+    'create alias rejects non-canonical source_event_at'
 );
 
 select is(
@@ -476,7 +517,8 @@ select is(
             (select secret_id from secret_alias_rpc_fixtures),
             (select owner_user_id from secret_alias_rpc_fixtures),
             2
-        )
+        ),
+        '2026-04-08T12:12:00Z'
     ),
     'ok',
     'update alias succeeds without changing canonical secret_id'
@@ -498,6 +540,7 @@ select ok(
     (
         select metadata_json ? 'old_alias_fingerprint'
             and metadata_json ? 'new_alias_fingerprint'
+            and metadata_json ? 'source_event_at'
             and not (metadata_json ?| array['alias', 'alias_normalized', 'plain_text', 'plaintext'])
         from public.audit_events
         where action = 'secret_alias_update'
@@ -505,7 +548,7 @@ select ok(
             and target_secret_id = (select secret_id from secret_alias_rpc_fixtures)
         limit 1
     ),
-    'update alias audit records fingerprints but no plaintext alias metadata'
+    'update alias audit records fingerprints and source_event_at but no plaintext alias metadata'
 );
 
 select is(
@@ -516,6 +559,29 @@ select is(
     ),
     repeat('22', 32),
     'update alias replaces alias fingerprint'
+);
+
+select is(
+    test_helpers.try_update_secret_alias(
+        '00000000-0000-4000-8000-000000000504',
+        (select alias_id from secret_alias_rpc_fixtures),
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        decode(repeat('cc', 32), 'hex'),
+        decode(repeat('dd', 24), 'hex'),
+        2,
+        decode(repeat('25', 32), 'hex'),
+        1,
+        1,
+        test_helpers.alias_aad_context(
+            (select alias_id from secret_alias_rpc_fixtures),
+            (select secret_id from secret_alias_rpc_fixtures),
+            (select owner_user_id from secret_alias_rpc_fixtures),
+            2
+        ),
+        '2026-04-08T12:14:00+00:00'
+    ),
+    'invalid_rpc_input',
+    'update alias rejects non-canonical source_event_at'
 );
 
 select is(
@@ -534,7 +600,8 @@ select is(
             (select secret_id from secret_alias_rpc_fixtures),
             (select other_user_id from secret_alias_rpc_fixtures),
             2
-        )
+        ),
+        '2026-04-08T12:13:00Z'
     ),
     'owner_mismatch',
     'update alias rejects owner mismatch'
@@ -556,7 +623,8 @@ select is(
             (select secret_id from secret_alias_rpc_fixtures),
             (select owner_user_id from secret_alias_rpc_fixtures),
             2
-        )
+        ),
+        '2026-04-08T12:14:00Z'
     ),
     'alias_not_found',
     'update alias rejects missing alias'
@@ -564,9 +632,21 @@ select is(
 
 select is(
     test_helpers.try_delete_secret_alias(
+        '00000000-0000-4000-8000-000000000600',
+        (select alias_id from secret_alias_rpc_fixtures),
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        '2026-04-08T12:15:00+00:00'
+    ),
+    'invalid_rpc_input',
+    'delete alias rejects non-canonical source_event_at'
+);
+
+select is(
+    test_helpers.try_delete_secret_alias(
         '00000000-0000-4000-8000-000000000601',
         (select alias_id from secret_alias_rpc_fixtures),
-        (select other_user_id from secret_alias_rpc_fixtures)
+        (select other_user_id from secret_alias_rpc_fixtures),
+        '2026-04-08T12:15:00Z'
     ),
     'owner_mismatch',
     'delete alias rejects owner mismatch'
@@ -576,7 +656,8 @@ select is(
     test_helpers.try_delete_secret_alias(
         '00000000-0000-4000-8000-000000000602',
         (select alias_id from secret_alias_rpc_fixtures),
-        (select owner_user_id from secret_alias_rpc_fixtures)
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        '2026-04-08T12:16:00Z'
     ),
     'ok',
     'delete alias succeeds for owner'
@@ -597,6 +678,7 @@ select is(
 select ok(
     (
         select metadata_json ? 'alias_fingerprint'
+            and metadata_json ? 'source_event_at'
             and not (metadata_json ?| array['alias', 'alias_normalized', 'plain_text', 'plaintext'])
         from public.audit_events
         where action = 'secret_alias_delete'
@@ -604,7 +686,7 @@ select ok(
             and target_secret_id = (select secret_id from secret_alias_rpc_fixtures)
         limit 1
     ),
-    'delete alias audit records fingerprint but no plaintext alias metadata'
+    'delete alias audit records fingerprint and source_event_at but no plaintext alias metadata'
 );
 
 select is(
@@ -621,7 +703,8 @@ select is(
     test_helpers.try_delete_secret_alias(
         '00000000-0000-4000-8000-000000000603',
         (select alias_id from secret_alias_rpc_fixtures),
-        (select owner_user_id from secret_alias_rpc_fixtures)
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        '2026-04-08T12:17:00Z'
     ),
     'alias_not_found',
     'delete alias rejects missing alias'

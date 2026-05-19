@@ -1327,6 +1327,98 @@ select is(
 
 select is(
     test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000154',
+        '00000000-0000-4000-8000-000000000154',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'audit_ui_read',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'endpoint', '/audit/events',
+            'method', 'GET',
+            'resource', 'audit_events',
+            'result_count', 25,
+            'period_start', '2026-06-01T00:00:00Z',
+            'period_end', '2026-06-01T03:00:00Z',
+            'start_sequence_no', 1,
+            'end_sequence_no', 25,
+            'target_year_month', '2026-06',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'audit_ui_read success accepts valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000155',
+        '00000000-0000-4000-8000-000000000155',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'audit_ui_read',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'endpoint', '/audit/events',
+            'method', 'POST',
+            'resource', 'audit_events',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'audit_ui_read rejects non-GET method'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000156',
+        '00000000-0000-4000-8000-000000000156',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'audit_ui_read',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'endpoint', '/audit/events',
+            'method', 'GET',
+            'resource', 'audit_events',
+            'extra', 'bad',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'audit_ui_read rejects unknown metadata key'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000157',
+        '00000000-0000-4000-8000-000000000157',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'audit_ui_read',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'endpoint', '/audit/events',
+            'method', 'GET',
+            'resource', 'audit_events',
+            'error_code', 'should_only_appear_on_failure',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'audit_ui_read success rejects error_code'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
         '10000000-0000-4000-8000-000000001200',
         '00000000-0000-4000-8000-000000001200',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',

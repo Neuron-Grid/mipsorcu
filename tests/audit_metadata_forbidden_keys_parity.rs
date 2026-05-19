@@ -7,7 +7,7 @@ use mipsorcu::{
 };
 
 const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
-    "supabase/migrations/1220_accept_alias_failure_audit_metadata.sql";
+    "supabase/migrations/1230_complete_t05_alias_audit_extension.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -617,6 +617,7 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::DigestTimestamping,
         AuditAction::SiemForwardFailure,
         AuditAction::AuditReportGenerate,
+        AuditAction::AuditUiRead,
         AuditAction::SchedulerJob,
         AuditAction::IncidentDetected,
         AuditAction::SecretAliasCreate,

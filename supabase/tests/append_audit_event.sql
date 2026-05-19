@@ -744,6 +744,49 @@ set local mipsorcu.audit_metadata_allowlist_mode = 'strict';
 
 select is(
     test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-0000000000f0',
+        '00000000-0000-4000-8000-0000000000f0',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'audit_ui_read',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'endpoint', '/audit/events',
+            'method', 'GET',
+            'resource', 'audit_events',
+            'result_count', 1,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts audit_ui_read with valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-0000000000f1',
+        '00000000-0000-4000-8000-0000000000f1',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'audit_ui_read',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'endpoint', '/audit/events',
+            'method', 'POST',
+            'resource', 'audit_events',
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects audit_ui_read with invalid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
         '10000000-0000-4000-8000-0000000000ff',
         '00000000-0000-4000-8000-0000000000ff',
         null,
