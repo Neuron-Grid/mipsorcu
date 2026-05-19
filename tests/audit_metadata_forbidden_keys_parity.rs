@@ -7,7 +7,7 @@ use mipsorcu::{
 };
 
 const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
-    "supabase/migrations/1210_extend_audit_actions_for_alias.sql";
+    "supabase/migrations/1220_accept_alias_failure_audit_metadata.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -261,6 +261,49 @@ fn rust_allowlist_rejects_invalid_secret_alias_metadata() {
             })
         ),
         "invalid alias fingerprint should be rejected: {result:?}"
+    );
+}
+
+#[test]
+fn rust_allowlist_accepts_secret_alias_failure_without_fingerprint() {
+    for action in [
+        AuditAction::SecretAliasCreate,
+        AuditAction::SecretAliasUpdate,
+        AuditAction::SecretAliasDelete,
+        AuditAction::SecretAliasList,
+    ] {
+        let metadata = serde_json::json!({
+            "source_event_at": "2026-04-08T12:00:00Z"
+        });
+        let audit = AuditMetadata::new(metadata).unwrap();
+        let result = audit.validate_allowlist_for_action(action, AuditResult::Failure);
+
+        assert!(
+            result.is_ok(),
+            "{action:?} failure should accept source_event_at-only metadata: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn rust_allowlist_rejects_secret_alias_success_with_error_code() {
+    let metadata = serde_json::json!({
+        "alias_fingerprint": "aa".repeat(32),
+        "alias_fingerprint_key_version": 1,
+        "alias_fingerprint_schema_version": 1,
+        "error_code": "should_only_appear_on_failure",
+        "source_event_at": "2026-04-08T12:00:00Z"
+    });
+    let audit = AuditMetadata::new(metadata).unwrap();
+    let result =
+        audit.validate_allowlist_for_action(AuditAction::SecretAliasCreate, AuditResult::Success);
+
+    assert!(
+        matches!(
+            result,
+            Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "error_code" })
+        ),
+        "secret_alias_create success should reject error_code: {result:?}"
     );
 }
 

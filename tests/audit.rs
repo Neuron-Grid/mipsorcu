@@ -8,10 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
 use mipsorcu::{
-    AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventError, AuditEventId,
-    AuditEventParts, AuditMetadata, AuditRecordError, AuditRecordOutcome, AuditRecorder,
-    AuditResult, AuditTrigger, DeviceId, FORBIDDEN_AUDIT_METADATA_KEYS, KeyVersion,
-    LocalAuditFallbackStore, OwnerUserId, RequestId, RolloverOutcome, SecretId, SourceEventAt,
+    AliasFingerprint, AliasFingerprintSchemaVersion, AuditAction, AuditAppendError, AuditEvent,
+    AuditEventAppender, AuditEventError, AuditEventId, AuditEventParts, AuditMetadata,
+    AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditResult, AuditTrigger, DeviceId,
+    FORBIDDEN_AUDIT_METADATA_KEYS, KeyVersion, LocalAuditFallbackStore, OwnerUserId, RequestId,
+    RolloverOutcome, SecretAliasCreateMetadata, SecretAliasDeleteMetadata, SecretAliasListMetadata,
+    SecretAliasUpdateMetadata, SecretId, SourceEventAt,
 };
 use serde_json::{Value, json};
 
@@ -24,6 +26,10 @@ const DEVICE_ID: &str = "sbc-device-1";
 const SOURCE_EVENT_AT: &str = "2026-04-08T12:00:00Z";
 
 type TestResult<T> = Result<T, Box<dyn Error>>;
+
+fn alias_fingerprint(fill: u8) -> AliasFingerprint {
+    AliasFingerprint::from_bytes([fill; 32])
+}
 
 #[derive(Debug, Clone)]
 enum AppendBehavior {
@@ -273,6 +279,240 @@ fn audit_event_rejects_write_success_actions_outside_write_rpc() -> TestResult<(
             Err(AuditEventError::WriteSuccessActionNotAllowed { .. })
         ));
     }
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_accepts_secret_alias_success_metadata() -> TestResult<()> {
+    let source_event_at = SourceEventAt::parse(SOURCE_EVENT_AT)?;
+    let key_version = KeyVersion::new(1)?;
+    let schema_version = AliasFingerprintSchemaVersion::V1;
+    let cases = vec![
+        (
+            AuditAction::SecretAliasCreate,
+            Some(SecretId::parse(TARGET_SECRET_ID)?),
+            Some(key_version),
+            SecretAliasCreateMetadata::success(
+                alias_fingerprint(0xaa),
+                key_version,
+                schema_version,
+                source_event_at.clone(),
+            )
+            .build()?,
+        ),
+        (
+            AuditAction::SecretAliasUpdate,
+            Some(SecretId::parse(TARGET_SECRET_ID)?),
+            Some(key_version),
+            SecretAliasUpdateMetadata::success(
+                alias_fingerprint(0xaa),
+                alias_fingerprint(0xbb),
+                key_version,
+                schema_version,
+                source_event_at.clone(),
+            )
+            .build()?,
+        ),
+        (
+            AuditAction::SecretAliasDelete,
+            Some(SecretId::parse(TARGET_SECRET_ID)?),
+            Some(key_version),
+            SecretAliasDeleteMetadata::success(
+                alias_fingerprint(0xaa),
+                key_version,
+                schema_version,
+                source_event_at.clone(),
+            )
+            .build()?,
+        ),
+        (
+            AuditAction::SecretAliasList,
+            None,
+            None,
+            SecretAliasListMetadata::success(3, source_event_at).build()?,
+        ),
+    ];
+
+    for (action, target_secret_id, key_version, metadata_json) in cases {
+        let event = AuditEvent::new(AuditEventParts {
+            audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+            request_id: RequestId::parse(REQUEST_ID)?,
+            actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+            actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+            action,
+            target_secret_id,
+            result: AuditResult::Success,
+            key_version,
+            metadata_json,
+        })?;
+
+        assert_eq!(event.action(), action);
+        assert_eq!(event.result(), AuditResult::Success);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_rejects_secret_alias_success_missing_required_metadata() -> TestResult<()> {
+    let create_result = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+        action: AuditAction::SecretAliasCreate,
+        target_secret_id: Some(SecretId::parse(TARGET_SECRET_ID)?),
+        result: AuditResult::Success,
+        key_version: Some(KeyVersion::new(1)?),
+        metadata_json: AuditMetadata::new(json!({
+            "source_event_at": SOURCE_EVENT_AT
+        }))?,
+    });
+    assert!(matches!(
+        create_result,
+        Err(AuditEventError::MissingMetadataKey {
+            key: "alias_fingerprint"
+        })
+    ));
+
+    let list_result = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID_2)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+        action: AuditAction::SecretAliasList,
+        target_secret_id: None,
+        result: AuditResult::Success,
+        key_version: None,
+        metadata_json: AuditMetadata::new(json!({
+            "source_event_at": SOURCE_EVENT_AT
+        }))?,
+    });
+    assert!(matches!(
+        list_result,
+        Err(AuditEventError::MissingMetadataKey {
+            key: "result_count"
+        })
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_accepts_secret_alias_failure_without_fingerprint() -> TestResult<()> {
+    for action in [
+        AuditAction::SecretAliasCreate,
+        AuditAction::SecretAliasUpdate,
+        AuditAction::SecretAliasDelete,
+        AuditAction::SecretAliasList,
+    ] {
+        let event = AuditEvent::new(AuditEventParts {
+            audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+            request_id: RequestId::parse(REQUEST_ID)?,
+            actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+            actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+            action,
+            target_secret_id: if action == AuditAction::SecretAliasList {
+                None
+            } else {
+                Some(SecretId::parse(TARGET_SECRET_ID)?)
+            },
+            result: AuditResult::Failure,
+            key_version: None,
+            metadata_json: AuditMetadata::new(json!({
+                "source_event_at": SOURCE_EVENT_AT
+            }))?,
+        })?;
+
+        assert_eq!(event.action(), action);
+        assert_eq!(event.result(), AuditResult::Failure);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn audit_event_accepts_secret_alias_failure_error_code_and_rejects_success_error_code()
+-> TestResult<()> {
+    let source_event_at = SourceEventAt::parse(SOURCE_EVENT_AT)?;
+    let failure_metadata =
+        SecretAliasCreateMetadata::failure(source_event_at.clone()).with_error_code("rpc_failed");
+    let failure_event = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+        action: AuditAction::SecretAliasCreate,
+        target_secret_id: Some(SecretId::parse(TARGET_SECRET_ID)?),
+        result: AuditResult::Failure,
+        key_version: None,
+        metadata_json: failure_metadata.build()?,
+    })?;
+    assert_eq!(failure_event.result(), AuditResult::Failure);
+
+    let key_version = KeyVersion::new(1)?;
+    let success_metadata = SecretAliasCreateMetadata::success(
+        alias_fingerprint(0xaa),
+        key_version,
+        AliasFingerprintSchemaVersion::V1,
+        source_event_at,
+    )
+    .with_error_code("should_only_appear_on_failure")
+    .build()?;
+    let success_result = AuditEvent::new(AuditEventParts {
+        audit_event_id: AuditEventId::parse(AUDIT_EVENT_ID_2)?,
+        request_id: RequestId::parse(REQUEST_ID)?,
+        actor_user_id: Some(OwnerUserId::parse(OWNER_USER_ID)?),
+        actor_device_id: Some(DeviceId::new(DEVICE_ID)?),
+        action: AuditAction::SecretAliasCreate,
+        target_secret_id: Some(SecretId::parse(TARGET_SECRET_ID)?),
+        result: AuditResult::Success,
+        key_version: Some(key_version),
+        metadata_json: success_metadata,
+    });
+    assert!(matches!(
+        success_result,
+        Err(AuditEventError::InvalidMetadataValue { key: "error_code" })
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn secret_alias_metadata_builders_emit_expected_public_fields() -> TestResult<()> {
+    let metadata = SecretAliasUpdateMetadata::success(
+        alias_fingerprint(0xaa),
+        alias_fingerprint(0xbb),
+        KeyVersion::new(7)?,
+        AliasFingerprintSchemaVersion::V1,
+        SourceEventAt::parse(SOURCE_EVENT_AT)?,
+    )
+    .build()?;
+    let value = metadata.as_value();
+
+    assert_eq!(
+        value["old_alias_fingerprint"],
+        Value::String("aa".repeat(32))
+    );
+    assert_eq!(
+        value["new_alias_fingerprint"],
+        Value::String("bb".repeat(32))
+    );
+    assert_eq!(
+        value["alias_fingerprint_key_version"],
+        Value::Number(7.into())
+    );
+    assert_eq!(
+        value["alias_fingerprint_schema_version"],
+        Value::Number(1.into())
+    );
+    assert_eq!(
+        value["source_event_at"],
+        Value::String(SOURCE_EVENT_AT.to_owned())
+    );
+    assert!(value.get("alias").is_none());
+    assert!(value.get("alias_normalized").is_none());
 
     Ok(())
 }

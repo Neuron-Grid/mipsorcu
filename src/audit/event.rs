@@ -13,7 +13,9 @@ pub use metadata::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IncidentDetectedMetadata, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
     MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RestoreTestMetadata,
-    SchedulerJobMetadata, SiemForwardFailureMetadata, SignatureKeyActivatedMetadata,
-    SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata, VersionPurgeMetadata,
+    SchedulerJobMetadata, SecretAliasCreateMetadata, SecretAliasDeleteMetadata,
+    SecretAliasListMetadata, SecretAliasUpdateMetadata, SiemForwardFailureMetadata,
+    SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata,
+    VersionPurgeMetadata,
 };
 pub use model::{AuditEvent, AuditEventAppender, AuditEventParts};

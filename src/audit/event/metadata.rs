@@ -11,8 +11,9 @@ pub use builders::{
     IncidentDetectedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
     KeyRotationReencryptMetadata, KeyRotationStartMetadata, MonthlyDigestGenerateMetadata,
     MonthlyDigestVerifyMetadata, RestoreTestMetadata, SchedulerJobMetadata,
-    SiemForwardFailureMetadata, SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata,
-    SignatureKeyRetiredMetadata, VersionPurgeMetadata,
+    SecretAliasCreateMetadata, SecretAliasDeleteMetadata, SecretAliasListMetadata,
+    SecretAliasUpdateMetadata, SiemForwardFailureMetadata, SignatureKeyActivatedMetadata,
+    SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata, VersionPurgeMetadata,
 };
 
 use crate::types::{SecretId, SecretVersionId, SourceEventAt};
@@ -484,7 +485,7 @@ impl AuditMetadata {
             }
         }
 
-        validate_required_metadata_keys(action, object, true)?;
+        validate_required_metadata_keys(action, result, object, true)?;
         validate_metadata_values(action, result, object)?;
 
         Ok(())
@@ -493,6 +494,7 @@ impl AuditMetadata {
 
 fn validate_required_metadata_keys(
     action: AuditAction,
+    result: AuditResult,
     object: &Map<String, Value>,
     require_source_event_at: bool,
 ) -> Result<(), AuditEventError> {
@@ -567,23 +569,47 @@ fn validate_required_metadata_keys(
             "notification_result",
             "error_code",
         ],
-        AuditAction::SecretAliasCreate => vec![
-            "alias_fingerprint",
-            "alias_fingerprint_key_version",
-            "alias_fingerprint_schema_version",
-        ],
-        AuditAction::SecretAliasUpdate => vec![
-            "old_alias_fingerprint",
-            "new_alias_fingerprint",
-            "alias_fingerprint_key_version",
-            "alias_fingerprint_schema_version",
-        ],
-        AuditAction::SecretAliasDelete => vec![
-            "alias_fingerprint",
-            "alias_fingerprint_key_version",
-            "alias_fingerprint_schema_version",
-        ],
-        AuditAction::SecretAliasList => vec!["result_count"],
+        AuditAction::SecretAliasCreate => {
+            if result == AuditResult::Success {
+                vec![
+                    "alias_fingerprint",
+                    "alias_fingerprint_key_version",
+                    "alias_fingerprint_schema_version",
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        AuditAction::SecretAliasUpdate => {
+            if result == AuditResult::Success {
+                vec![
+                    "old_alias_fingerprint",
+                    "new_alias_fingerprint",
+                    "alias_fingerprint_key_version",
+                    "alias_fingerprint_schema_version",
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        AuditAction::SecretAliasDelete => {
+            if result == AuditResult::Success {
+                vec![
+                    "alias_fingerprint",
+                    "alias_fingerprint_key_version",
+                    "alias_fingerprint_schema_version",
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        AuditAction::SecretAliasList => {
+            if result == AuditResult::Success {
+                vec!["result_count"]
+            } else {
+                Vec::new()
+            }
+        }
     };
 
     if require_source_event_at {

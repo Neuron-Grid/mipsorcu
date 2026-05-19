@@ -229,6 +229,19 @@ select is(
     'create alias records success audit in the same transaction'
 );
 
+select ok(
+    (
+        select metadata_json ? 'alias_fingerprint'
+            and not (metadata_json ?| array['alias', 'alias_normalized', 'plain_text', 'plaintext'])
+        from public.audit_events
+        where action = 'secret_alias_create'
+            and result = 'success'
+            and target_secret_id = (select secret_id from secret_alias_rpc_fixtures)
+        limit 1
+    ),
+    'create alias audit records fingerprint but no plaintext alias metadata'
+);
+
 select is(
     test_helpers.try_create_secret_alias(
         '00000000-0000-4000-8000-000000000302',
@@ -481,6 +494,20 @@ select is(
     'update alias records success audit'
 );
 
+select ok(
+    (
+        select metadata_json ? 'old_alias_fingerprint'
+            and metadata_json ? 'new_alias_fingerprint'
+            and not (metadata_json ?| array['alias', 'alias_normalized', 'plain_text', 'plaintext'])
+        from public.audit_events
+        where action = 'secret_alias_update'
+            and result = 'success'
+            and target_secret_id = (select secret_id from secret_alias_rpc_fixtures)
+        limit 1
+    ),
+    'update alias audit records fingerprints but no plaintext alias metadata'
+);
+
 select is(
     (
         select encode(alias_fingerprint, 'hex')
@@ -565,6 +592,19 @@ select is(
     ),
     1,
     'delete alias records success audit'
+);
+
+select ok(
+    (
+        select metadata_json ? 'alias_fingerprint'
+            and not (metadata_json ?| array['alias', 'alias_normalized', 'plain_text', 'plaintext'])
+        from public.audit_events
+        where action = 'secret_alias_delete'
+            and result = 'success'
+            and target_secret_id = (select secret_id from secret_alias_rpc_fixtures)
+        limit 1
+    ),
+    'delete alias audit records fingerprint but no plaintext alias metadata'
 );
 
 select is(

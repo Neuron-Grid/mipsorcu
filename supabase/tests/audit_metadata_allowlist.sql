@@ -1410,6 +1410,65 @@ select is(
 
 select is(
     test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001208',
+        '00000000-0000-4000-8000-000000001208',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_create',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        null,
+        jsonb_build_object(
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'secret_alias_create failure accepts source_event_at-only metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001209',
+        '00000000-0000-4000-8000-000000001209',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_update',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'failure',
+        null,
+        jsonb_build_object(
+            'error_code', 'upstream_dependency_failed',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'secret_alias_update failure accepts safe error_code metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001210',
+        '00000000-0000-4000-8000-000000001210',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_create',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'alias_fingerprint', repeat('aa', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'error_code', 'should_only_appear_on_failure',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'secret_alias_create success rejects error_code'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
         '10000000-0000-4000-8000-000000001204',
         '00000000-0000-4000-8000-000000001204',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
@@ -1470,6 +1529,27 @@ select is(
     ),
     'invalid_rpc_input',
     'secret_alias_delete rejects invalid fingerprint length'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001211',
+        '00000000-0000-4000-8000-000000001211',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_delete',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'alias_fingerprint', repeat('AA', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'secret_alias_delete rejects uppercase fingerprint hex'
 );
 
 select is(

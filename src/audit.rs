@@ -12,8 +12,10 @@ pub use event::{
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, IncidentDetectedMetadata, IntegrityCheckMetadata,
     KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
     MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RequestId, RestoreTestMetadata,
-    SchedulerJobMetadata, SiemForwardFailureMetadata, SignatureKeyActivatedMetadata,
-    SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata, VersionPurgeMetadata,
+    SchedulerJobMetadata, SecretAliasCreateMetadata, SecretAliasDeleteMetadata,
+    SecretAliasListMetadata, SecretAliasUpdateMetadata, SiemForwardFailureMetadata,
+    SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata,
+    VersionPurgeMetadata,
 };
 pub use fallback::{
     ArchiveSweepOutcome, LocalAuditFallbackStore, RolloverArchive, RolloverOutcome, SweptArchive,
