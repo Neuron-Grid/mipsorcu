@@ -9,7 +9,7 @@ use crate::server::state::AppState;
 use crate::server::use_cases::secret_alias::{self, CreateSecretAliasCommand};
 
 use super::parsing::{
-    ParsedCreateSecretAliasRequest, parse_create_secret_alias_request, parse_secret_ref,
+    ParsedCreateSecretAliasRequest, parse_create_secret_alias_request, parse_secret_id,
 };
 
 pub async fn create_secret_alias(
@@ -21,11 +21,11 @@ pub async fn create_secret_alias(
 ) -> ServerResult<(StatusCode, Json<CreateSecretAliasResponse>)> {
     let request_id = request_context.into_request_id();
 
-    let requested_secret_ref =
-        parse_secret_ref(&secret_ref).map_err(|error| error.with_request_id(&request_id))?;
+    let secret_id =
+        parse_secret_id(&secret_ref).map_err(|error| error.with_request_id(&request_id))?;
     let request = parse_create_secret_alias_request(body)
         .map_err(|error| error.with_request_id(&request_id))?;
-    let command = create_secret_alias_command(requested_secret_ref, request);
+    let command = create_secret_alias_command(secret_id, request);
     let output = secret_alias::create_secret_alias(
         &state,
         &request_id,
@@ -39,16 +39,15 @@ pub async fn create_secret_alias(
     Ok((
         StatusCode::CREATED,
         Json(CreateSecretAliasResponse {
+            secret_alias_id: output.secret_alias_id().as_canonical_string(),
             secret_id: output.secret_id().as_canonical_string(),
-            alias: output.alias().as_str().to_owned(),
-            alias_normalized: output.alias_normalized().as_str().to_owned(),
         }),
     ))
 }
 
 fn create_secret_alias_command(
-    requested_secret_ref: crate::SecretRef,
+    secret_id: crate::SecretId,
     request: ParsedCreateSecretAliasRequest,
 ) -> CreateSecretAliasCommand {
-    CreateSecretAliasCommand::new(requested_secret_ref, request.alias)
+    CreateSecretAliasCommand::new(secret_id, request.alias)
 }

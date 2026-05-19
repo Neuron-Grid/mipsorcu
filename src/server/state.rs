@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use time::OffsetDateTime;
 
-use crate::MasterKeyRing;
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::JwtVerifier;
 use crate::incident::{DummyNotificationSink, IncidentRecorder};
 use crate::siem::InMemorySiemSink;
+use crate::{AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MasterKeyRing};
 
 use super::ledger_appender::LedgerAppender;
 use super::siem_forwarding::SiemForwardingService;
@@ -16,6 +16,10 @@ use super::supabase::{SupabaseAuditAppender, SupabaseClient};
 #[derive(Clone)]
 pub struct AppState {
     pub master_key_ring: Arc<MasterKeyRing>,
+    pub alias_encryption_key: Arc<AliasEncryptionKey>,
+    pub alias_encryption_key_version: KeyVersion,
+    pub alias_fingerprint_key: Arc<AliasFingerprintKey>,
+    pub alias_fingerprint_key_version: KeyVersion,
     pub jwt_verifier: Arc<JwtVerifier>,
     pub supabase_client: Arc<SupabaseClient>,
     pub audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,

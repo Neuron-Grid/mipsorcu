@@ -241,6 +241,10 @@ async fn run_server_with_config(config: config::AppConfig) {
 
     let state = AppState {
         master_key_ring: Arc::new(config.master_key_ring),
+        alias_encryption_key: Arc::new(config.alias_encryption_key),
+        alias_encryption_key_version: config.alias_encryption_key_version,
+        alias_fingerprint_key: Arc::new(config.alias_fingerprint_key),
+        alias_fingerprint_key_version: config.alias_fingerprint_key_version,
         jwt_verifier,
         supabase_client,
         audit_recorder,

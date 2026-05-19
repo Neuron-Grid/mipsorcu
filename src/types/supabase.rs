@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::ledger::{
     LedgerChainHead, LedgerEntryId, LedgerHash, LedgerSequenceNo, SignedLedgerEntry,
 };
-use crate::{AliasNormalized, KeyVersion, SecretAlias, SecretId, SecretVersion, SecretVersionId};
+use crate::{KeyVersion, SecretId, SecretVersion, SecretVersionId};
 
 #[derive(Deserialize)]
 pub struct SecretVersionReadRow {
@@ -31,43 +31,28 @@ pub struct SecretReadJoin {
 }
 
 #[derive(Deserialize)]
-pub struct SecretAliasReadRow {
+pub struct SecretAliasListRow {
+    pub id: String,
     pub secret_id: String,
-    pub owner_user_id: String,
-    pub alias_normalized: String,
+    pub alias_ciphertext: String,
+    pub alias_nonce: String,
+    pub alias_key_version: i32,
+    pub alias_fingerprint: String,
+    pub alias_fingerprint_key_version: i32,
+    pub alias_fingerprint_schema_version: i32,
+    pub aad_context: Value,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateSecretAliasOutcome {
-    secret_id: SecretId,
-    alias: SecretAlias,
-    alias_normalized: AliasNormalized,
-}
-
-impl CreateSecretAliasOutcome {
-    pub(crate) fn new(
-        secret_id: SecretId,
-        alias: SecretAlias,
-        alias_normalized: AliasNormalized,
-    ) -> Self {
-        Self {
-            secret_id,
-            alias,
-            alias_normalized,
-        }
-    }
-
-    pub fn secret_id(&self) -> &SecretId {
-        &self.secret_id
-    }
-
-    pub fn alias(&self) -> &SecretAlias {
-        &self.alias
-    }
-
-    pub fn alias_normalized(&self) -> &AliasNormalized {
-        &self.alias_normalized
-    }
+#[derive(Deserialize)]
+pub struct SecretAliasResolveRow {
+    pub id: String,
+    pub secret_id: String,
+    pub alias_ciphertext: String,
+    pub alias_nonce: String,
+    pub alias_key_version: i32,
+    pub aad_context: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

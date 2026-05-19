@@ -68,7 +68,7 @@ impl ApiError {
             Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
-            Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            Self::Conflict(_) => (StatusCode::CONFLICT, "alias_conflict"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::UnsupportedMediaType(_) => {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")

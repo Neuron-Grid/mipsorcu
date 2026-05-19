@@ -73,7 +73,8 @@ pub(in crate::server) async fn rotate_secret(
 ) -> Result<WriteSecretVersionOutput, ApiError> {
     let actor_user_id = claims.subject_user_id().clone();
     let requested_secret_id =
-        match resolve_secret_ref(state, command.requested_secret_ref.clone(), raw_jwt).await {
+        match resolve_secret_ref(state, command.requested_secret_ref.clone(), &actor_user_id).await
+        {
             Ok(secret_id) => secret_id,
             Err(error) => {
                 let failure = FailureAuditContext::new(

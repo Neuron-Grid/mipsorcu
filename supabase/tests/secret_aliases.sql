@@ -276,6 +276,15 @@ select ok(
     'service_role can execute encrypted resolve RPC'
 );
 
+select ok(
+    has_function_privilege(
+        'service_role',
+        'public.rpc_get_secret_alias_for_update(uuid, uuid)',
+        'execute'
+    ),
+    'service_role can execute alias update context RPC'
+);
+
 select is(
     (
         select exists (
@@ -286,11 +295,13 @@ select is(
                 ('authenticated', 'public.rpc_delete_secret_alias(uuid, uuid, uuid, text)'),
                 ('authenticated', 'public.rpc_list_secret_aliases(uuid, uuid, integer, integer)'),
                 ('authenticated', 'public.rpc_resolve_secret_alias(uuid, bytea)'),
+                ('authenticated', 'public.rpc_get_secret_alias_for_update(uuid, uuid)'),
                 ('anon', 'public.rpc_create_secret_alias(uuid, uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, timestamptz, text)'),
                 ('anon', 'public.rpc_update_secret_alias(uuid, uuid, uuid, bytea, bytea, integer, bytea, integer, integer, jsonb, text)'),
                 ('anon', 'public.rpc_delete_secret_alias(uuid, uuid, uuid, text)'),
                 ('anon', 'public.rpc_list_secret_aliases(uuid, uuid, integer, integer)'),
-                ('anon', 'public.rpc_resolve_secret_alias(uuid, bytea)')
+                ('anon', 'public.rpc_resolve_secret_alias(uuid, bytea)'),
+                ('anon', 'public.rpc_get_secret_alias_for_update(uuid, uuid)')
             ) as function_privileges(role_name, signature)
             where has_function_privilege(
                 function_privileges.role_name,

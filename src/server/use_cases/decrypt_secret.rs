@@ -39,20 +39,21 @@ pub(in crate::server) async fn decrypt_secret(
     claims: VerifiedJwtClaims,
 ) -> Result<DecryptSecretOutput, ApiError> {
     let actor_user_id = claims.subject_user_id().clone();
-    let requested_secret_id = match resolve_secret_ref(state, requested_secret_ref, raw_jwt).await {
-        Ok(secret_id) => secret_id,
-        Err(error) => {
-            let failure = FailureAuditContext::new(
-                state,
-                request_id,
-                Some(&actor_user_id),
-                None,
-                AuditAction::Decrypt,
-            );
-            record_secret_ref_resolution_failure(&failure, &error).await;
-            return Err(ApiError::from(error));
-        }
-    };
+    let requested_secret_id =
+        match resolve_secret_ref(state, requested_secret_ref, &actor_user_id).await {
+            Ok(secret_id) => secret_id,
+            Err(error) => {
+                let failure = FailureAuditContext::new(
+                    state,
+                    request_id,
+                    Some(&actor_user_id),
+                    None,
+                    AuditAction::Decrypt,
+                );
+                record_secret_ref_resolution_failure(&failure, &error).await;
+                return Err(ApiError::from(error));
+            }
+        };
     let failure = FailureAuditContext::new(
         state,
         request_id,

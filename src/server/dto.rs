@@ -37,9 +37,8 @@ pub struct RotateSecretResponse {
 
 #[derive(Serialize)]
 pub struct CreateSecretAliasResponse {
+    pub secret_alias_id: String,
     pub secret_id: String,
-    pub alias: String,
-    pub alias_normalized: String,
 }
 
 #[derive(Serialize)]

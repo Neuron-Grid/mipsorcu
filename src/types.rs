@@ -4,8 +4,8 @@ pub mod supabase;
 mod time;
 
 pub use ids::{
-    AliasFingerprintSchemaVersion, AliasNormalized, Classification, DeviceId, KeyVersion,
-    OwnerUserId, SecretAlias, SecretAliasId, SecretId, SecretRef, SecretVersion, SecretVersionId,
+    AliasFingerprintSchemaVersion, Classification, DeviceId, KeyVersion, OwnerUserId,
+    SecretAliasId, SecretId, SecretRef, SecretVersion, SecretVersionId,
 };
 pub use secret_material::{
     AliasEncryptionKey, AliasFingerprintKey, Ciphertext, DATA_KEY_LENGTH, DataKey,

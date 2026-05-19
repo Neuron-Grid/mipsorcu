@@ -18,10 +18,11 @@ use mipsorcu::server::siem_forwarding::SiemForwardingService;
 use mipsorcu::server::state::{AppState, ReadinessState};
 use mipsorcu::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use mipsorcu::{
-    AuditRecorder, InMemorySiemSink, Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion,
-    LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
-    LocalAuditFallbackStore, LocalSiemFallbackBuffer, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing,
-    RawJwt, RequestId, SiemForwarder, SourceEventAt, VerifiedJwtClaims,
+    AliasEncryptionKey, AliasFingerprintKey, AuditRecorder, InMemorySiemSink, Jwk, Jwks,
+    JwtVerifier, JwtVerifierConfig, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
+    LedgerSignatureKeyVersion, LedgerSigningKey, LocalAuditFallbackStore, LocalSiemFallbackBuffer,
+    MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, RawJwt, RequestId, SiemForwarder, SourceEventAt,
+    VerifiedJwtClaims,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -304,6 +305,10 @@ fn test_app_state_with_fallback(
             KeyVersion::new(1)?,
             MasterKey::from_bytes([42u8; MASTER_KEY_LENGTH]),
         )?),
+        alias_encryption_key: Arc::new(AliasEncryptionKey::from_bytes([11u8; MASTER_KEY_LENGTH])),
+        alias_encryption_key_version: KeyVersion::new(1)?,
+        alias_fingerprint_key: Arc::new(AliasFingerprintKey::from_bytes([12u8; MASTER_KEY_LENGTH])),
+        alias_fingerprint_key_version: KeyVersion::new(1)?,
         jwt_verifier: Arc::new(test_jwt_verifier()?),
         supabase_client,
         audit_recorder,

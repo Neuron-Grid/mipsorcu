@@ -6,16 +6,19 @@ use std::sync::mpsc;
 use std::thread;
 
 use mipsorcu::server::supabase::{
-    IntegrityCheckViolationSummary, LedgerAppendRpcFailure, RegisterPublicKeyError,
-    SupabaseAuditAppender, SupabaseClient, SupabaseRpcError, classify_append_ledger_error,
-    classify_register_public_key_error,
+    CreateSecretAliasParams, DeleteSecretAliasParams, IntegrityCheckViolationSummary,
+    LedgerAppendRpcFailure, ListSecretAliasesParams, RegisterPublicKeyError, SecretAliasRpcError,
+    SupabaseAuditAppender, SupabaseClient, SupabaseRpcError, UpdateSecretAliasParams,
+    classify_append_ledger_error, classify_register_public_key_error,
+    classify_secret_alias_rpc_error,
 };
 use mipsorcu::{
-    AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventId, AuditEventParts,
-    AuditMetadata, AuditResult, DeviceId, KeyVersion, LedgerChainHead, LedgerEntryDraft,
-    LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType, LedgerHash, LedgerPayload, LedgerResult,
-    LedgerSequenceNo, LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
-    OwnerUserId, RawJwt, RequestId, SecretAlias, SecretId, SourceEventAt,
+    AliasFingerprint, AuditAction, AuditAppendError, AuditEvent, AuditEventAppender, AuditEventId,
+    AuditEventParts, AuditMetadata, AuditResult, DeviceId, KeyVersion, LedgerChainHead,
+    LedgerEntryDraft, LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType, LedgerHash,
+    LedgerPayload, LedgerResult, LedgerSequenceNo, LedgerSignatureKeyVersion, LedgerSigningKey,
+    LedgerTargetSecretVersionId, OwnerUserId, RawJwt, RequestId, SecretAliasId, SecretId,
+    SourceEventAt,
 };
 use serde_json::{Value, json};
 
@@ -39,6 +42,29 @@ const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const TARGET_SECRET_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 const DEVICE_ID: &str = "sbc-device-1";
 const SOURCE_EVENT_AT: &str = "2026-04-08T12:00:00Z";
+
+fn sample_update_alias_params() -> UpdateSecretAliasParams {
+    UpdateSecretAliasParams {
+        p_request_id: REQUEST_ID.to_owned(),
+        p_secret_alias_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
+        p_owner_user_id: OWNER_USER_ID.to_owned(),
+        p_alias_ciphertext: "\\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        p_alias_nonce: "\\xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        p_alias_key_version: 1,
+        p_new_alias_fingerprint:
+            "\\xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+        p_alias_fingerprint_key_version: 1,
+        p_alias_fingerprint_schema_version: 1,
+        p_aad_context: json!({
+            "aad_version": 1,
+            "alias_key_version": 1,
+            "owner_user_id": OWNER_USER_ID,
+            "secret_alias_id": "750e8400-e29b-41d4-a716-446655440000",
+            "secret_id": TARGET_SECRET_ID,
+        }),
+        p_source_event_at: SOURCE_EVENT_AT.to_owned(),
+    }
+}
 
 #[test]
 fn supabase_error_display_does_not_expose_response_body() {
@@ -204,7 +230,7 @@ async fn current_secret_version_read_uses_expected_columns_and_publishable_auth(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn secret_alias_resolution_uses_publishable_auth_and_rls_read() {
+async fn secret_alias_resolution_uses_service_role_rpc_and_fingerprint() {
     let (base_url, receiver, server_thread) =
         spawn_capture_server(200, "[]").expect("capture server should start");
     let client = SupabaseClient::new(
@@ -213,12 +239,11 @@ async fn secret_alias_resolution_uses_publishable_auth_and_rls_read() {
         "service-role-secret",
         "publishable-key",
     );
-    let alias_normalized =
-        mipsorcu::AliasNormalized::new("Prod.API_1").expect("alias should normalize");
-    let raw_jwt = RawJwt::new("sample-user-jwt").expect("raw jwt must be valid");
+    let owner_user_id = OwnerUserId::parse(OWNER_USER_ID).expect("owner id must be valid");
+    let fingerprint = AliasFingerprint::from_bytes([1u8; 32]);
 
     let rows = client
-        .resolve_secret_alias_for_user(&alias_normalized, &raw_jwt)
+        .call_resolve_secret_alias(&owner_user_id, &fingerprint)
         .await
         .expect("alias read should succeed");
     let request = receiver
@@ -229,34 +254,36 @@ async fn secret_alias_resolution_uses_publishable_auth_and_rls_read() {
         .expect("capture server thread should not panic");
     join_result.expect("capture server should exit cleanly");
 
-    assert!(rows.is_empty());
-    assert_eq!(request.method, "GET");
-    assert_eq!(
-        request.path,
-        "/rest/v1/secret_aliases?select=secret_id,owner_user_id,alias_normalized&alias_normalized=eq.prod.api_1"
-    );
+    assert!(rows.is_none());
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_resolve_secret_alias");
     assert_eq!(
         request.headers.get("authorization"),
-        Some(&"Bearer sample-user-jwt".to_owned())
+        Some(&"Bearer service-role-secret".to_owned())
     );
     assert_eq!(
         request.headers.get("apikey"),
-        Some(&"publishable-key".to_owned())
+        Some(&"service-role-secret".to_owned())
     );
     assert!(
         !request
             .headers
             .values()
-            .any(|value| value.contains("service-role-secret"))
+            .any(|value| value.contains("publishable-key"))
+    );
+
+    let body: Value = serde_json::from_str(&request.body).expect("request body should be JSON");
+    assert_eq!(body["p_owner_user_id"], OWNER_USER_ID);
+    assert_eq!(
+        body["p_alias_fingerprint"],
+        "\\x0101010101010101010101010101010101010101010101010101010101010101"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn create_secret_alias_uses_service_role_rpc_and_parses_response() {
     let response_body = serde_json::to_string(&json!([{
-        "secret_id": TARGET_SECRET_ID,
-        "alias": "Prod.API_1",
-        "alias_normalized": "prod.api_1",
+        "secret_alias_id": "750e8400-e29b-41d4-a716-446655440000",
     }]))
     .expect("alias response should serialize");
     let (base_url, receiver, server_thread) =
@@ -267,12 +294,31 @@ async fn create_secret_alias_uses_service_role_rpc_and_parses_response() {
         "service-role-secret",
         "publishable-key",
     );
-    let secret_id = SecretId::parse(TARGET_SECRET_ID).expect("secret id must be valid");
-    let owner_user_id = OwnerUserId::parse(OWNER_USER_ID).expect("owner id must be valid");
-    let alias = SecretAlias::new("Prod.API_1").expect("alias must be valid");
+    let params = CreateSecretAliasParams {
+        p_request_id: REQUEST_ID.to_owned(),
+        p_secret_alias_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
+        p_secret_id: TARGET_SECRET_ID.to_owned(),
+        p_owner_user_id: OWNER_USER_ID.to_owned(),
+        p_alias_ciphertext: "\\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        p_alias_nonce: "\\xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        p_alias_key_version: 1,
+        p_alias_fingerprint: "\\xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_owned(),
+        p_alias_fingerprint_key_version: 1,
+        p_alias_fingerprint_schema_version: 1,
+        p_aad_context: json!({
+            "aad_version": 1,
+            "alias_key_version": 1,
+            "owner_user_id": OWNER_USER_ID,
+            "secret_alias_id": "750e8400-e29b-41d4-a716-446655440000",
+            "secret_id": TARGET_SECRET_ID,
+        }),
+        p_created_at: "2026-04-08T12:00:00Z".to_owned(),
+        p_source_event_at: SOURCE_EVENT_AT.to_owned(),
+    };
 
     let outcome = client
-        .call_create_secret_alias(&secret_id, &owner_user_id, &alias)
+        .call_create_secret_alias(&params)
         .await
         .expect("create alias RPC should succeed");
     let request = receiver
@@ -283,9 +329,10 @@ async fn create_secret_alias_uses_service_role_rpc_and_parses_response() {
         .expect("capture server thread should not panic");
     join_result.expect("capture server should exit cleanly");
 
-    assert_eq!(outcome.secret_id().as_canonical_string(), TARGET_SECRET_ID);
-    assert_eq!(outcome.alias().as_str(), "Prod.API_1");
-    assert_eq!(outcome.alias_normalized().as_str(), "prod.api_1");
+    assert_eq!(
+        outcome.as_canonical_string(),
+        "750e8400-e29b-41d4-a716-446655440000"
+    );
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/rest/v1/rpc/rpc_create_secret_alias");
     assert_eq!(
@@ -298,23 +345,258 @@ async fn create_secret_alias_uses_service_role_rpc_and_parses_response() {
     );
 
     let body: Value = serde_json::from_str(&request.body).expect("request body should be JSON");
+    assert_eq!(
+        body["p_secret_alias_id"],
+        "750e8400-e29b-41d4-a716-446655440000"
+    );
     assert_eq!(body["p_secret_id"], TARGET_SECRET_ID);
     assert_eq!(body["p_owner_user_id"], OWNER_USER_ID);
-    assert_eq!(body["p_alias"], "Prod.API_1");
-    assert_eq!(body["p_alias_normalized"], "prod.api_1");
+    assert_eq!(
+        body["p_alias_ciphertext"],
+        "\\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(
+        body["p_alias_nonce"],
+        "\\xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+    assert_eq!(
+        body["p_alias_fingerprint"],
+        "\\xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    );
+    assert_eq!(body["p_source_event_at"], SOURCE_EVENT_AT);
+    assert!(body.get("p_alias").is_none());
+    assert!(body.get("p_alias_normalized").is_none());
+    assert!(!request.body.contains("Prod.API_1"));
 }
 
 #[test]
 fn classify_create_secret_alias_error_maps_duplicate_marker() {
     let error = SupabaseRpcError::NonSuccessStatus {
         status: 409,
-        body: r#"{"message":"secret_alias_duplicate"}"#.to_owned(),
+        body: r#"{"message":"alias_conflict"}"#.to_owned(),
     };
 
     assert_eq!(
-        mipsorcu::server::supabase::classify_create_secret_alias_error(&error),
-        mipsorcu::server::supabase::CreateSecretAliasRpcError::Duplicate
+        classify_secret_alias_rpc_error(&error),
+        SecretAliasRpcError::AliasConflict
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn update_secret_alias_uses_service_role_rpc_and_decodes_bytea() {
+    let response_body = serde_json::to_string(&json!([{
+        "old_alias_fingerprint":
+            "\\x1111111111111111111111111111111111111111111111111111111111111111",
+    }]))
+    .expect("update response should serialize");
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+    let params = sample_update_alias_params();
+
+    let fingerprint = client
+        .call_update_secret_alias(&params)
+        .await
+        .expect("update alias RPC should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert_eq!(fingerprint.as_bytes(), &[0x11u8; 32]);
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_update_secret_alias");
+    assert_eq!(
+        request.headers.get("authorization"),
+        Some(&"Bearer service-role-secret".to_owned())
+    );
+    let body: Value = serde_json::from_str(&request.body).expect("request body should be JSON");
+    assert_eq!(
+        body["p_secret_alias_id"],
+        "750e8400-e29b-41d4-a716-446655440000"
+    );
+    assert_eq!(
+        body["p_new_alias_fingerprint"],
+        "\\xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    );
+    assert_eq!(body["p_source_event_at"], SOURCE_EVENT_AT);
+    assert!(body.get("p_alias").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delete_secret_alias_uses_service_role_rpc_and_decodes_bytea() {
+    let response_body = serde_json::to_string(&json!([{
+        "alias_fingerprint":
+            "\\x2222222222222222222222222222222222222222222222222222222222222222",
+    }]))
+    .expect("delete response should serialize");
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+    let params = DeleteSecretAliasParams {
+        p_request_id: REQUEST_ID.to_owned(),
+        p_secret_alias_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
+        p_owner_user_id: OWNER_USER_ID.to_owned(),
+        p_source_event_at: SOURCE_EVENT_AT.to_owned(),
+    };
+
+    let fingerprint = client
+        .call_delete_secret_alias(&params)
+        .await
+        .expect("delete alias RPC should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert_eq!(fingerprint.as_bytes(), &[0x22u8; 32]);
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_delete_secret_alias");
+    let body: Value = serde_json::from_str(&request.body).expect("request body should be JSON");
+    assert_eq!(body["p_owner_user_id"], OWNER_USER_ID);
+    assert_eq!(body["p_source_event_at"], SOURCE_EVENT_AT);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn list_secret_aliases_uses_service_role_rpc_and_parses_rows() {
+    let response_body = serde_json::to_string(&json!([{
+        "id": "750e8400-e29b-41d4-a716-446655440000",
+        "secret_id": TARGET_SECRET_ID,
+        "alias_ciphertext": "\\xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "alias_nonce": "\\xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "alias_key_version": 1,
+        "alias_fingerprint":
+            "\\xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "alias_fingerprint_key_version": 1,
+        "alias_fingerprint_schema_version": 1,
+        "aad_context": {
+            "aad_version": 1,
+            "alias_key_version": 1,
+            "owner_user_id": OWNER_USER_ID,
+            "secret_alias_id": "750e8400-e29b-41d4-a716-446655440000",
+            "secret_id": TARGET_SECRET_ID
+        },
+        "created_at": "2026-04-08T12:00:00Z",
+        "updated_at": "2026-04-08T12:01:00Z"
+    }]))
+    .expect("list response should serialize");
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+    let params = ListSecretAliasesParams {
+        p_request_id: REQUEST_ID.to_owned(),
+        p_owner_user_id: OWNER_USER_ID.to_owned(),
+        p_limit: 100,
+        p_offset: 0,
+    };
+
+    let rows = client
+        .call_list_secret_aliases(&params)
+        .await
+        .expect("list alias RPC should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "750e8400-e29b-41d4-a716-446655440000");
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_list_secret_aliases");
+    let body: Value = serde_json::from_str(&request.body).expect("request body should be JSON");
+    assert_eq!(body["p_limit"], 100);
+    assert_eq!(body["p_offset"], 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_secret_alias_for_update_uses_service_role_rpc() {
+    let response_body = serde_json::to_string(&json!([{
+        "secret_id": TARGET_SECRET_ID,
+    }]))
+    .expect("lookup response should serialize");
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+    let owner_user_id = OwnerUserId::parse(OWNER_USER_ID).expect("owner id must be valid");
+    let secret_alias_id = SecretAliasId::parse("750e8400-e29b-41d4-a716-446655440000")
+        .expect("alias id must be valid");
+
+    let secret_id = client
+        .call_get_secret_alias_for_update(&owner_user_id, &secret_alias_id)
+        .await
+        .expect("lookup alias update context RPC should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert_eq!(secret_id.as_canonical_string(), TARGET_SECRET_ID);
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/rest/v1/rpc/rpc_get_secret_alias_for_update");
+    let body: Value = serde_json::from_str(&request.body).expect("request body should be JSON");
+    assert_eq!(body["p_owner_user_id"], OWNER_USER_ID);
+    assert_eq!(
+        body["p_secret_alias_id"],
+        "750e8400-e29b-41d4-a716-446655440000"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn alias_rpc_bytea_response_requires_hex_prefix() {
+    let response_body = serde_json::to_string(&json!([{
+        "old_alias_fingerprint": "11111111111111111111111111111111",
+    }]))
+    .expect("invalid update response should serialize");
+    let (base_url, _receiver, server_thread) =
+        spawn_capture_server(200, &response_body).expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+
+    let result = client
+        .call_update_secret_alias(&sample_update_alias_params())
+        .await;
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert!(matches!(result, Err(SupabaseRpcError::InvalidResponse(_))));
 }
 
 #[tokio::test(flavor = "current_thread")]

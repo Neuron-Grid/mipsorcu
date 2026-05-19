@@ -50,37 +50,34 @@ fn create_secret_alias_request_rejects_unknown_fields() {
 #[test]
 fn create_secret_alias_response_serializes_public_contract() {
     let response = CreateSecretAliasResponse {
+        secret_alias_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
         secret_id: SECRET_ID.to_owned(),
-        alias: "Prod.API_1".to_owned(),
-        alias_normalized: "prod.api_1".to_owned(),
     };
 
     let value = serde_json::to_value(response).expect("response should serialize");
 
-    assert_eq!(value["secret_id"], Value::String(SECRET_ID.to_owned()));
-    assert_eq!(value["alias"], Value::String("Prod.API_1".to_owned()));
     assert_eq!(
-        value["alias_normalized"],
-        Value::String("prod.api_1".to_owned())
+        value["secret_alias_id"],
+        Value::String("750e8400-e29b-41d4-a716-446655440000".to_owned())
     );
+    assert_eq!(value["secret_id"], Value::String(SECRET_ID.to_owned()));
+    assert!(value.get("alias").is_none());
+    assert!(value.get("alias_normalized").is_none());
 }
 
 #[test]
-fn secret_alias_validation_normalizes_and_rejects_uuid_values() {
-    let alias = mipsorcu::SecretAlias::new("  Prod.API_1  ").expect("alias should parse");
-    let normalized = alias.normalized();
-    assert_eq!(alias.as_str(), "Prod.API_1");
-    assert_eq!(normalized.as_str(), "prod.api_1");
+fn normalized_alias_validation_trims_and_rejects_invalid_values() {
+    let alias = mipsorcu::NormalizedAlias::parse("  Prod_API-1  ").expect("alias should parse");
+    assert_eq!(alias.as_str(), "Prod_API-1");
 
-    assert!(mipsorcu::SecretAlias::new("bad alias").is_err());
-    assert!(mipsorcu::SecretAlias::new(&"a".repeat(129)).is_err());
-    assert!(mipsorcu::SecretAlias::new(SECRET_ID).is_err());
+    assert!(mipsorcu::NormalizedAlias::parse("bad alias").is_err());
+    assert!(mipsorcu::NormalizedAlias::parse(&"a".repeat(129)).is_err());
 }
 
 #[test]
 fn secret_ref_preserves_uuid_path_and_accepts_alias_path() {
     let by_id = mipsorcu::SecretRef::parse(SECRET_ID).expect("uuid secret ref should parse");
-    let by_alias = mipsorcu::SecretRef::parse("Prod.API_1").expect("alias secret ref should parse");
+    let by_alias = mipsorcu::SecretRef::parse("Prod_API-1").expect("alias secret ref should parse");
 
     match by_id {
         mipsorcu::SecretRef::Id(secret_id) => {
@@ -90,8 +87,8 @@ fn secret_ref_preserves_uuid_path_and_accepts_alias_path() {
     }
 
     match by_alias {
-        mipsorcu::SecretRef::Alias(alias_normalized) => {
-            assert_eq!(alias_normalized.as_str(), "prod.api_1");
+        mipsorcu::SecretRef::Alias(alias) => {
+            assert_eq!(alias.as_str(), "Prod_API-1");
         }
         mipsorcu::SecretRef::Id(_) => panic!("alias secret_ref must stay an alias"),
     }
@@ -99,9 +96,9 @@ fn secret_ref_preserves_uuid_path_and_accepts_alias_path() {
 
 #[test]
 fn alias_debug_does_not_expose_alias_value() {
-    let alias = mipsorcu::SecretAlias::new("prod-secret").expect("alias should parse");
+    let alias = mipsorcu::NormalizedAlias::parse("prod-secret").expect("alias should parse");
     let rendered = format!("{alias:?}");
 
-    assert!(rendered.contains("SecretAlias"));
+    assert!(rendered.contains("NormalizedAlias"));
     assert!(!rendered.contains("prod-secret"));
 }

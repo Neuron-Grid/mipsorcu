@@ -135,6 +135,27 @@ exception
 end;
 $$;
 
+create function test_helpers.try_get_secret_alias_for_update(
+    p_owner_user_id uuid,
+    p_secret_alias_id uuid
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_get_secret_alias_for_update(
+        p_owner_user_id,
+        p_secret_alias_id
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
 create temp table secret_alias_rpc_fixtures (
     owner_user_id uuid not null,
     other_user_id uuid not null,
@@ -499,6 +520,54 @@ select is(
     ),
     1,
     'list aliases returns encrypted alias rows for owner'
+);
+
+select is(
+    (
+        select secret_id::text
+        from public.rpc_get_secret_alias_for_update(
+            (select owner_user_id from secret_alias_rpc_fixtures),
+            (select alias_id from secret_alias_rpc_fixtures)
+        )
+    ),
+    (select secret_id::text from secret_alias_rpc_fixtures),
+    'get alias update context returns owner-scoped secret_id'
+);
+
+select is(
+    test_helpers.try_get_secret_alias_for_update(
+        (select other_user_id from secret_alias_rpc_fixtures),
+        (select alias_id from secret_alias_rpc_fixtures)
+    ),
+    'owner_mismatch',
+    'get alias update context rejects owner mismatch'
+);
+
+select is(
+    test_helpers.try_get_secret_alias_for_update(
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        '850e8400-e29b-41d4-a716-446655449999'
+    ),
+    'alias_not_found',
+    'get alias update context rejects missing alias'
+);
+
+select is(
+    test_helpers.try_get_secret_alias_for_update(
+        '550e8400-e29b-11d4-a716-446655440000',
+        (select alias_id from secret_alias_rpc_fixtures)
+    ),
+    'invalid_rpc_input',
+    'get alias update context rejects non-v4 owner uuid'
+);
+
+select is(
+    test_helpers.try_get_secret_alias_for_update(
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        '550e8400-e29b-11d4-a716-446655440000'
+    ),
+    'invalid_rpc_input',
+    'get alias update context rejects non-v4 alias uuid'
 );
 
 select is(

@@ -25,7 +25,9 @@ pub use aad::AadV1;
 pub use alias::{
     ALIAS_AAD_VERSION_V1, ALIAS_FINGERPRINT_LENGTH, ALIAS_FINGERPRINT_SCHEMA_VERSION_V1,
     ALIAS_MAX_LENGTH, AliasAadV1, AliasFingerprint, AliasInput, AliasInputError, EncryptedAlias,
-    NormalizedAlias, compute_alias_fingerprint, decrypt_alias, encrypt_alias,
+    NormalizedAlias, PreparedAliasCreate, PreparedAliasUpdate, compute_alias_fingerprint,
+    compute_lookup_fingerprint, decrypt_alias, decrypt_alias_row, encrypt_alias,
+    prepare_alias_create, prepare_alias_update,
 };
 pub use archive::{
     ARCHIVE_SCHEMA_VERSION, ArchiveBackend, ArchiveBackendError, ArchiveExportPackage,
@@ -112,12 +114,12 @@ pub use timestamping::{
     TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
 };
 pub use types::{
-    AliasEncryptionKey, AliasFingerprintKey, AliasFingerprintSchemaVersion, AliasNormalized,
-    Ciphertext, Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,
+    AliasEncryptionKey, AliasFingerprintKey, AliasFingerprintSchemaVersion, Ciphertext,
+    Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,
     ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH, ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_TAG_LENGTH,
     ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
-    NONCE_LENGTH, Nonce, OwnerUserId, Plaintext, SecretAlias, SecretAliasId, SecretId, SecretRef,
-    SecretVersion, SecretVersionId, SourceEventAt,
+    NONCE_LENGTH, Nonce, OwnerUserId, Plaintext, SecretAliasId, SecretId, SecretRef, SecretVersion,
+    SecretVersionId, SourceEventAt,
 };
 pub use write::{
     CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,

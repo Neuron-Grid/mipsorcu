@@ -5,12 +5,13 @@ use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionI
 use crate::server::errors::ApiError;
 use crate::server::state::AppState;
 use crate::server::supabase::SupabaseRpcError;
-use crate::types::supabase::{RestoreTestSampleRow, SecretAliasReadRow, SecretVersionReadRow};
+use crate::types::supabase::{RestoreTestSampleRow, SecretAliasResolveRow, SecretVersionReadRow};
 use crate::types::{
     Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
-    SecretId, SecretRef, SecretVersion, SecretVersionId,
+    SecretAliasId, SecretId, SecretRef, SecretVersion, SecretVersionId,
 };
 use crate::write::CurrentSecretVersionState;
+use crate::{compute_lookup_fingerprint, decrypt_alias_row};
 
 pub enum FetchCurrentSecretVersionError {
     Upstream(SupabaseRpcError),
@@ -149,49 +150,73 @@ pub async fn fetch_current_secret_version(
 pub async fn resolve_secret_ref(
     state: &AppState,
     secret_ref: SecretRef,
-    raw_jwt: &RawJwt,
+    owner_user_id: &OwnerUserId,
 ) -> Result<SecretId, ResolveSecretRefError> {
     match secret_ref {
         SecretRef::Id(secret_id) => Ok(secret_id),
-        SecretRef::Alias(alias_normalized) => {
-            let rows = state
+        SecretRef::Alias(alias) => {
+            let fingerprint =
+                compute_lookup_fingerprint(&state.alias_fingerprint_key, owner_user_id, &alias)
+                    .map_err(|error| {
+                        ResolveSecretRefError::Api(ApiError::InternalError(error.to_string()))
+                    })?;
+            let row = state
                 .supabase_client
-                .resolve_secret_alias_for_user(&alias_normalized, raw_jwt)
+                .call_resolve_secret_alias(owner_user_id, &fingerprint)
                 .await
-                .map_err(ResolveSecretRefError::Upstream)?;
+                .map_err(ResolveSecretRefError::Upstream)?
+                .ok_or_else(|| {
+                    ResolveSecretRefError::Api(ApiError::NotFound("secret not found".to_owned()))
+                })?;
 
-            select_single_secret_alias_row(rows)
-                .and_then(parse_secret_alias_row)
+            parse_resolved_secret_alias_row(state, owner_user_id.clone(), row, &alias)
                 .map_err(ResolveSecretRefError::Api)
         }
     }
 }
 
-fn select_single_secret_alias_row(
-    rows: Vec<SecretAliasReadRow>,
-) -> Result<SecretAliasReadRow, ApiError> {
-    match rows.len() {
-        0 => Err(ApiError::NotFound("secret not found".to_owned())),
-        1 => rows
-            .into_iter()
-            .next()
-            .ok_or_else(|| ApiError::InternalInvariantViolation("missing alias row".to_owned())),
-        count => Err(ApiError::DbIntegrityViolation(format!(
-            "expected one secret alias row, got {count}"
-        ))),
-    }
-}
-
-fn parse_secret_alias_row(row: SecretAliasReadRow) -> Result<SecretId, ApiError> {
-    OwnerUserId::parse(&row.owner_user_id).map_err(|_| {
-        ApiError::DbIntegrityViolation("secret alias owner_user_id is invalid".to_owned())
+fn parse_resolved_secret_alias_row(
+    state: &AppState,
+    owner_user_id: OwnerUserId,
+    row: SecretAliasResolveRow,
+    requested_alias: &crate::NormalizedAlias,
+) -> Result<SecretId, ApiError> {
+    let ciphertext = decode_bytea(&row.alias_ciphertext).map_err(|_| {
+        ApiError::DbIntegrityViolation("secret alias ciphertext is invalid".to_owned())
     })?;
+    let nonce = decode_bytea(&row.alias_nonce)
+        .map_err(|_| ApiError::DbIntegrityViolation("secret alias nonce is invalid".to_owned()))?;
+    let secret_alias_id = SecretAliasId::parse(&row.id)
+        .map_err(|_| ApiError::DbIntegrityViolation("secret alias id is invalid".to_owned()))?;
     let secret_id = SecretId::parse(&row.secret_id).map_err(|_| {
         ApiError::DbIntegrityViolation("secret alias secret_id is invalid".to_owned())
     })?;
-    let _alias_normalized = crate::AliasNormalized::new(&row.alias_normalized).map_err(|_| {
-        ApiError::DbIntegrityViolation("secret alias alias_normalized is invalid".to_owned())
+    let alias_key_version =
+        parse_key_version(row.alias_key_version, "secret alias key_version is invalid")?;
+    let ciphertext = Ciphertext::new(ciphertext).map_err(|_| {
+        ApiError::DbIntegrityViolation("secret alias ciphertext is invalid".to_owned())
     })?;
+    let nonce = Nonce::parse(&nonce)
+        .map_err(|_| ApiError::DbIntegrityViolation("secret alias nonce is invalid".to_owned()))?;
+    let decrypted = decrypt_alias_row(
+        &state.alias_encryption_key,
+        secret_alias_id,
+        secret_id.clone(),
+        owner_user_id,
+        alias_key_version,
+        &ciphertext,
+        &nonce,
+        &row.aad_context,
+    )
+    .map_err(|_| {
+        ApiError::DbIntegrityViolation("secret alias encrypted material is invalid".to_owned())
+    })?;
+
+    if decrypted.alias != *requested_alias {
+        return Err(ApiError::DbIntegrityViolation(
+            "resolved secret alias plaintext mismatch".to_owned(),
+        ));
+    }
 
     Ok(secret_id)
 }

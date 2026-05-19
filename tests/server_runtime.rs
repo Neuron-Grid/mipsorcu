@@ -21,11 +21,12 @@ use mipsorcu::server::supabase::{
     SupabaseAuditAppender, SupabaseClient,
 };
 use mipsorcu::{
-    AuditRecorder, AuditTrigger, Classification, CreatedAt, DeviceId, InMemorySiemSink, Jwk, Jwks,
-    JwksCache, JwtVerifier, JwtVerifierConfig, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
-    LedgerSignatureKeyVersion, LedgerSigningKey, LocalAuditFallbackStore, LocalSiemFallbackBuffer,
-    MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext,
-    RolloverOutcome, SiemForwarder, SourceEventAt, prepare_new_secret_version,
+    AliasEncryptionKey, AliasFingerprintKey, AuditRecorder, AuditTrigger, Classification,
+    CreatedAt, DeviceId, InMemorySiemSink, Jwk, Jwks, JwksCache, JwtVerifier, JwtVerifierConfig,
+    KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
+    LocalAuditFallbackStore, LocalSiemFallbackBuffer, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing,
+    NewSecretVersionInput, NormalizedAlias, OwnerUserId, Plaintext, RolloverOutcome, SecretId,
+    SiemForwarder, SourceEventAt, prepare_alias_create, prepare_new_secret_version,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -265,6 +266,31 @@ fn decrypt_row_json(plaintext: &[u8]) -> Result<(String, Value), Box<dyn std::er
     ))
 }
 
+fn alias_resolve_row_json(
+    secret_id: &str,
+    alias: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let prepared = prepare_alias_create(
+        &AliasEncryptionKey::from_bytes([11u8; MASTER_KEY_LENGTH]),
+        KeyVersion::new(1)?,
+        &AliasFingerprintKey::from_bytes([12u8; MASTER_KEY_LENGTH]),
+        KeyVersion::new(1)?,
+        SecretId::parse(secret_id)?,
+        OwnerUserId::parse(OWNER_USER_ID)?,
+        NormalizedAlias::parse(alias)?,
+        CreatedAt::parse(CREATED_AT)?,
+    )?;
+
+    Ok(json!([{
+        "id": prepared.secret_alias_id.as_canonical_string(),
+        "secret_id": prepared.secret_id.as_canonical_string(),
+        "alias_ciphertext": format!("\\x{}", hex::encode(prepared.ciphertext.as_bytes())),
+        "alias_nonce": format!("\\x{}", hex::encode(prepared.nonce.as_bytes())),
+        "alias_key_version": i32::try_from(prepared.alias_key_version.get())?,
+        "aad_context": prepared.aad_context,
+    }]))
+}
+
 fn set_first_decrypt_row_field(rows: &mut Value, field: &str, value: Value) {
     if let Some(row) = rows.as_array_mut().and_then(|array| array.first_mut()) {
         row[field] = value;
@@ -421,6 +447,10 @@ fn test_app_state(
             KeyVersion::new(1)?,
             sample_master_key(),
         )?),
+        alias_encryption_key: Arc::new(AliasEncryptionKey::from_bytes([11u8; MASTER_KEY_LENGTH])),
+        alias_encryption_key_version: KeyVersion::new(1)?,
+        alias_fingerprint_key: Arc::new(AliasFingerprintKey::from_bytes([12u8; MASTER_KEY_LENGTH])),
+        alias_fingerprint_key_version: KeyVersion::new(1)?,
         jwt_verifier: Arc::new(test_jwt_verifier()?),
         supabase_client,
         audit_recorder,
@@ -557,7 +587,9 @@ fn spawn_supabase_alias_read_and_audit_server(
         for _ in 0..4 {
             let (mut stream, _) = listener.accept()?;
             let request = read_http_request(&mut stream)?;
-            let is_alias_read = request.path.starts_with("/rest/v1/secret_aliases");
+            let is_alias_read = request
+                .path
+                .starts_with("/rest/v1/rpc/rpc_resolve_secret_alias");
             let is_secret_read = request.path.starts_with("/rest/v1/secret_versions");
             let is_ledger_chain_head = request.path.starts_with("/rest/v1/ledger_chain_state");
             let response_body = if audit_status == 200
@@ -2055,12 +2087,9 @@ async fn decrypt_endpoint_resolves_alias_without_putting_alias_in_audit_or_logs(
     let plaintext = b"router alias secret";
     let (secret_id, row_json) =
         decrypt_row_json(plaintext).expect("decrypt row JSON should be constructed");
-    let alias_body = json!([{
-        "secret_id": secret_id,
-        "owner_user_id": OWNER_USER_ID,
-        "alias_normalized": alias,
-    }])
-    .to_string();
+    let alias_body = alias_resolve_row_json(&secret_id, alias)
+        .expect("alias resolve row JSON should be constructed")
+        .to_string();
     let (supabase_url, receiver, server_thread) =
         spawn_supabase_alias_read_and_audit_server(alias_body, row_json.to_string(), 200, r#"[]"#)
             .expect("Supabase test server should start");
@@ -2100,7 +2129,11 @@ async fn decrypt_endpoint_resolves_alias_without_putting_alias_in_audit_or_logs(
     let audit_request = receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("audit and ledger append request should be captured");
-    assert!(alias_request.path.starts_with("/rest/v1/secret_aliases"));
+    assert!(
+        alias_request
+            .path
+            .starts_with("/rest/v1/rpc/rpc_resolve_secret_alias")
+    );
     assert!(read_request.path.starts_with("/rest/v1/secret_versions"));
     assert!(
         chain_request
@@ -2133,13 +2166,11 @@ async fn decrypt_endpoint_resolves_alias_without_putting_alias_in_audit_or_logs(
 
 #[tokio::test(flavor = "current_thread")]
 async fn create_alias_endpoint_returns_created_and_keeps_alias_out_of_logs() {
-    let alias = "Prod.API_1";
+    let alias = "Prod_API-1";
     let (secret_id, row_json) =
         decrypt_row_json(b"alias create seed").expect("decrypt row JSON should be constructed");
     let alias_response_body = json!([{
-        "secret_id": secret_id,
-        "alias": alias,
-        "alias_normalized": "prod.api_1",
+        "secret_alias_id": "750e8400-e29b-41d4-a716-446655440000",
     }])
     .to_string();
     let (supabase_url, receiver, server_thread) =
@@ -2167,11 +2198,12 @@ async fn create_alias_endpoint_returns_created_and_keeps_alias_out_of_logs() {
         .await
         .expect("create alias response should be JSON");
     assert_eq!(json["secret_id"], Value::String(secret_id.clone()));
-    assert_eq!(json["alias"], Value::String(alias.to_owned()));
     assert_eq!(
-        json["alias_normalized"],
-        Value::String("prod.api_1".to_owned())
+        json["secret_alias_id"],
+        Value::String("750e8400-e29b-41d4-a716-446655440000".to_owned())
     );
+    assert!(json.get("alias").is_none());
+    assert!(json.get("alias_normalized").is_none());
 
     let read_request = receiver
         .recv_timeout(Duration::from_secs(2))
@@ -2185,6 +2217,12 @@ async fn create_alias_endpoint_returns_created_and_keeps_alias_out_of_logs() {
             .path
             .ends_with("/rest/v1/rpc/rpc_create_secret_alias")
     );
+    assert!(
+        !create_alias_request
+            .body
+            .as_ref()
+            .is_some_and(|body| body.to_string().contains(alias))
+    );
 
     app_task.abort();
     let _ = app_task.await;
@@ -2195,7 +2233,6 @@ async fn create_alias_endpoint_returns_created_and_keeps_alias_out_of_logs() {
 
     let logs = log_buffer.contents();
     assert!(!logs.contains(alias));
-    assert!(!logs.contains("prod.api_1"));
 }
 
 #[tokio::test(flavor = "current_thread")]

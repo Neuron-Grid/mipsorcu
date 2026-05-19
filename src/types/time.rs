@@ -7,6 +7,10 @@ use crate::error::AadError;
 pub struct CreatedAt(OffsetDateTime);
 
 impl CreatedAt {
+    pub fn now_utc() -> Self {
+        Self(OffsetDateTime::now_utc())
+    }
+
     pub fn parse(value: &str) -> Result<Self, AadError> {
         parse_utc_rfc3339(value, "created_at").map(Self)
     }

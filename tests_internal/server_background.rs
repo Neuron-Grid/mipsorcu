@@ -22,7 +22,9 @@ use crate::server::supabase::{
     IntegrityCheckViolationSummary, SupabaseAuditAppender, SupabaseClient,
 };
 use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
-use crate::types::{KeyVersion, MASTER_KEY_LENGTH, MasterKey};
+use crate::types::{
+    AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
+};
 
 const JWT_ISSUER: &str = "issuer";
 const JWT_AUDIENCE: &str = "audience";
@@ -154,6 +156,10 @@ fn test_app_state(
             KeyVersion::new(1)?,
             sample_master_key(),
         )?),
+        alias_encryption_key: Arc::new(AliasEncryptionKey::from_bytes([11u8; MASTER_KEY_LENGTH])),
+        alias_encryption_key_version: KeyVersion::new(1)?,
+        alias_fingerprint_key: Arc::new(AliasFingerprintKey::from_bytes([12u8; MASTER_KEY_LENGTH])),
+        alias_fingerprint_key_version: KeyVersion::new(1)?,
         jwt_verifier: Arc::new(jwt_verifier),
         supabase_client,
         audit_recorder,

@@ -1,8 +1,9 @@
 use mipsorcu::{
     ALIAS_AAD_VERSION_V1, ALIAS_FINGERPRINT_LENGTH, AadError, AliasAadV1, AliasEncryptionKey,
-    AliasFingerprint, AliasFingerprintKey, Ciphertext, CryptoError, KeyVersion, MASTER_KEY_LENGTH,
-    NONCE_LENGTH, Nonce, NormalizedAlias, OwnerUserId, SecretAliasId, SecretId,
-    compute_alias_fingerprint, decrypt_alias, encrypt_alias,
+    AliasFingerprint, AliasFingerprintKey, Ciphertext, CreatedAt, CryptoError, KeyVersion,
+    MASTER_KEY_LENGTH, NONCE_LENGTH, Nonce, NormalizedAlias, OwnerUserId, SecretAliasId, SecretId,
+    compute_alias_fingerprint, compute_lookup_fingerprint, decrypt_alias, decrypt_alias_row,
+    encrypt_alias, prepare_alias_create, prepare_alias_update,
 };
 use serde_json::{Value, json};
 
@@ -34,6 +35,199 @@ fn sample_fingerprint_key() -> AliasFingerprintKey {
 
 fn sample_stored_context() -> Result<Value, CryptoError> {
     sample_aad()?.to_stored_context().map_err(CryptoError::from)
+}
+
+#[test]
+fn prepare_alias_create_generates_encrypted_material() -> Result<(), Box<dyn std::error::Error>> {
+    let prepared = prepare_alias_create(
+        &sample_encryption_key(),
+        KeyVersion::new(1)?,
+        &sample_fingerprint_key(),
+        KeyVersion::new(2)?,
+        SecretId::parse(SECRET_ID)?,
+        OwnerUserId::parse(OWNER_USER_ID)?,
+        sample_alias()?,
+        CreatedAt::parse("2026-04-08T12:00:00Z")?,
+    )?;
+    let aad_object = prepared
+        .aad_context
+        .as_object()
+        .expect("alias AAD context should be an object");
+
+    SecretAliasId::parse(&prepared.secret_alias_id.as_canonical_string())?;
+    assert_eq!(prepared.nonce.as_bytes().len(), NONCE_LENGTH);
+    assert_eq!(
+        prepared.alias_fingerprint.as_bytes().len(),
+        ALIAS_FINGERPRINT_LENGTH
+    );
+    assert_eq!(prepared.fingerprint_key_version.get(), 2);
+    assert_eq!(prepared.fingerprint_schema_version.get(), 1);
+    assert_eq!(aad_object.len(), 5);
+    assert_eq!(aad_object["aad_version"], 1);
+    assert_eq!(aad_object["alias_key_version"], 1);
+    assert_eq!(aad_object["secret_id"], SECRET_ID);
+    assert_eq!(aad_object["owner_user_id"], OWNER_USER_ID);
+    assert_eq!(
+        prepared.created_at.as_rfc3339_utc()?,
+        "2026-04-08T12:00:00Z"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn prepare_alias_update_keeps_existing_identity_and_reencrypts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let secret_alias_id = SecretAliasId::parse(SECRET_ALIAS_ID)?;
+    let secret_id = SecretId::parse(SECRET_ID)?;
+    let owner_user_id = OwnerUserId::parse(OWNER_USER_ID)?;
+    let new_alias = NormalizedAlias::parse("github-api-v2")?;
+    let prepared = prepare_alias_update(
+        &sample_encryption_key(),
+        KeyVersion::new(3)?,
+        &sample_fingerprint_key(),
+        KeyVersion::new(4)?,
+        secret_alias_id.clone(),
+        secret_id.clone(),
+        owner_user_id.clone(),
+        new_alias.clone(),
+    )?;
+    let decrypted = decrypt_alias_row(
+        &sample_encryption_key(),
+        secret_alias_id,
+        secret_id,
+        owner_user_id,
+        prepared.alias_key_version,
+        &prepared.ciphertext,
+        &prepared.nonce,
+        &prepared.aad_context,
+    )?;
+
+    assert_eq!(
+        prepared.secret_alias_id.as_canonical_string(),
+        SECRET_ALIAS_ID
+    );
+    assert_eq!(prepared.secret_id.as_canonical_string(), SECRET_ID);
+    assert_eq!(prepared.alias_key_version.get(), 3);
+    assert_eq!(prepared.fingerprint_key_version.get(), 4);
+    assert_eq!(decrypted.alias.as_str(), new_alias.as_str());
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_alias_row_rejects_context_or_ciphertext_tampering()
+-> Result<(), Box<dyn std::error::Error>> {
+    let prepared = prepare_alias_create(
+        &sample_encryption_key(),
+        KeyVersion::new(1)?,
+        &sample_fingerprint_key(),
+        KeyVersion::new(1)?,
+        SecretId::parse(SECRET_ID)?,
+        OwnerUserId::parse(OWNER_USER_ID)?,
+        sample_alias()?,
+        CreatedAt::parse("2026-04-08T12:00:00Z")?,
+    )?;
+    let decrypted = decrypt_alias_row(
+        &sample_encryption_key(),
+        prepared.secret_alias_id.clone(),
+        prepared.secret_id.clone(),
+        prepared.owner_user_id.clone(),
+        prepared.alias_key_version,
+        &prepared.ciphertext,
+        &prepared.nonce,
+        &prepared.aad_context,
+    )?;
+    assert_eq!(decrypted.alias.as_str(), "github-api");
+
+    let mut extra_context = prepared.aad_context.clone();
+    extra_context
+        .as_object_mut()
+        .expect("alias AAD context should be an object")
+        .insert("unexpected".to_owned(), json!("value"));
+    assert!(
+        decrypt_alias_row(
+            &sample_encryption_key(),
+            prepared.secret_alias_id.clone(),
+            prepared.secret_id.clone(),
+            prepared.owner_user_id.clone(),
+            prepared.alias_key_version,
+            &prepared.ciphertext,
+            &prepared.nonce,
+            &extra_context,
+        )
+        .is_err()
+    );
+
+    assert!(
+        decrypt_alias_row(
+            &sample_encryption_key(),
+            prepared.secret_alias_id.clone(),
+            SecretId::parse("750e8400-e29b-41d4-a716-446655440000")?,
+            prepared.owner_user_id.clone(),
+            prepared.alias_key_version,
+            &prepared.ciphertext,
+            &prepared.nonce,
+            &prepared.aad_context,
+        )
+        .is_err()
+    );
+
+    let mut tampered_ciphertext_bytes = prepared.ciphertext.as_bytes().to_vec();
+    tampered_ciphertext_bytes[0] ^= 1;
+    let tampered_ciphertext = Ciphertext::new(tampered_ciphertext_bytes)?;
+    assert!(
+        decrypt_alias_row(
+            &sample_encryption_key(),
+            prepared.secret_alias_id.clone(),
+            prepared.secret_id.clone(),
+            prepared.owner_user_id.clone(),
+            prepared.alias_key_version,
+            &tampered_ciphertext,
+            &prepared.nonce,
+            &prepared.aad_context,
+        )
+        .is_err()
+    );
+
+    let mut tampered_nonce_bytes = *prepared.nonce.as_bytes();
+    tampered_nonce_bytes[0] ^= 1;
+    let tampered_nonce = Nonce::from_bytes(tampered_nonce_bytes);
+    assert!(
+        decrypt_alias_row(
+            &sample_encryption_key(),
+            prepared.secret_alias_id,
+            prepared.secret_id,
+            prepared.owner_user_id,
+            prepared.alias_key_version,
+            &prepared.ciphertext,
+            &tampered_nonce,
+            &prepared.aad_context,
+        )
+        .is_err()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn compute_lookup_fingerprint_is_owner_scoped_and_case_sensitive()
+-> Result<(), Box<dyn std::error::Error>> {
+    let key = sample_fingerprint_key();
+    let owner = OwnerUserId::parse(OWNER_USER_ID)?;
+    let alias = NormalizedAlias::parse("github-api")?;
+    let same = compute_lookup_fingerprint(&key, &owner, &alias)?;
+    let expected = compute_alias_fingerprint(&key, &owner, &alias)?;
+    let different_case =
+        compute_lookup_fingerprint(&key, &owner, &NormalizedAlias::parse("GitHub-api")?)?;
+    let different_owner =
+        compute_lookup_fingerprint(&key, &OwnerUserId::parse(ALT_OWNER_USER_ID)?, &alias)?;
+
+    assert_eq!(same, expected);
+    assert_ne!(same, different_case);
+    assert_ne!(same, different_owner);
+
+    Ok(())
 }
 
 #[test]
