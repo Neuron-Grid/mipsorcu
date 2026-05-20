@@ -197,6 +197,24 @@ select ok(
     '(owner_user_id, alias_fingerprint) is unique'
 );
 
+select is(
+    (
+        select array_agg(a.attname::text order by key.ordinality)
+        from pg_constraint c
+        join pg_class t on t.oid = c.conrelid
+        join pg_namespace n on n.oid = t.relnamespace
+        join unnest(c.conkey) with ordinality as key(attnum, ordinality) on true
+        join pg_attribute a on a.attrelid = t.oid
+            and a.attnum = key.attnum
+        where n.nspname = 'public'
+            and t.relname = 'secret_aliases'
+            and c.conname = 'secret_aliases_owner_alias_fingerprint_unique'
+            and c.contype = 'u'
+    ),
+    array['owner_user_id', 'alias_fingerprint'],
+    'secret_aliases_owner_alias_fingerprint_unique covers owner_user_id and alias_fingerprint'
+);
+
 select ok(
     (
         select exists (
@@ -211,6 +229,24 @@ select ok(
         )
     ),
     '(owner_user_id, secret_id) is unique for MVP cardinality'
+);
+
+select is(
+    (
+        select array_agg(a.attname::text order by key.ordinality)
+        from pg_constraint c
+        join pg_class t on t.oid = c.conrelid
+        join pg_namespace n on n.oid = t.relnamespace
+        join unnest(c.conkey) with ordinality as key(attnum, ordinality) on true
+        join pg_attribute a on a.attrelid = t.oid
+            and a.attnum = key.attnum
+        where n.nspname = 'public'
+            and t.relname = 'secret_aliases'
+            and c.conname = 'secret_aliases_owner_secret_unique'
+            and c.contype = 'u'
+    ),
+    array['owner_user_id', 'secret_id'],
+    'secret_aliases_owner_secret_unique covers owner_user_id and secret_id'
 );
 
 select is(
@@ -295,6 +331,11 @@ select ok(
 select ok(
     to_regprocedure('public.rpc_delete_secret_alias(uuid, uuid, uuid)') is null,
     'encrypted delete RPC without source_event_at is removed'
+);
+
+select ok(
+    to_regprocedure('public.rpc_list_secret_aliases(uuid, integer, integer)') is null,
+    'legacy list RPC without owner scope is removed'
 );
 
 select ok(
