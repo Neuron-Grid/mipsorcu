@@ -156,6 +156,52 @@ exception
 end;
 $$;
 
+create function test_helpers.try_list_secret_aliases(
+    p_request_id uuid,
+    p_owner_user_id uuid,
+    p_limit integer,
+    p_offset integer
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_list_secret_aliases(
+        p_request_id,
+        p_owner_user_id,
+        p_limit,
+        p_offset
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_resolve_secret_alias(
+    p_owner_user_id uuid,
+    p_alias_fingerprint bytea
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_resolve_secret_alias(
+        p_owner_user_id,
+        p_alias_fingerprint
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
 create temp table secret_alias_rpc_fixtures (
     owner_user_id uuid not null,
     other_user_id uuid not null,
@@ -520,6 +566,177 @@ select is(
     ),
     1,
     'list aliases returns encrypted alias rows for owner'
+);
+
+select is(
+    test_helpers.try_list_secret_aliases(
+        null,
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        100,
+        0
+    ),
+    'invalid_rpc_input',
+    'list aliases rejects null request_id'
+);
+
+select is(
+    test_helpers.try_list_secret_aliases(
+        '00000000-0000-4000-8000-000000000402',
+        null,
+        100,
+        0
+    ),
+    'invalid_rpc_input',
+    'list aliases rejects null owner_user_id'
+);
+
+select is(
+    test_helpers.try_list_secret_aliases(
+        '00000000-0000-4000-8000-000000000403',
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        0,
+        0
+    ),
+    'invalid_rpc_input',
+    'list aliases rejects zero limit'
+);
+
+select is(
+    test_helpers.try_list_secret_aliases(
+        '00000000-0000-4000-8000-000000000404',
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        1001,
+        0
+    ),
+    'invalid_rpc_input',
+    'list aliases rejects limit above maximum'
+);
+
+select is(
+    test_helpers.try_list_secret_aliases(
+        '00000000-0000-4000-8000-000000000405',
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        100,
+        -1
+    ),
+    'invalid_rpc_input',
+    'list aliases rejects negative offset'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events
+        where action = 'secret_alias_list'
+    ),
+    0,
+    'list aliases RPC itself does not record audit'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events
+        where action like 'secret_alias_%'
+            and action <> 'secret_alias_create'
+    ),
+    0,
+    'read-only alias RPCs do not record audit'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.rpc_resolve_secret_alias(
+            (select owner_user_id from secret_alias_rpc_fixtures),
+            decode(repeat('99', 32), 'hex')
+        )
+    ),
+    0,
+    'resolve alias returns no rows for a missing fingerprint'
+);
+
+select is(
+    test_helpers.try_resolve_secret_alias(
+        null,
+        decode(repeat('11', 32), 'hex')
+    ),
+    'invalid_rpc_input',
+    'resolve alias rejects null owner_user_id'
+);
+
+select is(
+    test_helpers.try_resolve_secret_alias(
+        (select owner_user_id from secret_alias_rpc_fixtures),
+        decode(repeat('11', 31), 'hex')
+    ),
+    'invalid_rpc_input',
+    'resolve alias rejects invalid fingerprint length'
+);
+
+select is(
+    test_helpers.try_create_secret_alias(
+        '00000000-0000-4000-8000-000000000406',
+        '850e8400-e29b-41d4-a716-446655440406',
+        (select other_owner_secret_id from secret_alias_rpc_fixtures),
+        (select other_user_id from secret_alias_rpc_fixtures),
+        decode(repeat('aa', 32), 'hex'),
+        decode(repeat('bc', 24), 'hex'),
+        1,
+        decode(repeat('33', 32), 'hex'),
+        1,
+        1,
+        test_helpers.alias_aad_context(
+            '850e8400-e29b-41d4-a716-446655440406',
+            (select other_owner_secret_id from secret_alias_rpc_fixtures),
+            (select other_user_id from secret_alias_rpc_fixtures),
+            1
+        ),
+        '2026-04-08T12:04:30Z',
+        '2026-04-08T12:04:30Z'
+    ),
+    'ok',
+    'create alias allows another owner alias in separate scope'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.rpc_list_secret_aliases(
+            '00000000-0000-4000-8000-000000000407',
+            (select owner_user_id from secret_alias_rpc_fixtures),
+            100,
+            0
+        )
+    ),
+    1,
+    'list aliases remains owner-scoped after another owner creates an alias'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.rpc_list_secret_aliases(
+            '00000000-0000-4000-8000-000000000408',
+            (select other_user_id from secret_alias_rpc_fixtures),
+            100,
+            0
+        )
+    ),
+    1,
+    'list aliases returns the other owner row only for that owner'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.rpc_resolve_secret_alias(
+            (select owner_user_id from secret_alias_rpc_fixtures),
+            decode(repeat('33', 32), 'hex')
+        )
+    ),
+    0,
+    'resolve alias does not return another owner alias fingerprint'
 );
 
 select is(

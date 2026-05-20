@@ -5,6 +5,7 @@ use mipsorcu::{
     compute_alias_fingerprint, compute_lookup_fingerprint, decrypt_alias, decrypt_alias_row,
     encrypt_alias, prepare_alias_create, prepare_alias_update,
 };
+use proptest::prelude::*;
 use serde_json::{Value, json};
 
 const OWNER_USER_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -35,6 +36,16 @@ fn sample_fingerprint_key() -> AliasFingerprintKey {
 
 fn sample_stored_context() -> Result<Value, CryptoError> {
     sample_aad()?.to_stored_context().map_err(CryptoError::from)
+}
+
+fn distinct_valid_alias(value: &str) -> NormalizedAlias {
+    let mut bytes = value.as_bytes().to_vec();
+    let first = bytes
+        .first_mut()
+        .expect("proptest alias generator produces non-empty aliases");
+    *first = if *first == b'a' { b'b' } else { b'a' };
+    let candidate = String::from_utf8(bytes).expect("proptest alias generator produces ASCII");
+    NormalizedAlias::parse(&candidate).expect("mutated alias preserves the valid alias grammar")
 }
 
 #[test]
@@ -362,6 +373,78 @@ fn fingerprint_differs_per_alias() -> Result<(), CryptoError> {
     assert_ne!(fingerprint_a, fingerprint_b);
 
     Ok(())
+}
+
+proptest! {
+    #[test]
+    fn fingerprint_is_deterministic_for_any_valid_alias(alias in "[A-Za-z0-9_\\-]{1,128}") {
+        let key = sample_fingerprint_key();
+        let owner = OwnerUserId::parse(OWNER_USER_ID).expect("test owner UUID is valid");
+        let normalized_alias =
+            NormalizedAlias::parse(&alias).expect("proptest generator emits valid aliases");
+
+        let first = compute_alias_fingerprint(&key, &owner, &normalized_alias)
+            .expect("fingerprint computation should succeed");
+        let second = compute_alias_fingerprint(&key, &owner, &normalized_alias)
+            .expect("fingerprint computation should succeed");
+
+        prop_assert_eq!(first, second);
+    }
+
+    #[test]
+    fn fingerprint_matches_for_trim_normalized_aliases(alias in "[A-Za-z0-9_\\-]{1,128}") {
+        let key = sample_fingerprint_key();
+        let owner = OwnerUserId::parse(OWNER_USER_ID).expect("test owner UUID is valid");
+        let normalized_alias =
+            NormalizedAlias::parse(&alias).expect("proptest generator emits valid aliases");
+        let padded_alias = NormalizedAlias::parse(&format!("  {alias}  "))
+            .expect("padded generated alias should normalize successfully");
+
+        prop_assert_eq!(normalized_alias.as_str(), padded_alias.as_str());
+
+        let normalized_fingerprint = compute_alias_fingerprint(&key, &owner, &normalized_alias)
+            .expect("fingerprint computation should succeed");
+        let padded_fingerprint = compute_alias_fingerprint(&key, &owner, &padded_alias)
+            .expect("fingerprint computation should succeed");
+
+        prop_assert_eq!(normalized_fingerprint, padded_fingerprint);
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_valid_aliases(alias in "[A-Za-z0-9_\\-]{1,128}") {
+        let key = sample_fingerprint_key();
+        let owner = OwnerUserId::parse(OWNER_USER_ID).expect("test owner UUID is valid");
+        let normalized_alias =
+            NormalizedAlias::parse(&alias).expect("proptest generator emits valid aliases");
+        let distinct_alias = distinct_valid_alias(normalized_alias.as_str());
+
+        prop_assert_ne!(normalized_alias.as_str(), distinct_alias.as_str());
+
+        let original_fingerprint = compute_alias_fingerprint(&key, &owner, &normalized_alias)
+            .expect("fingerprint computation should succeed");
+        let distinct_fingerprint = compute_alias_fingerprint(&key, &owner, &distinct_alias)
+            .expect("fingerprint computation should succeed");
+
+        prop_assert_ne!(original_fingerprint, distinct_fingerprint);
+    }
+
+    #[test]
+    fn fingerprint_is_owner_scoped_for_any_valid_alias(alias in "[A-Za-z0-9_\\-]{1,128}") {
+        let key = sample_fingerprint_key();
+        let owner = OwnerUserId::parse(OWNER_USER_ID).expect("test owner UUID is valid");
+        let alternate_owner =
+            OwnerUserId::parse(ALT_OWNER_USER_ID).expect("alternate test owner UUID is valid");
+        let normalized_alias =
+            NormalizedAlias::parse(&alias).expect("proptest generator emits valid aliases");
+
+        let owner_fingerprint = compute_alias_fingerprint(&key, &owner, &normalized_alias)
+            .expect("fingerprint computation should succeed");
+        let alternate_owner_fingerprint =
+            compute_alias_fingerprint(&key, &alternate_owner, &normalized_alias)
+                .expect("fingerprint computation should succeed");
+
+        prop_assert_ne!(owner_fingerprint, alternate_owner_fingerprint);
+    }
 }
 
 #[test]

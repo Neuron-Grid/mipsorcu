@@ -109,10 +109,76 @@ select is(
         from information_schema.columns
         where table_schema = 'public'
             and table_name = 'secret_aliases'
+            and column_name = 'id'
+    ),
+    null,
+    'secret_aliases.id has no DB default'
+);
+
+select is(
+    (
+        select column_default
+        from information_schema.columns
+        where table_schema = 'public'
+            and table_name = 'secret_aliases'
             and column_name = 'created_at'
     ),
     null,
     'secret_aliases.created_at has no DB default'
+);
+
+select ok(
+    (
+        select column_default is not null
+            and column_default ~ 'now\(\)'
+        from information_schema.columns
+        where table_schema = 'public'
+            and table_name = 'secret_aliases'
+            and column_name = 'updated_at'
+    ),
+    'secret_aliases.updated_at is DB-managed with now() default'
+);
+
+select ok(
+    (
+        select exists (
+            select 1
+            from pg_trigger trg
+            join pg_class cls on cls.oid = trg.tgrelid
+            join pg_namespace ns on ns.oid = cls.relnamespace
+            where ns.nspname = 'public'
+                and cls.relname = 'secret_aliases'
+                and trg.tgname = 'secret_aliases_set_updated_at'
+                and not trg.tgisinternal
+        )
+    ),
+    'secret_aliases has DB-managed updated_at trigger'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from pg_constraint c
+        join pg_class t on t.oid = c.conrelid
+        join pg_namespace n on n.oid = t.relnamespace
+        where n.nspname = 'public'
+            and t.relname = 'secret_aliases'
+            and c.contype = 'c'
+            and c.conname in (
+                'secret_aliases_alias_ciphertext_not_empty',
+                'secret_aliases_alias_nonce_length',
+                'secret_aliases_alias_key_version_positive',
+                'secret_aliases_alias_fingerprint_length',
+                'secret_aliases_alias_fingerprint_key_version_positive',
+                'secret_aliases_alias_fingerprint_schema_version_supported',
+                'secret_aliases_aad_context_object',
+                'secret_aliases_aad_context_required_keys',
+                'secret_aliases_aad_context_allowed_keys',
+                'secret_aliases_aad_context_matches_row'
+            )
+    ),
+    10,
+    'secret_aliases has encrypted alias and AAD integrity check constraints'
 );
 
 select ok(
@@ -320,6 +386,15 @@ select throws_ok(
     null,
     null,
     'authenticated cannot select secret_aliases directly'
+);
+reset role;
+
+set local role anon;
+select throws_ok(
+    $$select count(*) from public.secret_aliases$$,
+    null,
+    null,
+    'anon cannot select secret_aliases directly'
 );
 reset role;
 

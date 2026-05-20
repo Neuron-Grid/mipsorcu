@@ -744,6 +744,89 @@ set local mipsorcu.audit_metadata_allowlist_mode = 'strict';
 
 select is(
     test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000120',
+        '00000000-0000-4000-8000-000000000120',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_create',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'alias_fingerprint', repeat('aa', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts secret_alias_create with valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000121',
+        '00000000-0000-4000-8000-000000000121',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_update',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'old_alias_fingerprint', repeat('aa', 32),
+            'new_alias_fingerprint', repeat('bb', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts secret_alias_update with valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000122',
+        '00000000-0000-4000-8000-000000000122',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_delete',
+        '550e8400-e29b-41d4-a716-446655440000',
+        'success',
+        1,
+        jsonb_build_object(
+            'alias_fingerprint', repeat('aa', 32),
+            'alias_fingerprint_key_version', 1,
+            'alias_fingerprint_schema_version', 1,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts secret_alias_delete with valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000123',
+        '00000000-0000-4000-8000-000000000123',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'sbc-device-1',
+        'secret_alias_list',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'result_count', 1,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts secret_alias_list with valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
         '10000000-0000-4000-8000-0000000000f0',
         '00000000-0000-4000-8000-0000000000f0',
         'f47ac10b-58cc-4372-a567-0e02b2c3d479',
