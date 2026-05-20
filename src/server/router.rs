@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use tower_http::LatencyUnit;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer};
@@ -21,9 +21,15 @@ pub fn build_app(state: AppState) -> Router {
             post(handlers::decrypt_secret),
         )
         .route(
-            "/v1/secrets/{secret_ref}/aliases",
+            "/v1/secrets/{secret_id}/aliases",
             post(handlers::create_secret_alias),
         )
+        .route(
+            "/v1/aliases/{alias_id}",
+            put(handlers::update_secret_alias).delete(handlers::delete_secret_alias),
+        )
+        .route("/v1/aliases", get(handlers::list_secret_aliases))
+        .route("/v1/aliases/resolve", post(handlers::resolve_secret_alias))
         .route("/health", get(handlers::health_check))
         .route("/ready", get(handlers::ready_check))
         .fallback(handlers::not_found);

@@ -28,6 +28,27 @@ pub struct CreateSecretAliasRequest {
     pub alias: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSecretAliasRequest {
+    pub alias: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveSecretAliasRequest {
+    pub alias: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListSecretAliasesQuery {
+    #[serde(default = "default_list_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
+}
+
 #[derive(Serialize)]
 pub struct RotateSecretResponse {
     pub secret_id: String,
@@ -39,6 +60,34 @@ pub struct RotateSecretResponse {
 pub struct CreateSecretAliasResponse {
     pub secret_alias_id: String,
     pub secret_id: String,
+}
+
+#[derive(Serialize)]
+pub struct UpdateSecretAliasResponse {
+    pub secret_alias_id: String,
+}
+
+#[derive(Serialize)]
+pub struct ResolveSecretAliasResponse {
+    pub secret_alias_id: String,
+    pub secret_id: String,
+}
+
+#[derive(Serialize)]
+pub struct SecretAliasSummary {
+    pub secret_alias_id: String,
+    pub secret_id: String,
+    pub alias: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Serialize)]
+pub struct ListSecretAliasesResponse {
+    pub aliases: Vec<SecretAliasSummary>,
+    pub limit: u32,
+    pub offset: u32,
+    pub total_returned: u32,
 }
 
 #[derive(Serialize)]
@@ -72,4 +121,8 @@ pub struct HealthResponse {
 pub struct ApiErrorResponse {
     pub code: String,
     pub request_id: String,
+}
+
+fn default_list_limit() -> u32 {
+    100
 }

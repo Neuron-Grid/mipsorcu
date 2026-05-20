@@ -4,7 +4,9 @@ use time::format_description::well_known::Rfc3339;
 use crate::NormalizedAlias;
 use crate::server::dto::{CreateSecretAliasRequest, CreateSecretRequest, RotateSecretRequest};
 use crate::server::errors::ApiError;
-use crate::types::{Classification, CreatedAt, DeviceId, Plaintext, SecretId, SecretRef};
+use crate::types::{
+    Classification, CreatedAt, DeviceId, Plaintext, SecretAliasId, SecretId, SecretRef,
+};
 
 #[derive(Debug)]
 pub(super) struct ParsedCreateSecretRequest {
@@ -63,6 +65,10 @@ pub(super) fn parse_secret_id(value: &str) -> Result<SecretId, ApiError> {
     SecretId::parse(value.trim()).map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
+pub(super) fn parse_secret_alias_id(value: &str) -> Result<SecretAliasId, ApiError> {
+    SecretAliasId::parse(value.trim()).map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
 fn parse_classification(value: &str) -> Result<Classification, ApiError> {
     Classification::new(value).map_err(|error| ApiError::BadRequest(error.to_string()))
 }
@@ -71,7 +77,7 @@ fn parse_device_id(value: &str) -> Result<DeviceId, ApiError> {
     DeviceId::new(value).map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
-fn parse_secret_alias(value: &str) -> Result<NormalizedAlias, ApiError> {
+pub(super) fn parse_secret_alias(value: &str) -> Result<NormalizedAlias, ApiError> {
     NormalizedAlias::parse(value).map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 

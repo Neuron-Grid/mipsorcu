@@ -1,5 +1,8 @@
 use mipsorcu::server::dto::{
-    CreateSecretAliasRequest, CreateSecretAliasResponse, CreateSecretRequest, RotateSecretRequest,
+    CreateSecretAliasRequest, CreateSecretAliasResponse, CreateSecretRequest,
+    ListSecretAliasesQuery, ListSecretAliasesResponse, ResolveSecretAliasRequest,
+    ResolveSecretAliasResponse, RotateSecretRequest, SecretAliasSummary, UpdateSecretAliasRequest,
+    UpdateSecretAliasResponse,
 };
 use serde_json::{Value, json};
 
@@ -48,6 +51,30 @@ fn create_secret_alias_request_rejects_unknown_fields() {
 }
 
 #[test]
+fn update_and_resolve_secret_alias_requests_reject_unknown_fields() {
+    let update = serde_json::from_value::<UpdateSecretAliasRequest>(json!({
+        "alias": "prod-api-v2",
+        "secret_alias_id": "750e8400-e29b-41d4-a716-446655440000"
+    }));
+    let resolve = serde_json::from_value::<ResolveSecretAliasRequest>(json!({
+        "alias": "prod-api",
+        "secret_id": SECRET_ID
+    }));
+
+    assert!(update.is_err());
+    assert!(resolve.is_err());
+}
+
+#[test]
+fn list_secret_aliases_query_defaults_limit_and_offset() {
+    let query = serde_json::from_value::<ListSecretAliasesQuery>(json!({}))
+        .expect("empty query should use defaults");
+
+    assert_eq!(query.limit, 100);
+    assert_eq!(query.offset, 0);
+}
+
+#[test]
 fn create_secret_alias_response_serializes_public_contract() {
     let response = CreateSecretAliasResponse {
         secret_alias_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
@@ -63,6 +90,61 @@ fn create_secret_alias_response_serializes_public_contract() {
     assert_eq!(value["secret_id"], Value::String(SECRET_ID.to_owned()));
     assert!(value.get("alias").is_none());
     assert!(value.get("alias_normalized").is_none());
+}
+
+#[test]
+fn update_and_resolve_secret_alias_responses_serialize_public_contract() {
+    let update = serde_json::to_value(UpdateSecretAliasResponse {
+        secret_alias_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
+    })
+    .expect("update response should serialize");
+    let resolve = serde_json::to_value(ResolveSecretAliasResponse {
+        secret_alias_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
+        secret_id: SECRET_ID.to_owned(),
+    })
+    .expect("resolve response should serialize");
+
+    assert_eq!(
+        update["secret_alias_id"],
+        Value::String("750e8400-e29b-41d4-a716-446655440000".to_owned())
+    );
+    assert!(update.get("alias").is_none());
+    assert_eq!(
+        resolve["secret_alias_id"],
+        Value::String("750e8400-e29b-41d4-a716-446655440000".to_owned())
+    );
+    assert_eq!(resolve["secret_id"], Value::String(SECRET_ID.to_owned()));
+    assert!(resolve.get("alias").is_none());
+}
+
+#[test]
+fn list_secret_aliases_response_serializes_public_contract() {
+    let response = ListSecretAliasesResponse {
+        aliases: vec![SecretAliasSummary {
+            secret_alias_id: "750e8400-e29b-41d4-a716-446655440000".to_owned(),
+            secret_id: SECRET_ID.to_owned(),
+            alias: "prod-api".to_owned(),
+            created_at: "2026-04-08T12:00:00Z".to_owned(),
+            updated_at: "2026-04-08T12:01:00Z".to_owned(),
+        }],
+        limit: 100,
+        offset: 0,
+        total_returned: 1,
+    };
+
+    let value = serde_json::to_value(response).expect("list response should serialize");
+
+    assert_eq!(value["limit"], Value::from(100));
+    assert_eq!(value["offset"], Value::from(0));
+    assert_eq!(value["total_returned"], Value::from(1));
+    assert_eq!(
+        value["aliases"][0]["secret_alias_id"],
+        Value::String("750e8400-e29b-41d4-a716-446655440000".to_owned())
+    );
+    assert_eq!(
+        value["aliases"][0]["alias"],
+        Value::String("prod-api".to_owned())
+    );
 }
 
 #[test]

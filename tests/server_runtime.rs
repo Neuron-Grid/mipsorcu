@@ -291,6 +291,33 @@ fn alias_resolve_row_json(
     }]))
 }
 
+fn alias_list_row_json(secret_id: &str, alias: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let prepared = prepare_alias_create(
+        &AliasEncryptionKey::from_bytes([11u8; MASTER_KEY_LENGTH]),
+        KeyVersion::new(1)?,
+        &AliasFingerprintKey::from_bytes([12u8; MASTER_KEY_LENGTH]),
+        KeyVersion::new(1)?,
+        SecretId::parse(secret_id)?,
+        OwnerUserId::parse(OWNER_USER_ID)?,
+        NormalizedAlias::parse(alias)?,
+        CreatedAt::parse(CREATED_AT)?,
+    )?;
+
+    Ok(json!([{
+        "id": prepared.secret_alias_id.as_canonical_string(),
+        "secret_id": prepared.secret_id.as_canonical_string(),
+        "alias_ciphertext": format!("\\x{}", hex::encode(prepared.ciphertext.as_bytes())),
+        "alias_nonce": format!("\\x{}", hex::encode(prepared.nonce.as_bytes())),
+        "alias_key_version": i32::try_from(prepared.alias_key_version.get())?,
+        "alias_fingerprint": format!("\\x{}", hex::encode(prepared.alias_fingerprint.as_bytes())),
+        "alias_fingerprint_key_version": i32::try_from(prepared.fingerprint_key_version.get())?,
+        "alias_fingerprint_schema_version": i32::try_from(prepared.fingerprint_schema_version.get())?,
+        "aad_context": prepared.aad_context,
+        "created_at": CREATED_AT,
+        "updated_at": "2026-04-08T12:01:00Z",
+    }]))
+}
+
 fn set_first_decrypt_row_field(rows: &mut Value, field: &str, value: Value) {
     if let Some(row) = rows.as_array_mut().and_then(|array| array.first_mut()) {
         row[field] = value;
@@ -668,6 +695,14 @@ fn spawn_supabase_alias_create_server(
     secret_versions_body: String,
     alias_response_body: String,
 ) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    spawn_supabase_alias_create_status_server(secret_versions_body, 200, alias_response_body)
+}
+
+fn spawn_supabase_alias_create_status_server(
+    secret_versions_body: String,
+    alias_status: u16,
+    alias_response_body: String,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
@@ -686,9 +721,163 @@ fn spawn_supabase_alias_create_server(
             if is_secret_read {
                 write_http_response(&mut stream, 200, "OK", &secret_versions_body)?;
             } else {
-                write_http_response(&mut stream, 200, "OK", &alias_response_body)?;
+                let reason = if alias_status == 200 {
+                    "OK"
+                } else {
+                    "Conflict"
+                };
+                write_http_response(&mut stream, alias_status, reason, &alias_response_body)?;
             }
         }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_alias_context_error_server(
+    status: u16,
+    body: &'static str,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let request = read_http_request(&mut stream)?;
+        sender.send(request).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "captured request receiver was dropped",
+            )
+        })?;
+        write_http_response(&mut stream, status, "Forbidden", body)?;
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_alias_update_server(
+    secret_id: String,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let is_context_lookup = request
+                .path
+                .starts_with("/rest/v1/rpc/rpc_get_secret_alias_for_update");
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if is_context_lookup {
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "OK",
+                    &json!([{ "secret_id": secret_id }]).to_string(),
+                )?;
+            } else {
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "OK",
+                    r#"[{"old_alias_fingerprint":"\\x1111111111111111111111111111111111111111111111111111111111111111"}]"#,
+                )?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_alias_delete_server() -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let request = read_http_request(&mut stream)?;
+        sender.send(request).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "captured request receiver was dropped",
+            )
+        })?;
+        write_http_response(
+            &mut stream,
+            200,
+            "OK",
+            r#"[{"alias_fingerprint":"\\x2222222222222222222222222222222222222222222222222222222222222222"}]"#,
+        )?;
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_alias_list_server(
+    list_body: String,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let is_list = request
+                .path
+                .starts_with("/rest/v1/rpc/rpc_list_secret_aliases");
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if is_list {
+                write_http_response(&mut stream, 200, "OK", &list_body)?;
+            } else {
+                write_http_response(&mut stream, 200, "OK", r#"[]"#)?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_supabase_alias_resolve_server(
+    resolve_body: String,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let request = read_http_request(&mut stream)?;
+        sender.send(request).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "captured request receiver was dropped",
+            )
+        })?;
+        write_http_response(&mut stream, 200, "OK", &resolve_body)?;
 
         Ok(())
     });
@@ -2233,6 +2422,445 @@ async fn create_alias_endpoint_returns_created_and_keeps_alias_out_of_logs() {
 
     let logs = log_buffer.contents();
     assert!(!logs.contains(alias));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn create_alias_endpoint_maps_duplicate_alias_to_conflict() {
+    let alias = "Prod_API-Conflict";
+    let (secret_id, row_json) = decrypt_row_json(b"alias create conflict seed")
+        .expect("decrypt row JSON should be constructed");
+    let (supabase_url, receiver, server_thread) = spawn_supabase_alias_create_status_server(
+        row_json.to_string(),
+        409,
+        r#"{"message":"alias_conflict"}"#.to_owned(),
+    )
+    .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("create-alias-conflict"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{secret_id}/aliases"))
+        .bearer_auth(&token)
+        .json(&json!({ "alias": alias }))
+        .send()
+        .await
+        .expect("create alias request should complete");
+
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(json["code"], Value::String("alias_conflict".to_owned()));
+    assert!(!json.to_string().contains(alias));
+
+    let read_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret read request should be captured");
+    let create_alias_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("create alias request should be captured");
+    assert!(read_request.path.starts_with("/rest/v1/secret_versions"));
+    assert!(
+        create_alias_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_create_secret_alias")
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn update_alias_endpoint_returns_ok_and_keeps_alias_out_of_rpc_body_and_logs() {
+    let alias = "Prod_API-2";
+    let alias_id = "750e8400-e29b-41d4-a716-446655440000";
+    let (secret_id, _) =
+        decrypt_row_json(b"alias update seed").expect("decrypt row JSON should be constructed");
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_alias_update_server(secret_id.clone())
+            .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("update-alias"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let log_buffer = SharedLogBuffer::default();
+    let subscriber = build_log_subscriber(log_buffer.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .put(format!("{app_url}/v1/aliases/{alias_id}"))
+        .bearer_auth(&token)
+        .json(&json!({ "alias": alias }))
+        .send()
+        .await
+        .expect("update alias request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let json: Value = response
+        .json()
+        .await
+        .expect("update alias response should be JSON");
+    assert_eq!(json["secret_alias_id"], Value::String(alias_id.to_owned()));
+    assert!(json.get("alias").is_none());
+
+    let context_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias update context request should be captured");
+    let update_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias update request should be captured");
+    assert!(
+        context_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_get_secret_alias_for_update")
+    );
+    assert!(
+        update_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_update_secret_alias")
+    );
+    assert!(
+        !update_request
+            .body
+            .as_ref()
+            .is_some_and(|body| body.to_string().contains(alias))
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+
+    let logs = log_buffer.contents();
+    assert!(!logs.contains(alias));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn update_alias_endpoint_maps_owner_mismatch_to_forbidden() {
+    let alias = "Prod_API-Forbidden";
+    let alias_id = "750e8400-e29b-41d4-a716-446655440000";
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_alias_context_error_server(403, r#"{"message":"owner_mismatch"}"#)
+            .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("update-alias-forbidden"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .put(format!("{app_url}/v1/aliases/{alias_id}"))
+        .bearer_auth(&token)
+        .json(&json!({ "alias": alias }))
+        .send()
+        .await
+        .expect("update alias request should complete");
+
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(json["code"], Value::String("forbidden".to_owned()));
+
+    let context_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias update context request should be captured");
+    assert!(
+        context_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_get_secret_alias_for_update")
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delete_alias_endpoint_returns_no_content() {
+    let alias_id = "750e8400-e29b-41d4-a716-446655440000";
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_alias_delete_server().expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("delete-alias"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .delete(format!("{app_url}/v1/aliases/{alias_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("delete alias request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let delete_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias delete request should be captured");
+    assert!(
+        delete_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_delete_secret_alias")
+    );
+    let body = delete_request
+        .body
+        .expect("alias delete request body should be JSON");
+    assert_eq!(
+        body["p_secret_alias_id"],
+        Value::String(alias_id.to_owned())
+    );
+    assert!(
+        body["p_source_event_at"]
+            .as_str()
+            .is_some_and(|value| { SourceEventAt::parse(value).is_ok() })
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn list_aliases_endpoint_returns_no_store_and_records_list_audit_without_alias_plaintext() {
+    let alias = "Prod_API-List";
+    let (secret_id, _) =
+        decrypt_row_json(b"alias list seed").expect("decrypt row JSON should be constructed");
+    let list_body = alias_list_row_json(&secret_id, alias)
+        .expect("alias list row JSON should be constructed")
+        .to_string();
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_alias_list_server(list_body).expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("list-alias"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let log_buffer = SharedLogBuffer::default();
+    let subscriber = build_log_subscriber(log_buffer.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .get(format!("{app_url}/v1/aliases?limit=100&offset=0"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("list aliases request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let json: Value = response
+        .json()
+        .await
+        .expect("list aliases response should be JSON");
+    assert_eq!(json["limit"], Value::from(100));
+    assert_eq!(json["offset"], Value::from(0));
+    assert_eq!(json["total_returned"], Value::from(1));
+    assert_eq!(json["aliases"][0]["secret_id"], Value::String(secret_id));
+    assert_eq!(json["aliases"][0]["alias"], Value::String(alias.to_owned()));
+
+    let list_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias list request should be captured");
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias list audit request should be captured");
+    assert!(
+        list_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_list_secret_aliases")
+    );
+    assert_eq!(audit_request.path, "/rest/v1/rpc/rpc_append_audit_event");
+    let audit_body = audit_request
+        .body
+        .expect("alias list audit request body should be JSON");
+    assert_eq!(
+        audit_body["p_action"],
+        Value::String("secret_alias_list".to_owned())
+    );
+    assert_eq!(audit_body["p_result"], Value::String("success".to_owned()));
+    assert_eq!(
+        audit_body["p_metadata_json"]["result_count"],
+        Value::from(1)
+    );
+    assert!(
+        audit_body["p_metadata_json"]["source_event_at"]
+            .as_str()
+            .is_some_and(|value| SourceEventAt::parse(value).is_ok())
+    );
+    assert!(!audit_body.to_string().contains(alias));
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+
+    let logs = log_buffer.contents();
+    assert!(!logs.contains(alias));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn list_aliases_endpoint_rejects_invalid_limit_without_upstream_call() {
+    let (supabase_url, receiver, server_thread) =
+        spawn_capture_server(Duration::from_millis(100)).expect("capture server should start");
+    let state = test_app_state(&supabase_url, temp_path("list-alias-invalid-limit"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .get(format!("{app_url}/v1/aliases?limit=0"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("list aliases request should complete");
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(json["code"], Value::String("bad_request".to_owned()));
+    assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resolve_alias_endpoint_returns_secret_id_without_audit() {
+    let alias = "Prod_API-Resolve";
+    let (secret_id, _) =
+        decrypt_row_json(b"alias resolve seed").expect("decrypt row JSON should be constructed");
+    let resolve_body = alias_resolve_row_json(&secret_id, alias)
+        .expect("alias resolve row JSON should be constructed")
+        .to_string();
+    let (supabase_url, receiver, server_thread) = spawn_supabase_alias_resolve_server(resolve_body)
+        .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("resolve-alias"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let log_buffer = SharedLogBuffer::default();
+    let subscriber = build_log_subscriber(log_buffer.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/aliases/resolve"))
+        .bearer_auth(&token)
+        .json(&json!({ "alias": alias }))
+        .send()
+        .await
+        .expect("resolve alias request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let json: Value = response
+        .json()
+        .await
+        .expect("resolve alias response should be JSON");
+    assert_eq!(json["secret_id"], Value::String(secret_id));
+    assert!(json.get("alias").is_none());
+
+    let resolve_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias resolve request should be captured");
+    assert!(
+        resolve_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_resolve_secret_alias")
+    );
+    assert!(
+        !resolve_request
+            .body
+            .as_ref()
+            .is_some_and(|body| body.to_string().contains(alias))
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+
+    let logs = log_buffer.contents();
+    assert!(!logs.contains(alias));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resolve_alias_endpoint_returns_not_found_without_audit() {
+    let alias = "missing-alias";
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_alias_resolve_server("[]".to_owned())
+            .expect("Supabase test server should start");
+    let state = test_app_state(&supabase_url, temp_path("resolve-alias-not-found"))
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/aliases/resolve"))
+        .bearer_auth(&token)
+        .json(&json!({ "alias": alias }))
+        .send()
+        .await
+        .expect("resolve alias request should complete");
+
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    let json: Value = response
+        .json()
+        .await
+        .expect("error response should be JSON");
+    assert_eq!(json["code"], Value::String("not_found".to_owned()));
+
+    let resolve_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("alias resolve request should be captured");
+    assert!(
+        resolve_request
+            .path
+            .ends_with("/rest/v1/rpc/rpc_resolve_secret_alias")
+    );
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
 }
 
 #[tokio::test(flavor = "current_thread")]
