@@ -4,8 +4,10 @@ set -euo pipefail
 
 readonly E2E_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly E2E_REPO_ROOT="$(cd "${E2E_LIB_DIR}/../.." && pwd)"
+readonly MIPSORCU_BASE_URL="${MIPSORCU_BASE_URL:-http://127.0.0.1:3000}"
 readonly E2E_MODE="${MIPSORCU_E2E_MODE:-container}"
 readonly SIGNATURE_KEY_VERSION="${MIPSORCU_SIGNATURE_KEY_VERSION:-1}"
+readonly FORBIDDEN_RESPONSE_PATTERN='plaintext|secret_body|service_role|master_key'
 
 log_info() {
     printf '[e2e] %s\n' "$*" >&2
@@ -34,15 +36,25 @@ require_env() {
         || fail "required environment variable is empty: ${variable_name}"
 }
 
-validate_common_env() {
-    require_env "MIPSORCU_BASE_URL"
-    require_env "MIPSORCU_JWT"
-    require_env "MIPSORCU_AUDITOR_JWT"
-
+validate_mode() {
     case "${E2E_MODE}" in
         container | host) ;;
         *) fail "MIPSORCU_E2E_MODE must be 'container' or 'host'" ;;
     esac
+}
+
+validate_secret_env() {
+    validate_mode
+    require_env "MIPSORCU_JWT"
+}
+
+validate_auditor_env() {
+    validate_mode
+    require_env "MIPSORCU_AUDITOR_JWT"
+}
+
+validate_common_env() {
+    validate_mode
 }
 
 require_state_dir() {
@@ -137,3 +149,11 @@ sha256_hex_bytes() {
         | awk '{print $1}'
 }
 
+assert_no_forbidden_response_material() {
+    local label="$1"
+    local value="$2"
+
+    if printf '%s' "${value}" | grep -qiE "${FORBIDDEN_RESPONSE_PATTERN}"; then
+        fail "${label} contains forbidden plaintext or secret key markers"
+    fi
+}

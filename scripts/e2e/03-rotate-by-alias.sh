@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-validate_common_env
+validate_secret_env
 require_state_dir
 
 readonly rotated_plaintext_hex="76302e312e302d6532652d726f7461746564"
@@ -29,4 +29,3 @@ version="$(printf '%s' "${rotate_response}" | jq -er '.version')"
     || fail "alias rotation returned unexpected version: ${version}"
 
 log_info "alias rotation passed"
-

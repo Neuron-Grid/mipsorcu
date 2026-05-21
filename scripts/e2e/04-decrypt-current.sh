@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-validate_common_env
+validate_secret_env
 require_state_dir
 
 secret_id="$(read_state "secret_id")"
@@ -34,4 +34,3 @@ actual_hash="$(sha256_hex_bytes "${plaintext_hex}")"
     || fail "decrypt plaintext hash mismatch"
 
 log_info "alias decrypt hash verification passed"
-

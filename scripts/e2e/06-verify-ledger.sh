@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-validate_common_env
+validate_auditor_env
 require_state_dir
 
 secret_id="$(read_state "secret_id")"
@@ -15,14 +15,24 @@ ledger_response="$(
         "${MIPSORCU_AUDITOR_JWT}"
 )"
 
+assert_no_forbidden_response_material "ledger response" "${ledger_response}"
+
 for entry_type in secret_created secret_version_created secret_decrypted; do
     printf '%s' "${ledger_response}" \
         | jq -e \
             --arg secret_id "${secret_id}" \
             --arg entry_type "${entry_type}" \
-            '.items | any(.target_secret_id == $secret_id and .entry_type == $entry_type and .result == "success")' \
+            '.items | any(
+                .target_secret_id == $secret_id
+                and .entry_type == $entry_type
+                and .result == "success"
+                and (.signature | type == "string" and length > 0)
+                and .signature_algorithm == "ed25519"
+                and (.signature_key_version | type == "number" and . > 0)
+            )' \
         >/dev/null \
-        || fail "missing ledger entry: ${entry_type}"
+        || fail "missing signed ledger entry: ${entry_type}"
+    log_info "signed ledger entry found: ${entry_type}"
 done
 
 integrity_status_response="$(
@@ -42,4 +52,3 @@ last_sequence_no="$(
 write_state "last_sequence_no" "${last_sequence_no}"
 
 log_info "ledger verification passed"
-
