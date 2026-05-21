@@ -49,6 +49,11 @@ pub fn usage() -> String {
 }
 
 pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), AuditorCliError> {
+    if is_help_args(args) {
+        println!("{}", usage());
+        return Ok(());
+    }
+
     let mut subcommand: Option<&String> = None;
     let mut from_sequence: Option<u64> = None;
     let mut to_sequence: Option<u64> = None;
@@ -135,6 +140,16 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), AuditorCl
             "chain verification failed".to_owned(),
         ))
     }
+}
+
+fn is_help_args(args: &[String]) -> bool {
+    matches!(
+        args,
+        [flag] if flag == "--help" || flag == "-h"
+    ) || matches!(
+        args,
+        [command, flag] if command == "verify" && (flag == "--help" || flag == "-h")
+    )
 }
 
 #[derive(Debug, Serialize)]

@@ -154,6 +154,55 @@ fn run_auditor_verify(
     })
 }
 
+fn run_mipsorcu_args_without_server(
+    args: &[&str],
+    test_name: &str,
+) -> Result<AuditorCliRun, Box<dyn std::error::Error>> {
+    let temp_dir = temp_dir(test_name);
+    let key_dir = temp_dir.join("keys");
+    let fallback_path = temp_dir.join("audit-fallback-current.jsonl");
+    let fallback_archive_dir = temp_dir.join("audit-fallback-archive");
+    fs::create_dir_all(&key_dir)?;
+    fs::write(key_dir.join("1.key"), hex::encode(MASTER_KEY_BYTES))?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mipsorcu"))
+        .current_dir(&temp_dir)
+        .env_clear()
+        .env("MIPSORCU_MASTER_KEY_DIR", &key_dir)
+        .env("MIPSORCU_ACTIVE_KEY_VERSION", "1")
+        .env(
+            "MIPSORCU_ALIAS_ENCRYPTION_KEY",
+            hex::encode([3u8; MASTER_KEY_LENGTH]),
+        )
+        .env("MIPSORCU_ALIAS_ENCRYPTION_KEY_VERSION", "1")
+        .env(
+            "MIPSORCU_ALIAS_FINGERPRINT_KEY",
+            hex::encode([4u8; MASTER_KEY_LENGTH]),
+        )
+        .env("MIPSORCU_ALIAS_FINGERPRINT_KEY_VERSION", "1")
+        .env("MIPSORCU_SUPABASE_URL", "http://127.0.0.1:9")
+        .env("MIPSORCU_SUPABASE_SERVICE_ROLE_KEY", SERVICE_ROLE_KEY)
+        .env("MIPSORCU_SUPABASE_PUBLISHABLE_KEY", PUBLISHABLE_KEY)
+        .env(
+            "MIPSORCU_LEDGER_SIGNING_KEY",
+            hex::encode(LEDGER_SIGNING_KEY_BYTES),
+        )
+        .env("MIPSORCU_LEDGER_SIGNATURE_KEY_VERSION", "1")
+        .env("MIPSORCU_JWT_ISSUER", "issuer")
+        .env("MIPSORCU_JWT_AUDIENCE", "authenticated")
+        .env("MIPSORCU_JWKS_URL", "http://127.0.0.1:1/jwks")
+        .env("MIPSORCU_AUDIT_FALLBACK_PATH", &fallback_path)
+        .env("MIPSORCU_AUDIT_FALLBACK_ARCHIVE_DIR", &fallback_archive_dir)
+        .args(args)
+        .output()?;
+
+    Ok(AuditorCliRun {
+        output,
+        temp_dir,
+        fallback_path,
+    })
+}
+
 fn valid_single_entry_body() -> &'static str {
     Box::leak(
         json!([{
@@ -254,6 +303,37 @@ fn make_missing_key_test_body() -> &'static str {
 }
 
 //  Tests
+#[test]
+fn auditor_top_level_help_exit_code_0_without_rpc() -> Result<(), Box<dyn std::error::Error>> {
+    let run = run_mipsorcu_args_without_server(&["auditor", "--help"], "top-level-help")?;
+
+    assert!(run.output.status.success(), "expected --help to exit 0");
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(stdout.contains("mipsorcu auditor verify"));
+    assert!(!stderr.contains("auditor Supabase RPC error"));
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
+#[test]
+fn auditor_verify_help_exit_code_0_without_rpc() -> Result<(), Box<dyn std::error::Error>> {
+    let run = run_mipsorcu_args_without_server(&["auditor", "verify", "--help"], "verify-help")?;
+
+    assert!(
+        run.output.status.success(),
+        "expected verify --help to exit 0"
+    );
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(stdout.contains("mipsorcu auditor verify"));
+    assert!(!stderr.contains("auditor Supabase RPC error"));
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
 #[test]
 fn auditor_verify_empty_valid_chain_exit_code_0() -> Result<(), Box<dyn std::error::Error>> {
     let body: &'static str = Box::leak(json!([]).to_string().into_boxed_str());
