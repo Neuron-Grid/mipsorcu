@@ -32,6 +32,8 @@ target/
 .ionide
 .env
 .env.container
+!.env.example
+!.env.container.example
 supabase/.temp/
 supabase/.branches
 audit-ui/node_modules/
