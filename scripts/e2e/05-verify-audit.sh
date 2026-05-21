@@ -28,4 +28,10 @@ for action_name in encrypt_create secret_alias_create encrypt_rotate decrypt; do
     log_info "audit event found: ${action_name}"
 done
 
+latest_occurred_at="$(
+    printf '%s' "${audit_response}" \
+        | jq -er '[.items[].occurred_at] | max'
+)"
+write_state "latest_occurred_at" "${latest_occurred_at}"
+
 log_info "audit event verification passed"

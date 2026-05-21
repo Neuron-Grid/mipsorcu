@@ -17,6 +17,49 @@ ledger_response="$(
 
 assert_no_forbidden_response_material "ledger response" "${ledger_response}"
 
+entry_count="$(printf '%s' "${ledger_response}" | jq -er '.items | length')"
+[[ "${entry_count}" =~ ^[1-9][0-9]*$ ]] \
+    || fail "ledger response contains no entries"
+
+unsigned_count="$(
+    printf '%s' "${ledger_response}" \
+        | jq -er '[.items[] | select(
+            (.signature | type != "string" or length == 0)
+            or .signature_algorithm != "ed25519"
+            or (.signature_key_version | type != "number" or . <= 0)
+        )] | length'
+)"
+[[ "${unsigned_count}" == "0" ]] \
+    || fail "ledger response contains unsigned or invalid signature entries: ${unsigned_count}"
+
+sequence_check="$(
+    printf '%s' "${ledger_response}" \
+        | jq -er '
+            [.items[].sequence_no] | sort
+            | if length == 0 then
+                {ok: false, first: null, last: null}
+              else
+                . as $seqs
+                | {
+                    ok: all(range(1; length); $seqs[.] == ($seqs[0] + .)),
+                    first: $seqs[0],
+                    last: $seqs[-1]
+                  }
+              end
+        '
+)"
+
+sequence_ok="$(printf '%s' "${sequence_check}" | jq -er '.ok')"
+[[ "${sequence_ok}" == "true" ]] \
+    || fail "ledger sequence numbers are not contiguous"
+
+first_sequence="$(printf '%s' "${sequence_check}" | jq -er '.first')"
+last_sequence="$(printf '%s' "${sequence_check}" | jq -er '.last')"
+[[ "${first_sequence}" =~ ^[1-9][0-9]*$ ]] \
+    || fail "invalid first ledger sequence"
+[[ "${last_sequence}" =~ ^[1-9][0-9]*$ ]] \
+    || fail "invalid last ledger sequence"
+
 for entry_type in secret_created secret_version_created secret_decrypted; do
     printf '%s' "${ledger_response}" \
         | jq -e \
@@ -35,20 +78,7 @@ for entry_type in secret_created secret_version_created secret_decrypted; do
     log_info "signed ledger entry found: ${entry_type}"
 done
 
-integrity_status_response="$(
-    request_json \
-        "GET" \
-        "${MIPSORCU_BASE_URL}/audit/v1/integrity-status" \
-        "${MIPSORCU_AUDITOR_JWT}"
-)"
-last_sequence_no="$(
-    printf '%s' "${integrity_status_response}" \
-        | jq -er 'map(.last_sequence_no) | max'
-)"
+write_state "ledger_first_sequence" "${first_sequence}"
+write_state "ledger_last_sequence" "${last_sequence}"
 
-[[ "${last_sequence_no}" =~ ^[1-9][0-9]*$ ]] \
-    || fail "invalid last_sequence_no returned by integrity-status"
-
-write_state "last_sequence_no" "${last_sequence_no}"
-
-log_info "ledger verification passed"
+log_info "ledger verification passed (count=${entry_count}, sequence ${first_sequence}..${last_sequence})"

@@ -6,22 +6,8 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export MIPSORCU_BASE_URL="${MIPSORCU_BASE_URL:-http://127.0.0.1:3000}"
 export MIPSORCU_E2E_MODE="${MIPSORCU_E2E_MODE:-container}"
-
-if [[ -z "${MIPSORCU_E2E_STATE_DIR:-}" ]]; then
-    export MIPSORCU_E2E_STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mipsorcu-e2e-state.XXXXXX")"
-    cleanup_state_dir="true"
-else
-    mkdir -p "${MIPSORCU_E2E_STATE_DIR}"
-    cleanup_state_dir="false"
-fi
-
-cleanup() {
-    if [[ "${cleanup_state_dir}" == "true" ]]; then
-        rm -rf "${MIPSORCU_E2E_STATE_DIR}"
-    fi
-}
-
-trap cleanup EXIT
+export MIPSORCU_E2E_STATE_DIR="${MIPSORCU_E2E_STATE_DIR:-${STATE_DIR:-/tmp/mipsorcu-e2e-state}}"
+mkdir -p "${MIPSORCU_E2E_STATE_DIR}"
 
 printf '[e2e] base_url=%s\n' "${MIPSORCU_BASE_URL}" >&2
 printf '[e2e] mode=%s\n' "${MIPSORCU_E2E_MODE}" >&2
@@ -40,4 +26,4 @@ do
     bash "${SCRIPT_DIR}/${step}"
 done
 
-printf '[e2e] representative flow passed\n' >&2
+printf '\n===== E2E PASSED =====\n'

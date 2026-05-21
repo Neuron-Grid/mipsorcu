@@ -4,7 +4,9 @@ set -euo pipefail
 
 readonly E2E_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly E2E_REPO_ROOT="$(cd "${E2E_LIB_DIR}/../.." && pwd)"
+readonly DEFAULT_E2E_STATE_DIR="/tmp/mipsorcu-e2e-state"
 readonly MIPSORCU_BASE_URL="${MIPSORCU_BASE_URL:-http://127.0.0.1:3000}"
+readonly MIPSORCU_E2E_STATE_DIR="${MIPSORCU_E2E_STATE_DIR:-${STATE_DIR:-${DEFAULT_E2E_STATE_DIR}}}"
 readonly E2E_MODE="${MIPSORCU_E2E_MODE:-container}"
 readonly SIGNATURE_KEY_VERSION="${MIPSORCU_SIGNATURE_KEY_VERSION:-1}"
 readonly FORBIDDEN_RESPONSE_PATTERN='plaintext|secret_body|service_role|master_key'
@@ -58,9 +60,19 @@ validate_common_env() {
 }
 
 require_state_dir() {
-    require_env "MIPSORCU_E2E_STATE_DIR"
     [[ -d "${MIPSORCU_E2E_STATE_DIR}" ]] \
         || fail "state directory does not exist: ${MIPSORCU_E2E_STATE_DIR}"
+}
+
+reset_state_dir() {
+    case "${MIPSORCU_E2E_STATE_DIR}" in
+        "" | "/" | ".")
+            fail "refusing to reset unsafe state directory: ${MIPSORCU_E2E_STATE_DIR}"
+            ;;
+    esac
+
+    rm -rf "${MIPSORCU_E2E_STATE_DIR}"
+    mkdir -p "${MIPSORCU_E2E_STATE_DIR}"
 }
 
 state_path() {

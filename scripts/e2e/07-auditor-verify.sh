@@ -14,14 +14,16 @@ else
     require_command "mipsorcu"
 fi
 
-last_sequence_no="$(read_state "last_sequence_no")"
+first_sequence="$(read_state "ledger_first_sequence")"
+last_sequence="$(read_state "ledger_last_sequence")"
 verify_response="$(
     run_mipsorcu_cli auditor verify \
-        --from-sequence "1" \
-        --to-sequence "${last_sequence_no}" \
+        --from-sequence "${first_sequence}" \
+        --to-sequence "${last_sequence}" \
         --format json
 )"
 
 printf '%s' "${verify_response}" | jq -e '.valid == true' >/dev/null
+printf '%s' "${verify_response}" | jq -e '.checked_count > 0' >/dev/null
 
-log_info "auditor verification passed through sequence ${last_sequence_no}"
+log_info "auditor verification passed for sequence ${first_sequence}..${last_sequence}"

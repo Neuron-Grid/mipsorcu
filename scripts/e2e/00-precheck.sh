@@ -5,7 +5,6 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 validate_common_env
-require_state_dir
 
 for command_name in bash curl jq xxd shasum; do
     require_command "${command_name}"
@@ -35,3 +34,6 @@ if [[ "${E2E_MODE}" == "container" ]]; then
     curl -fsS "http://127.0.0.1:8080/" >/dev/null
     log_info "audit-ui static endpoint is reachable"
 fi
+
+reset_state_dir
+log_info "state directory initialized: ${MIPSORCU_E2E_STATE_DIR}"
