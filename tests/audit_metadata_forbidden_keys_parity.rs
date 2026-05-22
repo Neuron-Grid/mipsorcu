@@ -3,9 +3,11 @@ use std::fs;
 
 use mipsorcu::{
     AuditAction, AuditMetadata, AuditResult, FORBIDDEN_AUDIT_METADATA_KEYS,
-    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
+    FORBIDDEN_LEDGER_PAYLOAD_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
 };
 
+const CURRENT_FORBIDDEN_KEY_MIGRATION_PATH: &str =
+    "supabase/migrations/1250_security_forbidden_key_parity.sql";
 const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
     "supabase/migrations/1230_complete_t05_alias_audit_extension.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
@@ -13,12 +15,14 @@ const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
 // 新 action を追加する場合は、このパスの migration を更新すること。
 const FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_START";
 const FORBIDDEN_END_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_END";
+const LEDGER_FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_LEDGER_PAYLOAD_KEYS_START";
+const LEDGER_FORBIDDEN_END_MARKER: &str = "-- FORBIDDEN_LEDGER_PAYLOAD_KEYS_END";
 const ALLOWLIST_START_MARKER: &str = "-- ACTION_ALLOWLIST_START";
 const ALLOWLIST_END_MARKER: &str = "-- ACTION_ALLOWLIST_END";
 
 #[test]
 fn forbidden_keys_parity_between_rust_and_sql() {
-    let migration = fs::read_to_string(LATEST_AUDIT_METADATA_MIGRATION_PATH)
+    let migration = fs::read_to_string(CURRENT_FORBIDDEN_KEY_MIGRATION_PATH)
         .expect("forbidden-keys migration should be readable");
     let sql_keys = extract_sql_forbidden_keys(&migration);
     let rust_keys = FORBIDDEN_AUDIT_METADATA_KEYS
@@ -27,6 +31,30 @@ fn forbidden_keys_parity_between_rust_and_sql() {
         .collect::<BTreeSet<_>>();
 
     assert_eq!(sql_keys, rust_keys);
+}
+
+#[test]
+fn forbidden_keys_parity_between_audit_metadata_and_ledger_payload() {
+    let migration = fs::read_to_string(CURRENT_FORBIDDEN_KEY_MIGRATION_PATH)
+        .expect("forbidden-keys migration should be readable");
+    let sql_audit_keys = extract_sql_forbidden_keys(&migration);
+    let sql_ledger_keys = extract_sql_keys_between(
+        &migration,
+        LEDGER_FORBIDDEN_START_MARKER,
+        LEDGER_FORBIDDEN_END_MARKER,
+    );
+    let rust_audit_keys = FORBIDDEN_AUDIT_METADATA_KEYS
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect::<BTreeSet<_>>();
+    let rust_ledger_keys = FORBIDDEN_LEDGER_PAYLOAD_KEYS
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rust_audit_keys, sql_audit_keys);
+    assert_eq!(rust_ledger_keys, sql_ledger_keys);
+    assert_eq!(rust_audit_keys, rust_ledger_keys);
 }
 
 #[test]
@@ -833,11 +861,15 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
 }
 
 fn extract_sql_forbidden_keys(sql: &str) -> BTreeSet<String> {
+    extract_sql_keys_between(sql, FORBIDDEN_START_MARKER, FORBIDDEN_END_MARKER)
+}
+
+fn extract_sql_keys_between(sql: &str, start_marker: &str, end_marker: &str) -> BTreeSet<String> {
     let (_, after_start) = sql
-        .split_once(FORBIDDEN_START_MARKER)
+        .split_once(start_marker)
         .expect("start marker should exist in migration");
     let (key_block, _) = after_start
-        .split_once(FORBIDDEN_END_MARKER)
+        .split_once(end_marker)
         .expect("end marker should exist in migration");
 
     let mut keys = BTreeSet::new();

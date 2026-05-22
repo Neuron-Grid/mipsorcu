@@ -789,17 +789,23 @@ fn metadata_adds_attempted_secret_id_as_canonical_uuid() -> TestResult<()> {
 #[test]
 fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
     for key in [
+        "alias_decryption_key",
+        "alias_encryption_key",
+        "alias_fingerprint_key",
         "authorization",
         "authorization_header",
         "bearer_token",
+        "canonical_alias_plaintext",
         "ciphertext",
         "data_key",
         "decrypt_result",
         "decrypted",
         "decrypted_data",
+        "ed25519_private_key",
         "encrypted_data_key",
         "jwt",
         "jwt_full",
+        "ledger_signing_key",
         "master_key",
         "passphrase",
         "password",
@@ -810,6 +816,7 @@ fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
         "request_body_full",
         "response_body",
         "response_body_full",
+        "secret_body",
         "secret_key",
         "secret_value",
         "service_role",
@@ -822,6 +829,8 @@ fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
         );
     }
     assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"attempted_secret_id"));
+    assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"alias_fingerprint"));
+    assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"alias_fingerprint_key_version"));
     assert!(!FORBIDDEN_AUDIT_METADATA_KEYS.contains(&"source_event_at"));
     assert!(
         AuditMetadata::new(json!({
@@ -830,6 +839,45 @@ fn forbidden_audit_metadata_keys_match_reserved_key_expectations() {
         }))
         .is_ok()
     );
+}
+
+#[test]
+fn auth_failure_audit_event_contains_minimum_information_only() -> TestResult<()> {
+    let event = AuditEvent::new(auth_failure_parts()?)?;
+
+    assert_eq!(event.action(), AuditAction::AuthFailure);
+    assert_eq!(event.result(), AuditResult::Failure);
+    assert!(event.actor_user_id().is_none());
+    assert!(event.actor_device_id().is_none());
+    assert!(event.target_secret_id().is_none());
+    assert!(event.key_version().is_none());
+
+    let metadata = event
+        .metadata_json()
+        .as_value()
+        .as_object()
+        .ok_or_else(|| std::io::Error::other("auth_failure metadata should be an object"))?;
+    let keys = metadata.keys().map(String::as_str).collect::<Vec<_>>();
+
+    assert_eq!(keys, vec!["error_code", "source_event_at"]);
+    for forbidden_key in [
+        "actor_user_id",
+        "target_secret_id",
+        "target_alias",
+        "key_version",
+        "ip",
+        "ip_address",
+        "user_agent",
+        "jwt",
+        "authorization",
+    ] {
+        assert!(
+            !metadata.contains_key(forbidden_key),
+            "auth_failure metadata should not contain {forbidden_key}"
+        );
+    }
+
+    Ok(())
 }
 
 #[test]
@@ -982,6 +1030,7 @@ async fn recorder_writes_pending_json_line_when_appender_fails() -> TestResult<(
         Value::String(expected_source_event_at.clone())
     );
     assert!(SourceEventAt::parse(&expected_source_event_at).is_ok());
+    assert_no_forbidden_audit_json_keys(&lines[0]);
 
     Ok(())
 }
@@ -1442,4 +1491,25 @@ async fn fake_appender_records_attempted_audit_event_ids() -> TestResult<()> {
     assert_eq!(appender.appended_event_ids(), vec![AUDIT_EVENT_ID]);
 
     Ok(())
+}
+
+fn assert_no_forbidden_audit_json_keys(value: &Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, nested) in object {
+                let normalized = key.trim().to_ascii_lowercase();
+                assert!(
+                    !FORBIDDEN_AUDIT_METADATA_KEYS.contains(&normalized.as_str()),
+                    "{key} should not appear in fallback JSONL"
+                );
+                assert_no_forbidden_audit_json_keys(nested);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                assert_no_forbidden_audit_json_keys(nested);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }

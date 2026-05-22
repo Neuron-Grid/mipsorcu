@@ -1,11 +1,11 @@
 use mipsorcu::{
-    DeviceId, LEDGER_HASH_LENGTH, LedgerChainHead, LedgerEntryDraft, LedgerEntryDraftParts,
-    LedgerEntryId, LedgerEntryType, LedgerError, LedgerHash, LedgerPayload, LedgerResult,
-    LedgerSequenceNo, LedgerSignatureKeyVersion, LedgerSigningKey, LedgerTargetSecretVersionId,
-    LedgerVerifyingKey, OwnerUserId, RequestId, SecretId, SignedLedgerEntry,
-    SignedLedgerEntryParts, SourceEventAt, verify_ledger_chain,
+    DeviceId, FORBIDDEN_LEDGER_PAYLOAD_KEYS, LEDGER_HASH_LENGTH, LedgerChainHead, LedgerEntryDraft,
+    LedgerEntryDraftParts, LedgerEntryId, LedgerEntryType, LedgerError, LedgerHash, LedgerPayload,
+    LedgerResult, LedgerSequenceNo, LedgerSignatureKeyVersion, LedgerSigningKey,
+    LedgerTargetSecretVersionId, LedgerVerifyingKey, OwnerUserId, RequestId, SecretId,
+    SignedLedgerEntry, SignedLedgerEntryParts, SourceEventAt, verify_ledger_chain,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -256,6 +256,41 @@ fn ledger_payload_rejects_forbidden_key_inside_array_object() {
         result,
         Err(LedgerError::ForbiddenPayloadKey { .. })
     ));
+}
+
+#[test]
+fn ledger_payload_rejects_every_synchronized_forbidden_key() {
+    for key in FORBIDDEN_LEDGER_PAYLOAD_KEYS {
+        let mut object = Map::new();
+        object.insert(
+            "algorithm".to_owned(),
+            Value::String("xchacha20-poly1305".to_owned()),
+        );
+        object.insert(
+            "classification".to_owned(),
+            Value::String("confidential".to_owned()),
+        );
+        object.insert("key_version".to_owned(), Value::Number(1.into()));
+        object.insert("version".to_owned(), Value::Number(1.into()));
+        object.insert((*key).to_owned(), Value::String("redacted".to_owned()));
+
+        let result = LedgerPayload::new(LedgerEntryType::SecretCreated, Value::Object(object));
+
+        assert!(
+            matches!(result, Err(LedgerError::ForbiddenPayloadKey { .. })),
+            "{key} should be rejected as a forbidden ledger payload key"
+        );
+    }
+}
+
+#[test]
+fn ledger_canonical_payload_contains_no_forbidden_payload_keys() -> TestResult {
+    let entry = sample_signed_entry(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?;
+    let document: Value = serde_json::from_slice(entry.canonical_payload().as_bytes())?;
+
+    assert_no_forbidden_ledger_payload_keys(&document);
+
+    Ok(())
 }
 
 #[test]
@@ -770,4 +805,25 @@ fn sample_signing_key_with_seed(
     seed: &[u8],
 ) -> Result<LedgerSigningKey, LedgerError> {
     LedgerSigningKey::from_secret_key_bytes(LedgerSignatureKeyVersion::new(version)?, seed)
+}
+
+fn assert_no_forbidden_ledger_payload_keys(value: &Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, nested) in object {
+                let normalized = key.trim().to_ascii_lowercase();
+                assert!(
+                    !FORBIDDEN_LEDGER_PAYLOAD_KEYS.contains(&normalized.as_str()),
+                    "{key} should not appear in canonical ledger payload"
+                );
+                assert_no_forbidden_ledger_payload_keys(nested);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                assert_no_forbidden_ledger_payload_keys(nested);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
