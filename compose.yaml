@@ -1,53 +1,27 @@
 services:
-  mipsorcu:
-    build:
-      context: .
-    image: mipsorcu:local
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      MIPSORCU_LISTEN_ADDR: "0.0.0.0:3000"
-    volumes:
-      - mipsorcu-data:/var/lib/mipsorcu
-    ports:
-      - "127.0.0.1:3000:3000"
-    restart: unless-stopped
-    deploy:
-      replicas: 1
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
-  audit-ui:
-    build:
-      context: ./audit-ui
-      args:
-        VITE_MIPSORCU_SUPABASE_URL: ${VITE_MIPSORCU_SUPABASE_URL:-http://127.0.0.1:54321}
-        VITE_MIPSORCU_SUPABASE_PUBLISHABLE_KEY: ${VITE_MIPSORCU_SUPABASE_PUBLISHABLE_KEY:-local-dev-publishable-key}
-        VITE_MIPSORCU_AUDIT_API_BASE_URL: ${VITE_MIPSORCU_AUDIT_API_BASE_URL:-http://127.0.0.1:3000}
-    image: mipsorcu-audit-ui:local
-    depends_on:
-      mipsorcu:
-        condition: service_healthy
-    environment:
-      MIPSORCU_SUPABASE_SERVICE_ROLE_KEY: ""
-      MIPSORCU_MASTER_KEY: ""
-      MIPSORCU_LEDGER_SIGNING_KEY: ""
-      MIPSORCU_ALIAS_ENCRYPTION_KEY: ""
-      MIPSORCU_ALIAS_FINGERPRINT_KEY: ""
-    ports:
-      - "127.0.0.1:8080:8080"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    mipsorcu:
+        build:
+            context: .
+        image: mipsorcu:local
+        env_file:
+            - path: .env
+              required: false
+        environment:
+            MIPSORCU_LISTEN_ADDR: "0.0.0.0:3000"
+        volumes:
+            - mipsorcu-data:/var/lib/mipsorcu
+        ports:
+            - "127.0.0.1:3000:3000"
+        restart: unless-stopped
+        deploy:
+            replicas: 1
+        healthcheck:
+            test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
 
 volumes:
-  mipsorcu-data:
-    name: mipsorcu-data
+    mipsorcu-data:
+        name: mipsorcu-data
