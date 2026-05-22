@@ -237,13 +237,13 @@ fetch_audit_events() {
 }
 
 assert_auth_failure_audit_recorded_since() {
-    local _start_time="$1"
+    local start_time="$1"
     local events
 
     events="$(fetch_audit_events "auth_failure" "failure")"
     assert_no_forbidden_material "auth_failure audit response" "${events}"
     printf '%s' "${events}" \
-        | jq -e \
+        | jq -e --arg start_time "${start_time}" \
             '.items | any(
                 .action == "auth_failure"
                 and .result == "failure"
@@ -253,32 +253,35 @@ assert_auth_failure_audit_recorded_since() {
                 and .key_version == null
                 and (.metadata_json | type == "object")
                 and (.metadata_json.source_event_at | type == "string")
+                and .metadata_json.source_event_at >= $start_time
                 and (.metadata_json.error_code | type == "string")
             )' \
         >/dev/null \
-        || fail "auth_failure audit event was not recorded with minimum information"
+        || fail "auth_failure audit event was not recorded with minimum information since ${start_time}"
 
-    log_ok "auth_failure audit event recorded with minimum information"
+    log_ok "auth_failure audit event recorded with minimum information since ${start_time}"
 }
 
 assert_audit_ui_read_failure_recorded_since() {
-    local _start_time="$1"
+    local start_time="$1"
     local events
 
     events="$(fetch_audit_events "audit_ui_read" "failure")"
     assert_no_forbidden_material "audit_ui_read failure audit response" "${events}"
     printf '%s' "${events}" \
-        | jq -e \
+        | jq -e --arg start_time "${start_time}" \
             '.items | any(
                 .action == "audit_ui_read"
                 and .result == "failure"
                 and (.metadata_json | type == "object")
+                and (.metadata_json.source_event_at | type == "string")
+                and .metadata_json.source_event_at >= $start_time
                 and .metadata_json.error_code == "auditor_role_required"
             )' \
         >/dev/null \
-        || fail "audit_ui_read failure audit event was not recorded"
+        || fail "audit_ui_read failure audit event was not recorded since ${start_time}"
 
-    log_ok "audit_ui_read failure audit event recorded"
+    log_ok "audit_ui_read failure audit event recorded since ${start_time}"
 }
 
 psql_scalar() {

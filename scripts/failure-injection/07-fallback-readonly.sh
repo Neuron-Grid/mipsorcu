@@ -15,6 +15,15 @@ require_local_test_db_url
 
 log_info "Scenario 7: fallback write failure fails closed"
 
+log_info "creating baseline secret for decrypt fail-close check"
+baseline_response="$(
+    create_test_secret_with_token \
+        "${MIPSORCU_JWT}" \
+        "66692d30372d646563727970742d626173656c696e65"
+)"
+baseline_secret_id="$(printf '%s' "${baseline_response}" | jq -er '.secret_id')"
+log_ok "baseline secret created for decrypt fail-close check"
+
 restore_all() {
     log_info "restoring fallback file permissions and RPC grants"
     docker compose exec -T "mipsorcu" sh -c \
@@ -48,6 +57,23 @@ body="${result#*|}"
 
 assert_not_success_status "${status}"
 assert_no_forbidden_material "fail-close response body" "${body}"
+assert_fallback_no_forbidden_material
+
+log_info "checking decrypt also fails closed while audit append and fallback are unavailable"
+decrypt_result="$(
+    http_request \
+        --max-time 30 \
+        -X POST \
+        -H "Authorization: Bearer ${MIPSORCU_JWT}" \
+        -H "Content-Type: application/json" \
+        --data '{}' \
+        "${MIPSORCU_BASE_URL}/v1/secrets/${baseline_secret_id}/decrypt"
+)"
+decrypt_status="${decrypt_result%%|*}"
+decrypt_body="${decrypt_result#*|}"
+
+assert_not_success_status "${decrypt_status}"
+assert_no_forbidden_material "decrypt fail-close response body" "${decrypt_body}"
 assert_fallback_no_forbidden_material
 
 restore_all
