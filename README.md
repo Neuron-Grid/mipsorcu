@@ -58,7 +58,7 @@ External Database
 ### 2.3 コンテナ構成
 
 ```
-Client ──┬──→ audit-ui container（静的配信、read-only console）
+Client ──┬──→ mipsorcu-audit-ui container（外部 companion repo、read-only console）
          │             │
          │             │ read-only audit API
          │             ▼
@@ -68,7 +68,7 @@ Client ──┬──→ audit-ui container（静的配信、read-only console�
                        └──→ External Database / Auth
 ```
 
-`audit-ui` は静的ファイル配信コンテナです。高権限キー・Master Key・署名秘密鍵は runtime env、build args、image、静的 bundle のいずれにも渡しません。
+`mipsorcu-audit-ui` は外部必須成果物として `../mipsorcu-audit-ui` で管理する静的ファイル配信コンテナです。高権限キー・Master Key・署名秘密鍵は runtime env、build args、image、静的 bundle のいずれにも渡しません。
 
 ---
 
@@ -99,13 +99,15 @@ mipsorcu/
 ├── src/                    # Rust サーバー実装
 ├── supabase/
 │   └── migrations/         # スキーマ / RLS / RPC 定義
-├── audit-ui/               # 監査担当者向け read-only UI
-│   ├── Dockerfile
-│   ├── nginx.conf
-│   └── ...
 ├── compose.yaml
 ├── .env.example
 └── scripts/
+
+../mipsorcu-audit-ui/       # 外部必須成果物。監査担当者向け read-only UI
+├── Dockerfile
+├── nginx.conf
+├── src/
+└── tests/
 ```
 
 ---
@@ -116,6 +118,7 @@ mipsorcu/
 
 - Docker および Docker Compose が利用可能であること
 - 外部データベース（Supabase project）が用意済み、または Supabase CLI でローカル起動できること
+- 監査 UI を使う場合は、外部 companion repo `../mipsorcu-audit-ui` が用意済みであること
 - JWT issuer / audience / JWKS URL が確定していること
 - Master Key、台帳署名鍵などの秘密値が生成済みであること
 
@@ -123,13 +126,13 @@ mipsorcu/
 
 ```sh
 # 1. 環境変数を準備
-cp .env.example .env
+cp ".env.example" ".env"
 # .env を編集し、必要な値を実値に置換する
 
 # 2. データベース migration を適用
 supabase db push
 
-# 3. コンテナの build と起動
+# 3. server container の build と起動
 docker compose build
 docker compose up -d
 
@@ -137,8 +140,12 @@ docker compose up -d
 curl http://127.0.0.1:3000/health
 curl http://127.0.0.1:3000/ready
 
-# 5. 監査 UI を確認
-open http://127.0.0.1:8080
+# 5. 監査 UI を外部 repo で build / run する場合
+cd "../mipsorcu-audit-ui"
+docker build -t "mipsorcu-audit-ui:local" "."
+docker run --rm -d --name "mipsorcu-audit-ui-local" -p "127.0.0.1:8080:8080" "mipsorcu-audit-ui:local"
+curl -fsS "http://127.0.0.1:8080/healthz"
+docker rm -f "mipsorcu-audit-ui-local"
 ```
 
 `.env` および永続化ボリュームには秘密値が含まれます。バージョン管理から除外し、アクセス制御・バックアップ対象として運用してください。
@@ -155,9 +162,11 @@ cargo test
 supabase db reset
 supabase test db
 
-# 監査 UI
-cd audit-ui
+# 監査 UI（外部 repo）
+cd "../mipsorcu-audit-ui"
+bun install --frozen-lockfile
 bun run check
+bun run test:guards
 bun run build
 bun run test:e2e
 ```

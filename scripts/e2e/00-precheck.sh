@@ -31,8 +31,10 @@ printf '%s' "${status_response}" | jq -e '.status == "active"' >/dev/null
 log_info "signature key is active"
 
 if [[ "${E2E_MODE}" == "container" ]]; then
-    curl -fsS "http://127.0.0.1:8080/" >/dev/null
-    log_info "audit-ui static endpoint is reachable"
+    if [[ -n "${MIPSORCU_AUDIT_UI_BASE_URL:-}" ]]; then
+        curl -fsS "${MIPSORCU_AUDIT_UI_BASE_URL}" >/dev/null
+        log_info "audit-ui endpoint is reachable: ${MIPSORCU_AUDIT_UI_BASE_URL}"
+    fi
 fi
 
 reset_state_dir

@@ -1,74 +1,99 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly DEFAULT_AUDIT_UI_REPO_DIR="${REPO_ROOT}/../mipsorcu-audit-ui"
+readonly AUDIT_UI_REPO_DIR="${MIPSORCU_AUDIT_UI_REPO_DIR:-${DEFAULT_AUDIT_UI_REPO_DIR}}"
+
+require_audit_ui_repo() {
+    if [[ ! -d "${AUDIT_UI_REPO_DIR}" ]]; then
+        echo "NG: audit-ui repository not found: ${AUDIT_UI_REPO_DIR}"
+        echo "    Set MIPSORCU_AUDIT_UI_REPO_DIR to the external mipsorcu-audit-ui repository."
+        exit 1
+    fi
+
+    if [[ ! -f "${AUDIT_UI_REPO_DIR}/package.json" ]]; then
+        echo "NG: audit-ui package.json not found: ${AUDIT_UI_REPO_DIR}/package.json"
+        exit 1
+    fi
+}
+
+run_audit_ui() {
+    local label="$1"
+    shift
+
+    echo "${label}"
+    (
+        cd "${AUDIT_UI_REPO_DIR}"
+        "$@"
+    )
+    echo "  OK"
+}
+
+run_audit_ui_check() {
+    local output
+    local exit_code=0
+
+    echo "[4/8] audit-ui check"
+    output="$(
+        cd "${AUDIT_UI_REPO_DIR}"
+        bun run check
+    2>&1)" || exit_code=$?
+    printf '%s\n' "${output}"
+
+    if [[ "${exit_code}" != "0" ]]; then
+        echo "  NG: audit-ui check failed"
+        exit "${exit_code}"
+    fi
+
+    if printf '%s' "${output}" | grep -qE 'Found [1-9][0-9]* warnings?\.'; then
+        echo "  NG: audit-ui check emitted warnings"
+        exit 1
+    fi
+
+    echo "  OK"
+}
+
 echo "============================================================"
 echo " mipsorcu security check"
 echo "============================================================"
+echo " audit-ui repo: ${AUDIT_UI_REPO_DIR}"
+echo "============================================================"
 
-echo "[1/7] Rust clippy (strict)"
-cargo clippy --all-targets --all-features -- -D warnings
-echo "  OK"
+require_audit_ui_repo
 
-echo "[2/7] Rust tests"
-RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" cargo test --tests
-echo "  OK"
-
-echo "[3/7] Supabase pgTAP tests"
-supabase test db
-echo "  OK"
-
-echo "[4/7] audit-ui guards"
+echo "[1/8] Rust clippy (strict)"
 (
-    cd "audit-ui"
-    bun run test:guards
+    cd "${REPO_ROOT}"
+    cargo clippy --all-targets --all-features -- -D warnings
 )
 echo "  OK"
 
-echo "[5/7] audit-ui boundary"
-bash "scripts/check-audit-ui-boundary.sh"
+echo "[2/8] Rust tests"
+(
+    cd "${REPO_ROOT}"
+    RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" cargo test --tests
+)
 echo "  OK"
 
-echo "[6/7] audit-ui source/test server-only env scan"
-for path in "audit-ui/src" "audit-ui/tests"; do
-    [[ -d "${path}" ]] || continue
-    while IFS= read -r -d '' file; do
-        case "${file}" in
-            "audit-ui/src/redaction.ts" | "audit-ui/tests/e2e/audit-ui.spec.ts")
-                continue
-                ;;
-        esac
-
-        if grep -nE "MIPSORCU_SUPABASE_SERVICE_ROLE_KEY|MIPSORCU_MASTER_KEY|MIPSORCU_LEDGER_SIGNING_KEY|MIPSORCU_ALIAS_ENCRYPTION_KEY|MIPSORCU_ALIAS_FINGERPRINT_KEY|service_role|master_key|ledger_signing_key|alias_encryption_key|alias_fingerprint_key" "${file}"; then
-            echo "  NG: audit-ui に server-only env または key marker を検出: ${file}"
-            exit 1
-        fi
-    done < <(find "${path}" -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \) -print0)
-done
+echo "[3/8] Supabase pgTAP tests"
+(
+    cd "${REPO_ROOT}"
+    supabase test db
+)
 echo "  OK"
 
-echo "[7/7] Compose audit-ui environment"
-command -v jq >/dev/null 2>&1 || {
-    echo "  NG: jq が見つかりません"
-    exit 1
-}
+run_audit_ui_check
+run_audit_ui "[5/8] audit-ui guards" bun run test:guards
+run_audit_ui "[6/8] audit-ui build" bun run build
+run_audit_ui "[7/8] audit-ui E2E" bun run test:e2e
 
-compose_json="$(docker compose config --format json)"
-leaks="$(
-    printf '%s' "${compose_json}" |
-        jq -r '
-            (.services["audit-ui"].environment // {}) |
-            to_entries[] |
-            select(.key | test("SERVICE_ROLE|MASTER_KEY|LEDGER_SIGNING|ALIAS_ENCRYPTION|ALIAS_FINGERPRINT")) |
-            select((.value // "") != "") |
-            "\(.key)=\(.value)"
-        '
-)"
-
-if [[ -n "${leaks}" ]]; then
-    echo "  NG: compose.yaml の audit-ui environment に値ありの禁止キーを検出"
-    printf '%s\n' "${leaks}"
-    exit 1
-fi
+echo "[8/8] audit-ui boundary"
+(
+    cd "${REPO_ROOT}"
+    MIPSORCU_AUDIT_UI_REPO_DIR="${AUDIT_UI_REPO_DIR}" bash "scripts/check-audit-ui-boundary.sh"
+)
 echo "  OK"
 
 echo ""
