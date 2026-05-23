@@ -9,20 +9,21 @@
 //! - body が `ArchiveExportPackage::to_json_bytes()` と完全一致する
 //! - body / ヘッダ / URL に秘密語が含まれない
 //! - 503 リトライ後に成功する
-//! - 412 PreconditionFailed が `archive_export_overwrite_rejected` に分類される
+//! - 412 PreconditionFailed 後に既存 object を GET して同一性を検証する
 //! - 401/403 が `archive_export_unauthenticated` に分類される
 
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mipsorcu::{
     ArchiveBackend, ArchiveBackendError, ArchiveExportPackage, ArchiveObjectKey,
     ArchiveVerifyOutcome, DigestHash, LedgerHash, LedgerSequenceNo, LedgerSignature,
     LedgerSignatureKeyVersion, MonthlyDigestPeriod, S3ArchiveBackendConfig,
     S3ImmutableArchiveBackend, S3ObjectLockMode, SignedMonthlyDigest, SourceEventAt,
+    archive::s3::{ArchivePutOrQueueOutcome, LocalArchiveQueue},
     build_monthly_digest_canonical_form,
 };
 use time::OffsetDateTime;
@@ -126,6 +127,12 @@ struct CannedResponse {
     reason: &'static str,
 }
 
+struct OwnedCannedResponse {
+    status: u16,
+    reason: &'static str,
+    body: Vec<u8>,
+}
+
 const OK: CannedResponse = CannedResponse {
     status: 200,
     reason: "OK",
@@ -150,6 +157,18 @@ struct MockServer {
 }
 
 fn spawn_mock_s3(responses: Vec<CannedResponse>) -> std::io::Result<MockServer> {
+    let responses = responses
+        .into_iter()
+        .map(|response| OwnedCannedResponse {
+            status: response.status,
+            reason: response.reason,
+            body: Vec::new(),
+        })
+        .collect();
+    spawn_mock_s3_owned(responses)
+}
+
+fn spawn_mock_s3_owned(responses: Vec<OwnedCannedResponse>) -> std::io::Result<MockServer> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let (sender, receiver) = mpsc::channel();
@@ -168,7 +187,12 @@ fn spawn_mock_s3(responses: Vec<CannedResponse>) -> std::io::Result<MockServer> 
                     "captured request receiver was dropped",
                 )
             })?;
-            write_http_response(&mut stream, response.status, response.reason)?;
+            write_http_response(
+                &mut stream,
+                response.status,
+                response.reason,
+                &response.body,
+            )?;
         }
         Ok(())
     });
@@ -236,10 +260,61 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest>
     })
 }
 
-fn write_http_response(stream: &mut TcpStream, status: u16, reason: &str) -> std::io::Result<()> {
-    let response =
-        format!("HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
-    stream.write_all(response.as_bytes())
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(response.as_bytes())?;
+    stream.write_all(body)
+}
+
+fn temp_queue_path() -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "mipsorcu-archive-s3-test-{}-{nanos}.jsonl",
+        std::process::id()
+    ))
+}
+
+fn ok_with_body(body: Vec<u8>) -> OwnedCannedResponse {
+    OwnedCannedResponse {
+        status: 200,
+        reason: "OK",
+        body,
+    }
+}
+
+fn owned_response(response: CannedResponse) -> OwnedCannedResponse {
+    OwnedCannedResponse {
+        status: response.status,
+        reason: response.reason,
+        body: Vec::new(),
+    }
+}
+
+fn precondition_failed_owned() -> OwnedCannedResponse {
+    owned_response(PRECONDITION_FAILED)
+}
+
+fn server_error_owned() -> OwnedCannedResponse {
+    owned_response(SERVER_ERROR)
+}
+
+fn not_found_owned() -> OwnedCannedResponse {
+    OwnedCannedResponse {
+        status: 404,
+        reason: "Not Found",
+        body: Vec::new(),
+    }
 }
 
 fn drain_requests(server: MockServer) -> std::io::Result<Vec<CapturedRequest>> {
@@ -380,21 +455,82 @@ async fn put_object_retries_503_then_succeeds() -> Result<(), Box<dyn std::error
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn put_object_rejects_412_immediately() -> Result<(), Box<dyn std::error::Error>> {
-    let server = spawn_mock_s3(vec![PRECONDITION_FAILED])?;
+async fn put_object_returns_ok_when_412_existing_payload_matches()
+-> Result<(), Box<dyn std::error::Error>> {
+    let package = make_package();
+    let expected_body = package.to_json_bytes()?;
+    let server = spawn_mock_s3_owned(vec![
+        precondition_failed_owned(),
+        ok_with_body(expected_body),
+    ])?;
+    let config = make_config(server.base_url.clone());
+    let backend = make_backend(config);
+
+    backend.put_object(&make_key(), &package).await?;
+
+    let requests = drain_requests(server)?;
+    assert_eq!(
+        requests.len(),
+        2,
+        "412 must be followed by GET verification"
+    );
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(requests[1].method, "GET");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn put_object_reports_content_mismatch_when_412_existing_payload_differs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_mock_s3_owned(vec![
+        precondition_failed_owned(),
+        ok_with_body(br#"{"archive_schema_version":1,"different":true}"#.to_vec()),
+    ])?;
     let config = make_config(server.base_url.clone());
     let backend = make_backend(config);
 
     let result = backend.put_object(&make_key(), &make_package()).await;
     match result {
         Err(ArchiveBackendError::BackendFailed { code }) => {
-            assert_eq!(code, "archive_export_overwrite_rejected");
+            assert_eq!(code, "archive_export_content_mismatch");
+        }
+        other => panic!("expected content mismatch, got {other:?}"),
+    }
+
+    let requests = drain_requests(server)?;
+    assert_eq!(
+        requests.len(),
+        2,
+        "412 must be followed by GET verification"
+    );
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(requests[1].method, "GET");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn put_object_reports_not_found_when_412_verify_get_404()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_mock_s3_owned(vec![precondition_failed_owned(), not_found_owned()])?;
+    let config = make_config(server.base_url.clone());
+    let backend = make_backend(config);
+
+    let result = backend.put_object(&make_key(), &make_package()).await;
+    match result {
+        Err(ArchiveBackendError::BackendFailed { code }) => {
+            assert_eq!(code, "archive_export_not_found");
         }
         other => panic!("expected BackendFailed, got {other:?}"),
     }
 
     let requests = drain_requests(server)?;
-    assert_eq!(requests.len(), 1, "412 must not be retried");
+    assert_eq!(
+        requests.len(),
+        2,
+        "412 must be followed by GET verification"
+    );
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(requests[1].method, "GET");
     Ok(())
 }
 
@@ -434,6 +570,93 @@ async fn put_object_gives_up_after_max_retries() -> Result<(), Box<dyn std::erro
 
     let requests = drain_requests(server)?;
     assert_eq!(requests.len(), 4);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn put_object_or_enqueue_queues_only_retriable_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_mock_s3_owned(vec![
+        server_error_owned(),
+        server_error_owned(),
+        server_error_owned(),
+        server_error_owned(),
+    ])?;
+    let config = make_config(server.base_url.clone());
+    let backend = make_backend(config);
+    let queue_path = temp_queue_path();
+    let queue = LocalArchiveQueue::new(&queue_path);
+
+    let outcome = backend
+        .put_object_or_enqueue(&make_key(), &make_package(), &queue)
+        .await?;
+    assert_eq!(outcome, ArchivePutOrQueueOutcome::Queued);
+    assert_eq!(queue.pending_objects()?.len(), 1);
+
+    let requests = drain_requests(server)?;
+    assert_eq!(
+        requests.len(),
+        4,
+        "initial PUT plus max_retries must be attempted before queueing"
+    );
+    let _ = std::fs::remove_file(queue_path);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resend_queued_objects_marks_sent_when_412_existing_payload_matches()
+-> Result<(), Box<dyn std::error::Error>> {
+    let package = make_package();
+    let expected_body = package.to_json_bytes()?;
+    let server = spawn_mock_s3_owned(vec![
+        precondition_failed_owned(),
+        ok_with_body(expected_body),
+    ])?;
+    let config = make_config(server.base_url.clone());
+    let backend = make_backend(config);
+    let queue_path = temp_queue_path();
+    let queue = LocalArchiveQueue::new(&queue_path);
+    queue.append_pending(&make_key(), &package)?;
+
+    let summary = backend.resend_queued_objects(&queue).await?;
+    assert_eq!(summary.attempted, 1);
+    assert_eq!(summary.sent, 1);
+    assert_eq!(summary.failed, 0);
+    assert!(queue.pending_objects()?.is_empty());
+
+    let requests = drain_requests(server)?;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(requests[1].method, "GET");
+    let _ = std::fs::remove_file(queue_path);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resend_queued_objects_leaves_pending_when_412_existing_payload_differs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let package = make_package();
+    let server = spawn_mock_s3_owned(vec![
+        precondition_failed_owned(),
+        ok_with_body(br#"{"archive_schema_version":1,"different":true}"#.to_vec()),
+    ])?;
+    let config = make_config(server.base_url.clone());
+    let backend = make_backend(config);
+    let queue_path = temp_queue_path();
+    let queue = LocalArchiveQueue::new(&queue_path);
+    queue.append_pending(&make_key(), &package)?;
+
+    let summary = backend.resend_queued_objects(&queue).await?;
+    assert_eq!(summary.attempted, 1);
+    assert_eq!(summary.sent, 0);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(queue.pending_objects()?.len(), 1);
+
+    let requests = drain_requests(server)?;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(requests[1].method, "GET");
+    let _ = std::fs::remove_file(queue_path);
     Ok(())
 }
 

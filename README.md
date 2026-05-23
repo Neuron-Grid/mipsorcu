@@ -5,7 +5,7 @@
 鍵管理・暗号操作・認可判断をプライベートネットワーク内部に設置した SBC（Single Board Computer）に集約することで、データベース側が侵害された場合でも平文を復元できない設計を採用しています。
 
 - **Status**: v0.1.0 リリース準備中
-- **License**: TBD
+- **License**: Apache License 2.0
 
 ---
 

@@ -20,6 +20,7 @@ use crate::archive::export::ArchiveExportPackage;
 
 use super::client::{HeadOutcome, PutOutcome, S3HttpClient};
 use super::config::S3ArchiveBackendConfig;
+use super::error::S3BackendError;
 use super::queue::{ArchivePutOrQueueOutcome, LocalArchiveQueue, ResendArchiveSummary};
 use super::retry::run_with_backoff;
 
@@ -79,6 +80,20 @@ impl S3ImmutableArchiveBackend {
         key: &ArchiveObjectKey,
         body: Vec<u8>,
     ) -> Result<(), ArchiveBackendError> {
+        match self.put_object_bytes_strict(key, body.clone()).await {
+            Ok(()) => Ok(()),
+            Err(S3BackendError::OverwriteRejected) => {
+                self.verify_existing_object_bytes(key, body).await
+            }
+            Err(error) => Err(ArchiveBackendError::from(error)),
+        }
+    }
+
+    async fn put_object_bytes_strict(
+        &self,
+        key: &ArchiveObjectKey,
+        body: Vec<u8>,
+    ) -> Result<(), S3BackendError> {
         let (max_retries, base) = self.retry_settings();
         let key_str = key.as_str().to_owned();
 
@@ -93,7 +108,41 @@ impl S3ImmutableArchiveBackend {
             }
         })
         .await
-        .map_err(ArchiveBackendError::from)
+    }
+
+    async fn get_object_bytes_with_retry(
+        &self,
+        key: &ArchiveObjectKey,
+    ) -> Result<Option<Vec<u8>>, S3BackendError> {
+        let (max_retries, base) = self.retry_settings();
+        let key_str = key.as_str().to_owned();
+
+        run_with_backoff(max_retries, base, || {
+            let key_str = key_str.clone();
+            let now = (self.now)();
+            async move { self.http_client().get_object_bytes(&key_str, now).await }
+        })
+        .await
+    }
+
+    async fn verify_existing_object_bytes(
+        &self,
+        key: &ArchiveObjectKey,
+        expected: Vec<u8>,
+    ) -> Result<(), ArchiveBackendError> {
+        match self
+            .get_object_bytes_with_retry(key)
+            .await
+            .map_err(ArchiveBackendError::from)?
+        {
+            Some(bytes) if bytes == expected => Ok(()),
+            Some(_) => Err(ArchiveBackendError::BackendFailed {
+                code: "archive_export_content_mismatch".to_owned(),
+            }),
+            None => Err(ArchiveBackendError::BackendFailed {
+                code: "archive_export_not_found".to_owned(),
+            }),
+        }
     }
 }
 
@@ -122,16 +171,10 @@ impl ArchiveBackend for S3ImmutableArchiveBackend {
         package: &ArchiveExportPackage,
     ) -> Result<ArchiveVerifyOutcome, ArchiveBackendError> {
         let expected = package.to_json_bytes()?;
-        let (max_retries, base) = self.retry_settings();
-        let key_str = key.as_str().to_owned();
-
-        let stored = run_with_backoff(max_retries, base, || {
-            let key_str = key_str.clone();
-            let now = (self.now)();
-            async move { self.http_client().get_object_bytes(&key_str, now).await }
-        })
-        .await
-        .map_err(ArchiveBackendError::from)?;
+        let stored = self
+            .get_object_bytes_with_retry(key)
+            .await
+            .map_err(ArchiveBackendError::from)?;
 
         match stored {
             None => Ok(ArchiveVerifyOutcome::NotFound),

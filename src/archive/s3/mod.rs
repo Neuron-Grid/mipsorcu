@@ -7,6 +7,10 @@
 //! 信頼境界ノート: 引数型は trait 経由で `&ArchiveExportPackage` 固定。
 //! 平文・Master Key・Data Key・JWT を型レベルで受け取れない。env から
 //! 読んだ S3 アクセスキーは SBC 内部にのみ保持し、Supabase 側には渡さない。
+//!
+//! 運用ノート: 本モジュールは opt-in の S3 backend 実装のみを提供する。
+//! 標準 runtime / scheduler への backend 選択・設定結線はこのモジュールの
+//! 責務外であり、v0.1.0 では S3 archive は限定運用扱いである。
 
 pub mod backend;
 pub mod client;

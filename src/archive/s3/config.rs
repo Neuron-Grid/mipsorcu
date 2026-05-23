@@ -105,19 +105,30 @@ impl S3ArchiveBackendConfig {
         object_lock_mode: S3ObjectLockMode,
         retention_days: u32,
     ) -> Result<Self, S3BackendError> {
-        if endpoint_url.trim().is_empty() {
+        let endpoint_url = endpoint_url.trim().to_owned();
+        let region = region.trim().to_owned();
+        let bucket = bucket.trim().to_owned();
+        let access_key_id = access_key_id.trim().to_owned();
+        let secret_access_key = secret_access_key.trim().to_owned();
+        let session_token = session_token
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+
+        if endpoint_url.is_empty() {
             return Err(S3BackendError::InvalidConfig("endpoint_url is empty"));
         }
-        if region.trim().is_empty() {
+        validate_endpoint_url(&endpoint_url).map_err(S3BackendError::InvalidConfig)?;
+        if region.is_empty() {
             return Err(S3BackendError::InvalidConfig("region is empty"));
         }
-        if bucket.trim().is_empty() {
+        if bucket.is_empty() {
             return Err(S3BackendError::InvalidConfig("bucket is empty"));
         }
-        if access_key_id.trim().is_empty() {
+        validate_bucket_name(&bucket).map_err(S3BackendError::InvalidConfig)?;
+        if access_key_id.is_empty() {
             return Err(S3BackendError::InvalidConfig("access_key_id is empty"));
         }
-        if secret_access_key.trim().is_empty() {
+        if secret_access_key.is_empty() {
             return Err(S3BackendError::InvalidConfig("secret_access_key is empty"));
         }
         if retention_days == 0 {
@@ -214,8 +225,20 @@ impl S3ArchiveBackendConfig {
         F: Fn(&str) -> Option<String>,
     {
         let endpoint_url = required(&get_var, ENV_S3_ENDPOINT_URL)?;
+        validate_endpoint_url(&endpoint_url).map_err(|reason| {
+            S3ArchiveBackendConfigError::InvalidValue {
+                name: ENV_S3_ENDPOINT_URL,
+                reason: reason.to_owned(),
+            }
+        })?;
         let region = required(&get_var, ENV_S3_REGION)?;
         let bucket = required(&get_var, ENV_S3_BUCKET)?;
+        validate_bucket_name(&bucket).map_err(|reason| {
+            S3ArchiveBackendConfigError::InvalidValue {
+                name: ENV_S3_BUCKET,
+                reason: reason.to_owned(),
+            }
+        })?;
         let access_key_id = required(&get_var, ENV_S3_ACCESS_KEY_ID)?;
         let secret_access_key = required(&get_var, ENV_S3_SECRET_ACCESS_KEY)?;
         let session_token = optional(&get_var, ENV_S3_SESSION_TOKEN);
@@ -372,6 +395,83 @@ where
         })
 }
 
+fn validate_endpoint_url(endpoint_url: &str) -> Result<(), &'static str> {
+    let (scheme, rest) = endpoint_url
+        .split_once("://")
+        .ok_or("endpoint_url must include scheme (http:// or https://)")?;
+    if !matches!(scheme, "http" | "https") {
+        return Err("endpoint_url scheme must be http or https");
+    }
+    if rest.contains('?') {
+        return Err("endpoint_url must not include query");
+    }
+    if rest.contains('#') {
+        return Err("endpoint_url must not include fragment");
+    }
+
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, Some(path)),
+        None => (rest, None),
+    };
+    if authority.is_empty() {
+        return Err("endpoint_url host is empty");
+    }
+    if authority.contains('@') {
+        return Err("endpoint_url must not include userinfo");
+    }
+    if path.is_some_and(|path| !path.is_empty()) {
+        return Err("endpoint_url path must be empty or /");
+    }
+    Ok(())
+}
+
+fn validate_bucket_name(bucket: &str) -> Result<(), &'static str> {
+    if !(3..=63).contains(&bucket.len()) {
+        return Err("bucket must be 3 to 63 characters");
+    }
+    if !bucket.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+    }) {
+        return Err("bucket contains invalid characters");
+    }
+    if !bucket
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return Err("bucket must start with a lowercase letter or digit");
+    }
+    if !bucket
+        .bytes()
+        .last()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return Err("bucket must end with a lowercase letter or digit");
+    }
+    if bucket.contains("..") || bucket.contains(".-") || bucket.contains("-.") {
+        return Err("bucket contains invalid dot or hyphen sequence");
+    }
+    if is_ipv4_address_like(bucket) {
+        return Err("bucket must not be formatted as an IPv4 address");
+    }
+    Ok(())
+}
+
+fn is_ipv4_address_like(bucket: &str) -> bool {
+    let mut parts = bucket.split('.');
+    let mut count = 0usize;
+    for part in &mut parts {
+        count += 1;
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        if part.parse::<u8>().is_err() {
+            return false;
+        }
+    }
+    count == 4
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +602,94 @@ mod tests {
         env.insert(ENV_S3_FORBID_OVERWRITE.to_owned(), "no".to_owned());
         let config = S3ArchiveBackendConfig::from_env(get_var(&env)).unwrap();
         assert!(!config.forbid_overwrite());
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_endpoint_values() {
+        for endpoint in [
+            "ftp://s3.example",
+            "https://user:pass@s3.example",
+            "https://s3.example/archive",
+            "https://s3.example?debug=true",
+            "https://s3.example#fragment",
+        ] {
+            let mut env = base_env();
+            env.insert(ENV_S3_ENDPOINT_URL.to_owned(), endpoint.to_owned());
+            let result = S3ArchiveBackendConfig::from_env(get_var(&env));
+            assert!(
+                matches!(
+                    result,
+                    Err(S3ArchiveBackendConfigError::InvalidValue { name, .. })
+                        if name == ENV_S3_ENDPOINT_URL
+                ),
+                "endpoint must be rejected: {endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_bucket_names() {
+        for bucket in [
+            "ab",
+            "MipsorcuArchive",
+            "mipsorcu_archive",
+            "-mipsorcu",
+            "mipsorcu-",
+            "mipsorcu..archive",
+            "mipsorcu.-archive",
+            "mipsorcu-.archive",
+            "192.168.0.1",
+        ] {
+            let mut env = base_env();
+            env.insert(ENV_S3_BUCKET.to_owned(), bucket.to_owned());
+            let result = S3ArchiveBackendConfig::from_env(get_var(&env));
+            assert!(
+                matches!(
+                    result,
+                    Err(S3ArchiveBackendConfigError::InvalidValue { name, .. })
+                        if name == ENV_S3_BUCKET
+                ),
+                "bucket must be rejected: {bucket}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_applies_endpoint_and_bucket_validation() {
+        let invalid_endpoint = S3ArchiveBackendConfig::new(
+            "ftp://s3.example".to_owned(),
+            "us-east-1".to_owned(),
+            "mipsorcu-archive".to_owned(),
+            "AKIA".to_owned(),
+            "secret".to_owned(),
+            None,
+            S3ObjectLockMode::Compliance,
+            30,
+        );
+        assert!(invalid_endpoint.is_err());
+
+        let invalid_bucket = S3ArchiveBackendConfig::new(
+            "https://s3.example".to_owned(),
+            "us-east-1".to_owned(),
+            "MipsorcuArchive".to_owned(),
+            "AKIA".to_owned(),
+            "secret".to_owned(),
+            None,
+            S3ObjectLockMode::Compliance,
+            30,
+        );
+        assert!(invalid_bucket.is_err());
+
+        let valid = S3ArchiveBackendConfig::new(
+            "http://localhost:9000/".to_owned(),
+            "us-east-1".to_owned(),
+            "mipsorcu-archive".to_owned(),
+            "AKIA".to_owned(),
+            "secret".to_owned(),
+            None,
+            S3ObjectLockMode::Compliance,
+            30,
+        );
+        assert!(valid.is_ok());
     }
 }

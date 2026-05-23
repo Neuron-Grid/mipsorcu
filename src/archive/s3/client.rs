@@ -390,14 +390,37 @@ fn parse_endpoint(endpoint: &str) -> Result<ParsedEndpoint, S3BackendError> {
         .ok_or(S3BackendError::InvalidConfig(
             "endpoint_url must include scheme (http:// or https://)",
         ))?;
-    if scheme.is_empty() {
+    if !matches!(scheme, "http" | "https") {
         return Err(S3BackendError::InvalidConfig(
-            "endpoint_url scheme is empty",
+            "endpoint_url scheme must be http or https",
         ));
     }
-    let host_with_port = rest.split('/').next().unwrap_or("");
+    if rest.contains('?') {
+        return Err(S3BackendError::InvalidConfig(
+            "endpoint_url must not include query",
+        ));
+    }
+    if rest.contains('#') {
+        return Err(S3BackendError::InvalidConfig(
+            "endpoint_url must not include fragment",
+        ));
+    }
+    let (host_with_port, path) = match rest.split_once('/') {
+        Some((host_with_port, path)) => (host_with_port, Some(path)),
+        None => (rest, None),
+    };
     if host_with_port.is_empty() {
         return Err(S3BackendError::InvalidConfig("endpoint_url host is empty"));
+    }
+    if host_with_port.contains('@') {
+        return Err(S3BackendError::InvalidConfig(
+            "endpoint_url must not include userinfo",
+        ));
+    }
+    if path.is_some_and(|path| !path.is_empty()) {
+        return Err(S3BackendError::InvalidConfig(
+            "endpoint_url path must be empty or /",
+        ));
     }
     Ok(ParsedEndpoint {
         scheme: scheme.to_owned(),
@@ -601,6 +624,22 @@ mod tests {
         let parsed = parse_endpoint("https://s3.example.com").unwrap();
         assert_eq!(parsed.scheme, "https");
         assert_eq!(parsed.host, "s3.example.com");
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_unsupported_or_ambiguous_values() {
+        for endpoint in [
+            "ftp://s3.example.com",
+            "https://user:pass@s3.example.com",
+            "https://s3.example.com/archive",
+            "https://s3.example.com?debug=true",
+            "https://s3.example.com#fragment",
+        ] {
+            assert!(
+                parse_endpoint(endpoint).is_err(),
+                "endpoint must be rejected: {endpoint}"
+            );
+        }
     }
 
     #[test]
