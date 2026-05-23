@@ -9,7 +9,7 @@ services:
         environment:
             MIPSORCU_LISTEN_ADDR: "0.0.0.0:3000"
         volumes:
-            - mipsorcu-data:/var/lib/mipsorcu
+            - ./mipsorcu-data:/var/lib/mipsorcu
         ports:
             - "127.0.0.1:3000:3000"
         restart: unless-stopped
