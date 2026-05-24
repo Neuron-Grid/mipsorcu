@@ -292,13 +292,31 @@ mod tests {
     }
 
     #[test]
-    fn unwrap_rejects_tampered_wrapped_dek() {
+    fn unwrap_rejects_tampered_wrapped_dek_nonce() {
         let kek = sample_kek();
         let wrapped = kek.wrap_dek(&sample_dek()).expect("wrap should succeed");
         let mut tampered = wrapped.as_bytes().to_vec();
         let byte = tampered
             .first_mut()
             .expect("wrapped dek should contain bytes");
+        *byte ^= 1;
+        let tampered =
+            WrappedDek::new(wrapped.kek_version(), tampered).expect("format remains valid");
+
+        assert!(matches!(
+            kek.unwrap_dek(&tampered),
+            Err(KekError::UnwrapFailed)
+        ));
+    }
+
+    #[test]
+    fn unwrap_rejects_tampered_wrapped_dek_ciphertext() {
+        let kek = sample_kek();
+        let wrapped = kek.wrap_dek(&sample_dek()).expect("wrap should succeed");
+        let mut tampered = wrapped.as_bytes().to_vec();
+        let byte = tampered
+            .get_mut(NONCE_LENGTH)
+            .expect("wrapped dek should contain ciphertext bytes");
         *byte ^= 1;
         let tampered =
             WrappedDek::new(wrapped.kek_version(), tampered).expect("format remains valid");
