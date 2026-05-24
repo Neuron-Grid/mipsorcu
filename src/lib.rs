@@ -60,12 +60,12 @@ pub use authorization::{
     authorize_existing_secret_version_write, authorize_new_secret_create,
 };
 pub use crypto::{
-    ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, KeyWrapContext, MasterKeyRing, decrypt_secret,
-    encrypt_secret, unwrap_data_key, wrap_data_key,
+    ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, EnvVarKek, KekProvider, KeyWrapContext,
+    MasterKeyRing, decrypt_secret, encrypt_secret, unwrap_data_key, wrap_data_key,
 };
 pub use error::{
     AadError, AuthorizationError, CryptoError, DecryptIntegrityError, InputError,
-    JwtVerificationError, KeyringError, SecretDecryptError, SecretWriteError,
+    JwtVerificationError, KekError, KeyringError, SecretDecryptError, SecretWriteError,
 };
 pub use incident::{
     DummyNotificationSink, FailingNotificationSink, IncidentNotificationPayload,
@@ -115,11 +115,11 @@ pub use timestamping::{
 };
 pub use types::{
     AliasEncryptionKey, AliasFingerprintKey, AliasFingerprintSchemaVersion, Ciphertext,
-    Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DeviceId,
+    Classification, CreatedAt, DATA_KEY_LENGTH, DataKey, DekPlaintext, DeviceId,
     ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH, ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_TAG_LENGTH,
-    ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
-    NONCE_LENGTH, Nonce, OwnerUserId, Plaintext, SecretAliasId, SecretId, SecretRef, SecretVersion,
-    SecretVersionId, SourceEventAt,
+    ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KekAlgorithm, KekVersion, KeyVersion,
+    MASTER_KEY_LENGTH, MasterKey, NONCE_LENGTH, Nonce, OwnerUserId, Plaintext, SecretAliasId,
+    SecretId, SecretRef, SecretVersion, SecretVersionId, SourceEventAt, WrappedDek,
 };
 pub use write::{
     CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,

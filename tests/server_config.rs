@@ -144,6 +144,35 @@ fn load_config_from_sources_prefers_process_env_over_dotenv() {
 }
 
 #[test]
+fn load_config_accepts_master_key_version_alias() {
+    let mut dotenv = base_dotenv();
+    dotenv.remove("MIPSORCU_KEY_VERSION");
+    dotenv.insert("MIPSORCU_MASTER_KEY_VERSION".to_owned(), "2".to_owned());
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let config = load_config_from_sources(&get_process_var, &dotenv).expect("config should load");
+
+    assert_eq!(config.master_key_ring.active_key_version().get(), 2);
+}
+
+#[test]
+fn load_config_rejects_conflicting_master_key_version_aliases() {
+    let mut dotenv = base_dotenv();
+    dotenv.insert("MIPSORCU_MASTER_KEY_VERSION".to_owned(), "2".to_owned());
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+
+    let result = load_config_from_sources(&get_process_var, &dotenv);
+
+    assert!(matches!(
+        result,
+        Err(ConfigError::InvalidValue { name, .. })
+            if name == "MIPSORCU_MASTER_KEY_VERSION"
+    ));
+}
+
+#[test]
 fn load_config_requires_alias_encryption_key() {
     let mut dotenv = base_dotenv();
     dotenv.remove("MIPSORCU_ALIAS_ENCRYPTION_KEY");

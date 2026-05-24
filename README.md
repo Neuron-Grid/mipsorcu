@@ -210,6 +210,8 @@ v0.1.0 で保証する範囲、限定的に扱う範囲、対象外の範囲に�
 
 詳細なリリース範囲・既知の制限事項・運用前提は、リリース時に公開予定のリリースノートおよびドキュメントを参照してください。
 
+v0.2.0 の計画範囲は [v0.2.0 release scope](docs/release-scope-v0.2.0.md)、既知の制限は [v0.2.0 known limitations](docs/known-limitations-v0.2.0.md)、v0.3 以降の方向性は [release roadmap](docs/release-roadmap.md) を参照してください。
+
 ---
 
 ## 9. 貢献

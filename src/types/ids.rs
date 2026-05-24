@@ -246,6 +246,31 @@ impl KeyVersion {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KekVersion(KeyVersion);
+
+impl KekVersion {
+    pub fn new(value: u32) -> Result<Self, CryptoError> {
+        KeyVersion::new(value).map(Self)
+    }
+
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl From<KeyVersion> for KekVersion {
+    fn from(value: KeyVersion) -> Self {
+        Self(value)
+    }
+}
+
+impl From<KekVersion> for KeyVersion {
+    fn from(value: KekVersion) -> Self {
+        value.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AliasFingerprintSchemaVersion(NonZeroU32);
 

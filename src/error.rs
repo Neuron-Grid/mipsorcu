@@ -371,6 +371,45 @@ impl From<AadError> for CryptoError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KekError {
+    KekNotAvailable { kek_version: u32 },
+    WrapFailed,
+    UnwrapFailed,
+    VersionMismatch { expected: u32, actual: u32 },
+    InvalidWrappedFormat { actual_len: usize },
+}
+
+impl fmt::Display for KekError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::KekNotAvailable { kek_version } => {
+                write!(formatter, "kek version is unavailable: {kek_version}")
+            }
+            Self::WrapFailed => {
+                write!(formatter, "dek wrapping failed")
+            }
+            Self::UnwrapFailed => {
+                write!(formatter, "dek unwrapping failed")
+            }
+            Self::VersionMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "wrapped dek kek version mismatch: expected {expected}, actual {actual}"
+                )
+            }
+            Self::InvalidWrappedFormat { actual_len } => {
+                write!(
+                    formatter,
+                    "wrapped dek has invalid format: actual length {actual_len}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for KekError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyringError {
     Empty,
     DuplicateKeyVersion { key_version: u32 },

@@ -2,7 +2,9 @@ use std::fmt;
 
 use zeroize::Zeroize;
 
-use crate::error::CryptoError;
+use crate::error::{CryptoError, KekError};
+
+use super::ids::KekVersion;
 
 pub const DATA_KEY_LENGTH: usize = 32;
 pub const MASTER_KEY_LENGTH: usize = 32;
@@ -13,6 +15,127 @@ pub const ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH: usize =
     DATA_KEY_LENGTH + ENCRYPTED_DATA_KEY_TAG_LENGTH;
 pub const ENCRYPTED_DATA_KEY_LENGTH: usize =
     1 + NONCE_LENGTH + ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH;
+
+pub struct DekPlaintext([u8; DATA_KEY_LENGTH]);
+
+impl DekPlaintext {
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut bytes = [0u8; DATA_KEY_LENGTH];
+        getrandom::fill(&mut bytes).map_err(|_| CryptoError::RandomnessUnavailable)?;
+
+        Ok(Self(bytes))
+    }
+
+    pub fn from_bytes(bytes: [u8; DATA_KEY_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() != DATA_KEY_LENGTH {
+            return Err(CryptoError::InvalidDataKeyLength {
+                actual: bytes.len(),
+            });
+        }
+
+        let mut dek = [0u8; DATA_KEY_LENGTH];
+        dek.copy_from_slice(bytes);
+
+        Ok(Self(dek))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; DATA_KEY_LENGTH] {
+        &self.0
+    }
+}
+
+impl Drop for DekPlaintext {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for DekPlaintext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DekPlaintext(<redacted>)")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KekAlgorithm {
+    LegacyMasterKeyV1,
+    EnvvarXchachaV2,
+}
+
+impl KekAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyMasterKeyV1 => "legacy-master-key-v1",
+            Self::EnvvarXchachaV2 => "envvar-xchacha-v2",
+        }
+    }
+}
+
+impl fmt::Display for KekAlgorithm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl fmt::Debug for KekAlgorithm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct WrappedDek {
+    kek_version: KekVersion,
+    bytes: Vec<u8>,
+}
+
+impl WrappedDek {
+    pub fn new(kek_version: KekVersion, bytes: Vec<u8>) -> Result<Self, KekError> {
+        validate_wrapped_dek_bytes(&bytes)?;
+
+        Ok(Self { kek_version, bytes })
+    }
+
+    pub fn parse(kek_version: KekVersion, bytes: &[u8]) -> Result<Self, KekError> {
+        Self::new(kek_version, bytes.to_vec())
+    }
+
+    pub fn kek_version(&self) -> KekVersion {
+        self.kek_version
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+fn validate_wrapped_dek_bytes(bytes: &[u8]) -> Result<(), KekError> {
+    if bytes.len() <= NONCE_LENGTH {
+        return Err(KekError::InvalidWrappedFormat {
+            actual_len: bytes.len(),
+        });
+    }
+
+    Ok(())
+}
+
+impl fmt::Debug for WrappedDek {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WrappedDek")
+            .field("kek_version", &self.kek_version)
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}
 
 pub struct DataKey([u8; DATA_KEY_LENGTH]);
 

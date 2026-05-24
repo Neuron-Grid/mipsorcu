@@ -9,6 +9,7 @@ use zeroize::Zeroize;
 
 use super::constants::{
     ENV_ACTIVE_KEY_VERSION, ENV_KEY_VERSION, ENV_MASTER_KEY, ENV_MASTER_KEY_DIR,
+    ENV_MASTER_KEY_VERSION,
 };
 use super::env::{DotenvVars, optional_var, required_var};
 use super::error::ConfigError;
@@ -39,12 +40,35 @@ where
         ENV_MASTER_KEY,
         &required_var(ENV_MASTER_KEY, dotenv, get_process_var)?,
     )?;
-    let key_version = parse_key_version_config(
-        ENV_KEY_VERSION,
-        &required_var(ENV_KEY_VERSION, dotenv, get_process_var)?,
-    )?;
+    let (key_version_name, key_version_value) =
+        required_single_master_key_version(dotenv, get_process_var)?;
+    let key_version = parse_key_version_config(key_version_name, &key_version_value)?;
 
     MasterKeyRing::single(key_version, master_key).map_err(keyring_config_error)
+}
+
+fn required_single_master_key_version<F>(
+    dotenv: &DotenvVars,
+    get_process_var: &F,
+) -> Result<(&'static str, String), ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let legacy = optional_var(ENV_KEY_VERSION, dotenv, get_process_var);
+    let v02 = optional_var(ENV_MASTER_KEY_VERSION, dotenv, get_process_var);
+
+    match (legacy, v02) {
+        (Some(legacy), Some(v02)) if legacy == v02 => Ok((ENV_KEY_VERSION, legacy)),
+        (Some(_), Some(_)) => Err(ConfigError::InvalidValue {
+            name: ENV_MASTER_KEY_VERSION,
+            reason: format!("value must match {ENV_KEY_VERSION} when both variables are set"),
+        }),
+        (Some(legacy), None) => Ok((ENV_KEY_VERSION, legacy)),
+        (None, Some(v02)) => Ok((ENV_MASTER_KEY_VERSION, v02)),
+        (None, None) => Err(ConfigError::MissingVar {
+            name: ENV_KEY_VERSION,
+        }),
+    }
 }
 
 fn load_master_key_ring_from_directory<F>(

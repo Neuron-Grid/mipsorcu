@@ -15,6 +15,9 @@ use crate::types::{
     Nonce, Plaintext, SecretId,
 };
 
+pub mod kek;
+pub use kek::{EnvVarKek, KekProvider};
+
 pub const ALGORITHM_XCHACHA20_POLY1305: &str = "xchacha20-poly1305";
 const KEY_WRAP_CONTEXT: &str = "data_key_wrap";
 const KEY_WRAP_VERSION: u8 = 1;
@@ -54,9 +57,11 @@ impl KeyWrapContext {
     }
 }
 
+/// Compatibility shim for the v0.1.0 keyring API.
+///
+/// New KEK/DEK code should use [`EnvVarKek`] through [`KekProvider`] directly.
 pub struct MasterKeyRing {
-    active_key_version: KeyVersion,
-    keys: BTreeMap<KeyVersion, MasterKey>,
+    provider: EnvVarKek,
 }
 
 impl MasterKeyRing {
@@ -64,20 +69,12 @@ impl MasterKeyRing {
         active_key_version: KeyVersion,
         keys: BTreeMap<KeyVersion, MasterKey>,
     ) -> Result<Self, KeyringError> {
-        if keys.is_empty() {
-            return Err(KeyringError::Empty);
-        }
+        let entries = keys
+            .into_iter()
+            .map(|(key_version, master_key)| (key_version.into(), master_key));
+        let provider = EnvVarKek::from_key_entries(active_key_version.into(), entries)?;
 
-        if !keys.contains_key(&active_key_version) {
-            return Err(KeyringError::ActiveKeyMissing {
-                key_version: active_key_version.get(),
-            });
-        }
-
-        Ok(Self {
-            active_key_version,
-            keys,
-        })
+        Ok(Self { provider })
     }
 
     pub fn from_key_entries<I>(
@@ -87,54 +84,51 @@ impl MasterKeyRing {
     where
         I: IntoIterator<Item = (KeyVersion, MasterKey)>,
     {
-        let mut keys = BTreeMap::new();
+        let entries = entries
+            .into_iter()
+            .map(|(key_version, master_key)| (key_version.into(), master_key));
+        let provider = EnvVarKek::from_key_entries(active_key_version.into(), entries)?;
 
-        for (key_version, master_key) in entries {
-            if keys.insert(key_version, master_key).is_some() {
-                return Err(KeyringError::DuplicateKeyVersion {
-                    key_version: key_version.get(),
-                });
-            }
-        }
-
-        Self::new(active_key_version, keys)
+        Ok(Self { provider })
     }
 
     pub fn single(
         active_key_version: KeyVersion,
         master_key: MasterKey,
     ) -> Result<Self, KeyringError> {
-        Self::from_key_entries(active_key_version, [(active_key_version, master_key)])
+        let provider = EnvVarKek::single(active_key_version.into(), master_key)?;
+
+        Ok(Self { provider })
     }
 
     pub fn active(&self) -> (KeyVersion, &MasterKey) {
-        let Some(master_key) = self.keys.get(&self.active_key_version) else {
-            unreachable!(
-                "MasterKeyRing invariant violated: active key version must be present after construction"
-            );
-        };
+        let (key_version, master_key) = self.provider.active();
 
-        (self.active_key_version, master_key)
+        (key_version.into(), master_key)
     }
 
     pub fn active_key_version(&self) -> KeyVersion {
-        self.active_key_version
+        self.provider.active_version().into()
     }
 
     pub fn get(&self, key_version: KeyVersion) -> Result<&MasterKey, KeyringError> {
-        self.keys
-            .get(&key_version)
-            .ok_or(KeyringError::KeyUnavailable {
-                key_version: key_version.get(),
-            })
+        self.provider.get(key_version.into())
     }
 
     pub fn contains(&self, key_version: KeyVersion) -> bool {
-        self.keys.contains_key(&key_version)
+        self.provider.contains(key_version.into())
     }
 
     pub fn key_versions(&self) -> Vec<KeyVersion> {
-        self.keys.keys().copied().collect()
+        self.provider
+            .key_versions()
+            .into_iter()
+            .map(KeyVersion::from)
+            .collect()
+    }
+
+    pub fn as_envvar_kek(&self) -> &EnvVarKek {
+        &self.provider
     }
 }
 
@@ -142,7 +136,7 @@ impl fmt::Debug for MasterKeyRing {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MasterKeyRing")
-            .field("active_key_version", &self.active_key_version)
+            .field("active_key_version", &self.active_key_version())
             .field("key_versions", &self.key_versions())
             .field("keys", &"<redacted>")
             .finish()
