@@ -207,6 +207,9 @@ pub enum CryptoError {
     UnsupportedAliasFingerprintSchemaVersion { value: u32 },
     InvalidEncryptedDataKeyLength { actual: usize },
     UnsupportedEncryptedDataKeyVersion { version: u8 },
+    MissingEncryptedDataKey,
+    MissingWrappedDek,
+    UnknownDekWrapAlgorithm,
     EmptyCiphertext,
     RandomnessUnavailable,
     AadFailed,
@@ -260,6 +263,9 @@ impl fmt::Debug for CryptoError {
                 .debug_struct("UnsupportedEncryptedDataKeyVersion")
                 .field("version", version)
                 .finish(),
+            Self::MissingEncryptedDataKey => formatter.write_str("MissingEncryptedDataKey"),
+            Self::MissingWrappedDek => formatter.write_str("MissingWrappedDek"),
+            Self::UnknownDekWrapAlgorithm => formatter.write_str("UnknownDekWrapAlgorithm"),
             Self::EmptyCiphertext => formatter.write_str("EmptyCiphertext"),
             Self::RandomnessUnavailable => formatter.write_str("RandomnessUnavailable"),
             Self::AadFailed => formatter.write_str("AadFailed"),
@@ -333,6 +339,15 @@ impl fmt::Display for CryptoError {
                     formatter,
                     "unsupported encrypted data key envelope version: {version}"
                 )
+            }
+            Self::MissingEncryptedDataKey => {
+                write!(formatter, "encrypted data key is missing")
+            }
+            Self::MissingWrappedDek => {
+                write!(formatter, "wrapped dek is missing")
+            }
+            Self::UnknownDekWrapAlgorithm => {
+                write!(formatter, "dek wrap algorithm is not supported")
             }
             Self::EmptyCiphertext => {
                 write!(formatter, "ciphertext must not be empty")

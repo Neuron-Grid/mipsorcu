@@ -27,6 +27,7 @@ use mipsorcu::{
     LocalAuditFallbackStore, LocalSiemFallbackBuffer, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing,
     NewSecretVersionInput, NormalizedAlias, OwnerUserId, Plaintext, RolloverOutcome, SecretId,
     SiemForwarder, SourceEventAt, prepare_alias_create, prepare_new_secret_version,
+    prepare_new_secret_version_with_keyring,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -209,7 +210,7 @@ fn prepared_restore_test_row(
             secret_id: prepared.secret_id().as_canonical_string(),
             version: i32::try_from(prepared.version().get())?,
             ciphertext: format!("\\x{}", hex::encode(prepared.ciphertext().as_bytes())),
-            encrypted_data_key: format!(
+            encrypted_data_key: Some(format!(
                 "\\x{}",
                 hex::encode(
                     prepared
@@ -217,12 +218,15 @@ fn prepared_restore_test_row(
                         .expect("legacy prepared version should include encrypted_data_key")
                         .as_bytes()
                 )
-            ),
+            )),
             key_version: i32::try_from(prepared.key_version().get())?,
             classification: prepared.classification().as_str().to_owned(),
             nonce_or_iv: format!("\\x{}", hex::encode(prepared.nonce_or_iv().as_bytes())),
             aad_context: prepared.aad_context().clone(),
             created_at: prepared.created_at().as_rfc3339_utc()?,
+            wrapped_dek: None,
+            dek_wrap_algorithm: None,
+            kek_version: None,
         },
     ))
 }
@@ -267,6 +271,66 @@ fn decrypt_row_json(plaintext: &[u8]) -> Result<(String, Value), Box<dyn std::er
             "aad_context": prepared.aad_context(),
             "created_by_user_id": prepared.owner_user_id().as_canonical_string(),
             "created_at": prepared.created_at().as_rfc3339_utc()?,
+            "wrapped_dek": Value::Null,
+            "dek_wrap_algorithm": Value::Null,
+            "kek_version": Value::Null,
+            "secrets": {
+                "current_version_id": "650e8400-e29b-41d4-a716-446655440000",
+                "owner_user_id": prepared.owner_user_id().as_canonical_string(),
+                "classification": prepared.classification().as_str(),
+            }
+        }]),
+    ))
+}
+
+fn decrypt_v02_row_json(plaintext: &[u8]) -> Result<(String, Value), Box<dyn std::error::Error>> {
+    let keyring = MasterKeyRing::single(KeyVersion::new(1)?, sample_master_key())?;
+    let prepared = prepare_new_secret_version_with_keyring(
+        &keyring,
+        NewSecretVersionInput::new(
+            OwnerUserId::parse(OWNER_USER_ID)?,
+            Classification::new(CLASSIFICATION)?,
+            DeviceId::new(DEVICE_ID)?,
+            CreatedAt::parse(CREATED_AT)?,
+            KeyVersion::new(1)?,
+            Plaintext::new(plaintext.to_vec()),
+        ),
+    )?;
+    let version_id = "650e8400-e29b-41d4-a716-446655440000".to_owned();
+    let secret_id = prepared.secret_id().as_canonical_string();
+
+    Ok((
+        secret_id.clone(),
+        json!([{
+            "id": version_id,
+            "secret_id": secret_id,
+            "version": i32::try_from(prepared.version().get())?,
+            "ciphertext": format!("\\x{}", hex::encode(prepared.ciphertext().as_bytes())),
+            "encrypted_data_key": Value::Null,
+            "key_version": i32::try_from(prepared.key_version().get())?,
+            "algorithm": mipsorcu::ALGORITHM_XCHACHA20_POLY1305,
+            "classification": prepared.classification().as_str(),
+            "nonce_or_iv": format!("\\x{}", hex::encode(prepared.nonce_or_iv().as_bytes())),
+            "aad_context": prepared.aad_context(),
+            "created_by_user_id": prepared.owner_user_id().as_canonical_string(),
+            "created_at": prepared.created_at().as_rfc3339_utc()?,
+            "wrapped_dek": format!(
+                "\\x{}",
+                hex::encode(
+                    prepared
+                        .wrapped_dek()
+                        .expect("v0.2 prepared version should include wrapped_dek")
+                        .as_bytes()
+                )
+            ),
+            "dek_wrap_algorithm": prepared
+                .dek_wrap_algorithm()
+                .expect("v0.2 prepared version should include dek_wrap_algorithm")
+                .as_str(),
+            "kek_version": prepared
+                .kek_version()
+                .expect("v0.2 prepared version should include kek_version")
+                .get(),
             "secrets": {
                 "current_version_id": "650e8400-e29b-41d4-a716-446655440000",
                 "owner_user_id": prepared.owner_user_id().as_canonical_string(),
@@ -362,6 +426,24 @@ fn make_decrypt_row_bad_encrypted_data_key(rows: &mut Value) {
         "encrypted_data_key",
         Value::String("\\x01".to_owned()),
     );
+}
+
+fn make_decrypt_row_unknown_dek_wrap_algorithm(rows: &mut Value) {
+    set_first_decrypt_row_field(
+        rows,
+        "dek_wrap_algorithm",
+        Value::String("envvar-xchacha-v3".to_owned()),
+    );
+}
+
+fn make_decrypt_row_missing_wrapped_dek(rows: &mut Value) {
+    set_first_decrypt_row_field(
+        rows,
+        "dek_wrap_algorithm",
+        Value::String("envvar-xchacha-v2".to_owned()),
+    );
+    set_first_decrypt_row_field(rows, "kek_version", Value::from(1));
+    set_first_decrypt_row_field(rows, "wrapped_dek", Value::Null);
 }
 
 fn make_decrypt_row_bad_algorithm(rows: &mut Value) {
@@ -1033,6 +1115,9 @@ fn restore_test_row_json(row: &RestoreTestSampleRow) -> Value {
         "aad_context": &row.aad_context,
         "classification": &row.classification,
         "created_at": &row.created_at,
+        "wrapped_dek": &row.wrapped_dek,
+        "dek_wrap_algorithm": &row.dek_wrap_algorithm,
+        "kek_version": row.kek_version,
     })
 }
 
@@ -2281,6 +2366,75 @@ async fn decrypt_endpoint_returns_plaintext_after_audit_and_ledger_append() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn decrypt_endpoint_returns_plaintext_for_v02_envelope_row() {
+    let plaintext = b"router v02 secret";
+    let (secret_id, row_json) =
+        decrypt_v02_row_json(plaintext).expect("v0.2 decrypt row JSON should be constructed");
+    let body = row_json.to_string();
+    let (supabase_url, receiver, server_thread) =
+        spawn_supabase_read_and_audit_server(body, 200, r#"[]"#)
+            .expect("Supabase test server should start");
+    let fallback_path = temp_path("decrypt-v02-audit-ledger-success.jsonl");
+    let state = test_app_state(&supabase_url, fallback_path.clone())
+        .expect("test app state should be created");
+    let token = valid_token().expect("test JWT should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::Client::new()
+        .post(format!("{app_url}/v1/secrets/{secret_id}/decrypt"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("decrypt request should succeed");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let json: Value = response
+        .json()
+        .await
+        .expect("decrypt response should be JSON");
+    assert_eq!(json["secret_id"], Value::String(secret_id));
+    assert_eq!(json["plaintext_hex"], Value::String(hex::encode(plaintext)));
+
+    let read_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret read request should be captured");
+    let chain_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("ledger chain head request should be captured");
+    let audit_request = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("audit and ledger append request should be captured");
+    assert_eq!(read_request.method, "GET");
+    assert!(read_request.path.contains("wrapped_dek"));
+    assert!(read_request.path.contains("dek_wrap_algorithm"));
+    assert!(read_request.path.contains("kek_version"));
+    assert_eq!(chain_request.method, "GET");
+    assert_eq!(audit_request.method, "POST");
+    let audit_body = audit_request
+        .body
+        .as_ref()
+        .and_then(Value::as_object)
+        .expect("audit append request body should be a JSON object");
+    assert_eq!(audit_body["p_action"], "decrypt");
+    assert_eq!(audit_body["p_result"], "success");
+    assert!(
+        audit_body["p_metadata_json"]
+            .get("dek_wrap_algorithm")
+            .is_none()
+    );
+    assert!(audit_body["p_payload"].get("dek_wrap_algorithm").is_none());
+    assert!(audit_body["p_payload"].get("wrapped_dek").is_none());
+    assert!(!fallback_path.exists());
+
+    app_task.abort();
+    let _ = app_task.await;
+    server_thread
+        .join()
+        .expect("Supabase test server thread should join")
+        .expect("Supabase test server should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn decrypt_endpoint_resolves_alias_without_putting_alias_in_audit_or_logs() {
     let alias = "prod-alias";
     let plaintext = b"router alias secret";
@@ -3121,7 +3275,7 @@ async fn decrypt_endpoint_fails_closed_when_primary_and_fallback_audit_both_fail
 #[tokio::test(flavor = "current_thread")]
 async fn decrypt_endpoint_rejects_invalid_read_model_rows_without_plaintext()
 -> Result<(), Box<dyn std::error::Error>> {
-    let cases: [(&str, DecryptRowMutation); 11] = [
+    let cases: [(&str, DecryptRowMutation); 13] = [
         ("bad-nonce", make_decrypt_row_bad_nonce),
         ("empty-ciphertext", make_decrypt_row_empty_ciphertext),
         (
@@ -3136,6 +3290,11 @@ async fn decrypt_endpoint_rejects_invalid_read_model_rows_without_plaintext()
             "bad-encrypted-data-key",
             make_decrypt_row_bad_encrypted_data_key,
         ),
+        (
+            "unknown-dek-wrap-algorithm",
+            make_decrypt_row_unknown_dek_wrap_algorithm,
+        ),
+        ("missing-wrapped-dek", make_decrypt_row_missing_wrapped_dek),
         ("bad-algorithm", make_decrypt_row_bad_algorithm),
         ("owner-mismatch", make_decrypt_row_owner_mismatch),
         (
@@ -3176,6 +3335,7 @@ async fn decrypt_endpoint_rejects_invalid_read_model_rows_without_plaintext()
             "plaintext_hex",
             "ciphertext",
             "encrypted_data_key",
+            "wrapped_dek",
             "service_role_key",
             "service-role-key",
         ] {
@@ -3202,6 +3362,7 @@ async fn decrypt_endpoint_rejects_invalid_read_model_rows_without_plaintext()
             "plaintext_hex",
             "ciphertext",
             "encrypted_data_key",
+            "wrapped_dek",
             "service_role_key",
             "service-role-key",
         ] {

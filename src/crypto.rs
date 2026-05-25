@@ -17,7 +17,9 @@ use crate::types::{
 
 pub mod envelope;
 pub mod kek;
-pub use envelope::{EnvelopeOutput, seal_v02};
+pub use envelope::{
+    EnvelopeOutput, SecretVersionRecord, open_dispatched, open_legacy_v01, open_v02, seal_v02,
+};
 pub use kek::{EnvVarKek, KekProvider};
 
 pub const ALGORITHM_XCHACHA20_POLY1305: &str = "xchacha20-poly1305";

@@ -12,7 +12,7 @@ pub struct SecretVersionReadRow {
     pub secret_id: String,
     pub version: i32,
     pub ciphertext: String,
-    pub encrypted_data_key: String,
+    pub encrypted_data_key: Option<String>,
     pub key_version: i32,
     pub algorithm: String,
     pub classification: String,
@@ -20,6 +20,9 @@ pub struct SecretVersionReadRow {
     pub aad_context: Value,
     pub created_by_user_id: String,
     pub created_at: String,
+    pub wrapped_dek: Option<String>,
+    pub dek_wrap_algorithm: Option<String>,
+    pub kek_version: Option<i32>,
     pub secrets: SecretReadJoin,
 }
 
@@ -105,12 +108,15 @@ pub struct RestoreTestSampleRow {
     pub secret_id: String,
     pub version: i32,
     pub ciphertext: String,
-    pub encrypted_data_key: String,
+    pub encrypted_data_key: Option<String>,
     pub key_version: i32,
     pub nonce_or_iv: String,
     pub aad_context: Value,
     pub classification: String,
     pub created_at: String,
+    pub wrapped_dek: Option<String>,
+    pub dek_wrap_algorithm: Option<String>,
+    pub kek_version: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

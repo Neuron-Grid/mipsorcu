@@ -61,8 +61,8 @@ pub use authorization::{
 };
 pub use crypto::{
     ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, EnvVarKek, EnvelopeOutput, KekProvider,
-    KeyWrapContext, MasterKeyRing, decrypt_secret, encrypt_secret, seal_v02, unwrap_data_key,
-    wrap_data_key,
+    KeyWrapContext, MasterKeyRing, SecretVersionRecord, decrypt_secret, encrypt_secret,
+    open_dispatched, open_legacy_v01, open_v02, seal_v02, unwrap_data_key, wrap_data_key,
 };
 pub use error::{
     AadError, AuthorizationError, CryptoError, DecryptIntegrityError, InputError,

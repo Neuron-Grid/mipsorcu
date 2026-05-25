@@ -6,11 +6,11 @@ use crate::MasterKeyRing;
 use crate::aad::AadV1;
 use crate::auth::VerifiedJwtClaims;
 use crate::authorization::authorize_current_version_decrypt;
-use crate::crypto::{KeyWrapContext, decrypt_secret, unwrap_data_key};
+use crate::crypto::{SecretVersionRecord, open_dispatched};
 use crate::error::{DecryptIntegrityError, SecretDecryptError};
 use crate::types::{
-    Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, MasterKey, Nonce,
-    OwnerUserId, Plaintext, SecretId, SecretVersion,
+    Ciphertext, Classification, CreatedAt, EncryptedDataKey, KekAlgorithm, KeyVersion, MasterKey,
+    Nonce, OwnerUserId, Plaintext, SecretId, SecretVersion, WrappedDek,
 };
 
 pub struct DecryptCurrentSecretVersionInputParts {
@@ -22,7 +22,9 @@ pub struct DecryptCurrentSecretVersionInputParts {
     pub classification: Classification,
     pub created_at: CreatedAt,
     pub key_version: KeyVersion,
-    pub encrypted_data_key: EncryptedDataKey,
+    pub encrypted_data_key: Option<EncryptedDataKey>,
+    pub wrapped_dek: Option<WrappedDek>,
+    pub dek_wrap_algorithm: Option<KekAlgorithm>,
     pub nonce_or_iv: Nonce,
     pub ciphertext: Ciphertext,
     pub aad_context: Value,
@@ -38,7 +40,9 @@ pub struct DecryptCurrentSecretVersionInput {
     classification: Classification,
     created_at: CreatedAt,
     key_version: KeyVersion,
-    encrypted_data_key: EncryptedDataKey,
+    encrypted_data_key: Option<EncryptedDataKey>,
+    wrapped_dek: Option<WrappedDek>,
+    dek_wrap_algorithm: Option<KekAlgorithm>,
     nonce_or_iv: Nonce,
     ciphertext: Ciphertext,
     aad_context: Value,
@@ -56,9 +60,23 @@ impl DecryptCurrentSecretVersionInput {
             created_at: parts.created_at,
             key_version: parts.key_version,
             encrypted_data_key: parts.encrypted_data_key,
+            wrapped_dek: parts.wrapped_dek,
+            dek_wrap_algorithm: parts.dek_wrap_algorithm,
             nonce_or_iv: parts.nonce_or_iv,
             ciphertext: parts.ciphertext,
             aad_context: parts.aad_context,
+        }
+    }
+
+    fn into_secret_version_record(self) -> SecretVersionRecord {
+        SecretVersionRecord {
+            secret_id: self.secret_id,
+            key_version: self.key_version,
+            ciphertext: self.ciphertext,
+            nonce: self.nonce_or_iv,
+            encrypted_data_key: self.encrypted_data_key,
+            wrapped_dek: self.wrapped_dek,
+            dek_wrap_algorithm: self.dek_wrap_algorithm,
         }
     }
 }
@@ -76,6 +94,8 @@ impl fmt::Debug for DecryptCurrentSecretVersionInput {
             .field("created_at", &self.created_at)
             .field("key_version", &self.key_version)
             .field("encrypted_data_key", &self.encrypted_data_key)
+            .field("wrapped_dek", &self.wrapped_dek)
+            .field("dek_wrap_algorithm", &self.dek_wrap_algorithm)
             .field("nonce_or_iv", &self.nonce_or_iv)
             .field("ciphertext", &self.ciphertext)
             .field("aad_context", &"<redacted>")
@@ -87,8 +107,10 @@ pub fn decrypt_current_secret_version(
     master_key: &MasterKey,
     input: DecryptCurrentSecretVersionInput,
 ) -> Result<Plaintext, SecretDecryptError> {
-    let row_aad = validate_decrypt_input(&input)?;
-    decrypt_current_secret_version_with_selected_master_key(master_key, &row_aad, &input)
+    let master_key = MasterKey::parse(master_key.as_bytes())?;
+    let keyring = MasterKeyRing::single(input.key_version, master_key)?;
+
+    decrypt_current_secret_version_with_keyring(&keyring, input)
 }
 
 pub fn decrypt_current_secret_version_with_keyring(
@@ -96,9 +118,9 @@ pub fn decrypt_current_secret_version_with_keyring(
     input: DecryptCurrentSecretVersionInput,
 ) -> Result<Plaintext, SecretDecryptError> {
     let row_aad = validate_decrypt_input(&input)?;
-    let master_key = master_key_ring.get(input.key_version)?;
+    let record = input.into_secret_version_record();
 
-    decrypt_current_secret_version_with_selected_master_key(master_key, &row_aad, &input)
+    open_dispatched(master_key_ring, &record, &row_aad)
 }
 
 fn validate_decrypt_input(
@@ -115,18 +137,6 @@ fn validate_decrypt_input(
     verify_stored_aad_matches_row(&input.aad_context, &row_aad)?;
 
     Ok(row_aad)
-}
-
-fn decrypt_current_secret_version_with_selected_master_key(
-    master_key: &MasterKey,
-    row_aad: &AadV1,
-    input: &DecryptCurrentSecretVersionInput,
-) -> Result<Plaintext, SecretDecryptError> {
-    let key_wrap_context = KeyWrapContext::new(input.secret_id.clone(), input.key_version);
-    let data_key = unwrap_data_key(master_key, &key_wrap_context, &input.encrypted_data_key)?;
-
-    decrypt_secret(&data_key, row_aad, &input.nonce_or_iv, &input.ciphertext)
-        .map_err(SecretDecryptError::from)
 }
 
 fn row_aad_from_input(input: &DecryptCurrentSecretVersionInput) -> AadV1 {

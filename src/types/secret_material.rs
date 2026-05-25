@@ -73,6 +73,14 @@ impl KekAlgorithm {
             Self::EnvvarXchachaV2 => "envvar-xchacha-v2",
         }
     }
+
+    pub fn parse(value: &str) -> Result<Self, CryptoError> {
+        match value {
+            "legacy-master-key-v1" => Ok(Self::LegacyMasterKeyV1),
+            "envvar-xchacha-v2" => Ok(Self::EnvvarXchachaV2),
+            _ => Err(CryptoError::UnknownDekWrapAlgorithm),
+        }
+    }
 }
 
 impl fmt::Display for KekAlgorithm {

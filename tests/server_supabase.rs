@@ -211,7 +211,7 @@ async fn current_secret_version_read_uses_expected_columns_and_publishable_auth(
     assert_eq!(request.method, "GET");
     assert_eq!(
         request.path,
-        "/rest/v1/secret_versions?select=id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)&secret_id=eq.550e8400-e29b-41d4-a716-446655440000"
+        "/rest/v1/secret_versions?select=id,secret_id,version,ciphertext,encrypted_data_key,key_version,algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,created_at,wrapped_dek,dek_wrap_algorithm,kek_version,secrets!inner(current_version_id,owner_user_id,classification)&secret_id=eq.550e8400-e29b-41d4-a716-446655440000"
     );
     assert_eq!(
         request.headers.get("authorization"),

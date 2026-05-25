@@ -9,8 +9,9 @@ use crate::types::supabase::{
     RestoreTestSampleRow, SecretAliasResolveRow, SecretVersionReadRow, SecretVersionWriteStateRow,
 };
 use crate::types::{
-    Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
-    SecretAliasId, SecretId, SecretRef, SecretVersion, SecretVersionId,
+    Ciphertext, Classification, CreatedAt, EncryptedDataKey, KekAlgorithm, KekVersion, KeyVersion,
+    Nonce, OwnerUserId, SecretAliasId, SecretId, SecretRef, SecretVersion, SecretVersionId,
+    WrappedDek,
 };
 use crate::write::CurrentSecretVersionState;
 use crate::{compute_lookup_fingerprint, decrypt_alias_row};
@@ -51,7 +52,9 @@ pub struct PreparedDecryptRow {
     classification: Classification,
     created_at: CreatedAt,
     key_version: KeyVersion,
-    encrypted_data_key: EncryptedDataKey,
+    encrypted_data_key: Option<EncryptedDataKey>,
+    wrapped_dek: Option<WrappedDek>,
+    dek_wrap_algorithm: Option<KekAlgorithm>,
     nonce_or_iv: Nonce,
     ciphertext: Ciphertext,
     aad_context: serde_json::Value,
@@ -79,7 +82,10 @@ struct PreparedDecryptRowParts {
     classification: String,
     created_at: String,
     key_version: i32,
-    encrypted_data_key: String,
+    encrypted_data_key: Option<String>,
+    wrapped_dek: Option<String>,
+    dek_wrap_algorithm: Option<String>,
+    kek_version: Option<i32>,
     nonce_or_iv: String,
     ciphertext: String,
     aad_context: serde_json::Value,
@@ -93,6 +99,9 @@ struct ReadModelMessages {
     created_at_invalid: &'static str,
     key_version_invalid: &'static str,
     encrypted_data_key_invalid: &'static str,
+    wrapped_dek_invalid: &'static str,
+    dek_wrap_algorithm_invalid: &'static str,
+    kek_version_invalid: &'static str,
     nonce_or_iv_invalid: &'static str,
     ciphertext_invalid: &'static str,
 }
@@ -129,6 +138,8 @@ impl PreparedDecryptRow {
             created_at: self.created_at,
             key_version: self.key_version,
             encrypted_data_key: self.encrypted_data_key,
+            wrapped_dek: self.wrapped_dek,
+            dek_wrap_algorithm: self.dek_wrap_algorithm,
             nonce_or_iv: self.nonce_or_iv,
             ciphertext: self.ciphertext,
             aad_context: self.aad_context,
@@ -282,6 +293,9 @@ fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, Ap
             created_at: row.created_at,
             key_version: row.key_version,
             encrypted_data_key: row.encrypted_data_key,
+            wrapped_dek: row.wrapped_dek,
+            dek_wrap_algorithm: row.dek_wrap_algorithm,
+            kek_version: row.kek_version,
             nonce_or_iv: row.nonce_or_iv,
             ciphertext: row.ciphertext,
             aad_context: row.aad_context,
@@ -294,6 +308,9 @@ fn parse_decrypt_row(row: SecretVersionReadRow) -> Result<PreparedDecryptRow, Ap
             created_at_invalid: "created_at is invalid",
             key_version_invalid: "key_version is invalid",
             encrypted_data_key_invalid: "encrypted_data_key is invalid",
+            wrapped_dek_invalid: "wrapped_dek is invalid",
+            dek_wrap_algorithm_invalid: "dek_wrap_algorithm is invalid",
+            kek_version_invalid: "kek_version is invalid",
             nonce_or_iv_invalid: "nonce_or_iv is invalid",
             ciphertext_invalid: "ciphertext is invalid",
         },
@@ -347,6 +364,9 @@ pub fn parse_restore_test_sample(
             created_at: row.created_at,
             key_version: row.key_version,
             encrypted_data_key: row.encrypted_data_key,
+            wrapped_dek: row.wrapped_dek,
+            dek_wrap_algorithm: row.dek_wrap_algorithm,
+            kek_version: row.kek_version,
             nonce_or_iv: row.nonce_or_iv,
             ciphertext: row.ciphertext,
             aad_context: row.aad_context,
@@ -359,6 +379,9 @@ pub fn parse_restore_test_sample(
             created_at_invalid: "restore test created_at is invalid",
             key_version_invalid: "restore test key_version is invalid",
             encrypted_data_key_invalid: "restore test encrypted_data_key is invalid",
+            wrapped_dek_invalid: "restore test wrapped_dek is invalid",
+            dek_wrap_algorithm_invalid: "restore test dek_wrap_algorithm is invalid",
+            kek_version_invalid: "restore test kek_version is invalid",
             nonce_or_iv_invalid: "restore test nonce_or_iv is invalid",
             ciphertext_invalid: "restore test ciphertext is invalid",
         },
@@ -414,13 +437,21 @@ fn build_prepared_decrypt_row(
     parts: PreparedDecryptRowParts,
     messages: ReadModelMessages,
 ) -> Result<PreparedDecryptRow, ApiError> {
-    let encrypted_data_key = decode_bytea(&parts.encrypted_data_key).map_err(|_| {
-        ApiError::DbIntegrityViolation(messages.encrypted_data_key_invalid.to_owned())
-    })?;
     let nonce_or_iv = decode_bytea(&parts.nonce_or_iv)
         .map_err(|_| ApiError::DbIntegrityViolation(messages.nonce_or_iv_invalid.to_owned()))?;
     let ciphertext = decode_bytea(&parts.ciphertext)
         .map_err(|_| ApiError::DbIntegrityViolation(messages.ciphertext_invalid.to_owned()))?;
+    let key_version = parse_key_version(parts.key_version, messages.key_version_invalid)?;
+    let dek_wrap_algorithm =
+        parse_dek_wrap_algorithm(parts.dek_wrap_algorithm.as_deref(), &messages)?;
+    let key_material = parse_decrypt_key_material(
+        key_version,
+        dek_wrap_algorithm,
+        parts.encrypted_data_key.as_deref(),
+        parts.wrapped_dek.as_deref(),
+        parts.kek_version,
+        &messages,
+    )?;
 
     Ok(PreparedDecryptRow {
         secret_id: SecretId::parse(&parts.secret_id)
@@ -437,16 +468,101 @@ fn build_prepared_decrypt_row(
         })?,
         created_at: CreatedAt::parse(&parts.created_at)
             .map_err(|_| ApiError::DbIntegrityViolation(messages.created_at_invalid.to_owned()))?,
-        key_version: parse_key_version(parts.key_version, messages.key_version_invalid)?,
-        encrypted_data_key: EncryptedDataKey::parse(&encrypted_data_key).map_err(|_| {
-            ApiError::DbIntegrityViolation(messages.encrypted_data_key_invalid.to_owned())
-        })?,
+        key_version,
+        encrypted_data_key: key_material.encrypted_data_key,
+        wrapped_dek: key_material.wrapped_dek,
+        dek_wrap_algorithm,
         nonce_or_iv: Nonce::parse(&nonce_or_iv)
             .map_err(|_| ApiError::DbIntegrityViolation(messages.nonce_or_iv_invalid.to_owned()))?,
         ciphertext: Ciphertext::new(ciphertext)
             .map_err(|_| ApiError::DbIntegrityViolation(messages.ciphertext_invalid.to_owned()))?,
         aad_context: parts.aad_context,
     })
+}
+
+struct ParsedDecryptKeyMaterial {
+    encrypted_data_key: Option<EncryptedDataKey>,
+    wrapped_dek: Option<WrappedDek>,
+}
+
+fn parse_decrypt_key_material(
+    key_version: KeyVersion,
+    dek_wrap_algorithm: Option<KekAlgorithm>,
+    encrypted_data_key: Option<&str>,
+    wrapped_dek: Option<&str>,
+    kek_version: Option<i32>,
+    messages: &ReadModelMessages,
+) -> Result<ParsedDecryptKeyMaterial, ApiError> {
+    match dek_wrap_algorithm {
+        None | Some(KekAlgorithm::LegacyMasterKeyV1) => {
+            let encrypted_data_key =
+                parse_required_encrypted_data_key(encrypted_data_key, messages)?;
+
+            Ok(ParsedDecryptKeyMaterial {
+                encrypted_data_key: Some(encrypted_data_key),
+                wrapped_dek: None,
+            })
+        }
+        Some(KekAlgorithm::EnvvarXchachaV2) => {
+            let kek_version = kek_version
+                .ok_or_else(|| {
+                    ApiError::DbIntegrityViolation(messages.kek_version_invalid.to_owned())
+                })
+                .and_then(|value| parse_kek_version(value, messages.kek_version_invalid))?;
+
+            if KeyVersion::from(kek_version) != key_version {
+                return Err(ApiError::DbIntegrityViolation(
+                    messages.kek_version_invalid.to_owned(),
+                ));
+            }
+
+            let wrapped_dek = parse_required_wrapped_dek(kek_version, wrapped_dek, messages)?;
+
+            Ok(ParsedDecryptKeyMaterial {
+                encrypted_data_key: None,
+                wrapped_dek: Some(wrapped_dek),
+            })
+        }
+    }
+}
+
+fn parse_required_encrypted_data_key(
+    value: Option<&str>,
+    messages: &ReadModelMessages,
+) -> Result<EncryptedDataKey, ApiError> {
+    let value = value.ok_or_else(|| {
+        ApiError::DbIntegrityViolation(messages.encrypted_data_key_invalid.to_owned())
+    })?;
+    let bytes = decode_bytea(value).map_err(|_| {
+        ApiError::DbIntegrityViolation(messages.encrypted_data_key_invalid.to_owned())
+    })?;
+
+    EncryptedDataKey::parse(&bytes)
+        .map_err(|_| ApiError::DbIntegrityViolation(messages.encrypted_data_key_invalid.to_owned()))
+}
+
+fn parse_required_wrapped_dek(
+    kek_version: KekVersion,
+    value: Option<&str>,
+    messages: &ReadModelMessages,
+) -> Result<WrappedDek, ApiError> {
+    let value = value
+        .ok_or_else(|| ApiError::DbIntegrityViolation(messages.wrapped_dek_invalid.to_owned()))?;
+    let bytes = decode_bytea(value)
+        .map_err(|_| ApiError::DbIntegrityViolation(messages.wrapped_dek_invalid.to_owned()))?;
+
+    WrappedDek::parse(kek_version, &bytes)
+        .map_err(|_| ApiError::DbIntegrityViolation(messages.wrapped_dek_invalid.to_owned()))
+}
+
+fn parse_dek_wrap_algorithm(
+    value: Option<&str>,
+    messages: &ReadModelMessages,
+) -> Result<Option<KekAlgorithm>, ApiError> {
+    value
+        .map(KekAlgorithm::parse)
+        .transpose()
+        .map_err(|_| ApiError::DbIntegrityViolation(messages.dek_wrap_algorithm_invalid.to_owned()))
 }
 
 fn build_current_secret_write_state(
@@ -534,5 +650,12 @@ fn parse_key_version(value: i32, invalid_message: &'static str) -> Result<KeyVer
     u32::try_from(value)
         .ok()
         .and_then(|parsed| KeyVersion::new(parsed).ok())
+        .ok_or_else(|| ApiError::DbIntegrityViolation(invalid_message.to_owned()))
+}
+
+fn parse_kek_version(value: i32, invalid_message: &'static str) -> Result<KekVersion, ApiError> {
+    u32::try_from(value)
+        .ok()
+        .and_then(|parsed| KekVersion::new(parsed).ok())
         .ok_or_else(|| ApiError::DbIntegrityViolation(invalid_message.to_owned()))
 }

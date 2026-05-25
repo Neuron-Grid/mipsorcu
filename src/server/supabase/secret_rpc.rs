@@ -12,7 +12,8 @@ use super::{SupabaseClient, SupabaseRpcError};
 const CURRENT_SECRET_VERSION_READ_COLUMNS: &str = "\
 id,secret_id,version,ciphertext,encrypted_data_key,key_version,\
 algorithm,classification,nonce_or_iv,aad_context,created_by_user_id,\
-created_at,secrets!inner(current_version_id,owner_user_id,classification)";
+created_at,wrapped_dek,dek_wrap_algorithm,kek_version,\
+secrets!inner(current_version_id,owner_user_id,classification)";
 const CURRENT_SECRET_VERSION_WRITE_STATE_COLUMNS: &str = "\
 id,secret_id,version,classification,created_by_user_id,created_at,\
 secrets!inner(current_version_id,owner_user_id,classification)";

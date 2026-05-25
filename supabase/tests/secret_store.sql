@@ -773,12 +773,28 @@ select ok(
             and secret_id is not null
             and version is not null
             and ciphertext is not null
-            and encrypted_data_key is not null
             and key_version is not null
             and nonce_or_iv is not null
             and aad_context is not null
             and classification is not null
             and created_at is not null
+            and (
+                (
+                    (
+                        dek_wrap_algorithm is null
+                        or dek_wrap_algorithm = 'legacy-master-key-v1'
+                    )
+                    and encrypted_data_key is not null
+                    and wrapped_dek is null
+                    and kek_version is null
+                )
+                or (
+                    dek_wrap_algorithm = 'envvar-xchacha-v2'
+                    and encrypted_data_key is null
+                    and wrapped_dek is not null
+                    and kek_version is not null
+                )
+            )
         )
         from restore_test_sample_result
     ),

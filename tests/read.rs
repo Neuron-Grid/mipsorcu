@@ -4,11 +4,11 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mipsorcu::{
     AadError, AuthorizationError, Ciphertext, Classification, CreatedAt, CryptoError,
     DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionInputParts, DecryptIntegrityError,
-    Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KeyVersion, KeyringError, MASTER_KEY_LENGTH,
-    MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext, PreparedSecretVersion,
-    RawJwt, SecretDecryptError, SecretId, SecretVersion, VerifiedJwtClaims,
+    Jwk, Jwks, JwtVerifier, JwtVerifierConfig, KekAlgorithm, KeyVersion, KeyringError,
+    MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, NewSecretVersionInput, OwnerUserId, Plaintext,
+    PreparedSecretVersion, RawJwt, SecretDecryptError, SecretId, SecretVersion, VerifiedJwtClaims,
     decrypt_current_secret_version, decrypt_current_secret_version_with_keyring,
-    prepare_new_secret_version,
+    prepare_new_secret_version, prepare_new_secret_version_with_keyring,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -88,6 +88,32 @@ fn prepared_secret_with_plaintext(
     Ok((master_key, prepared, plaintext))
 }
 
+fn v02_keyring() -> TestResult<MasterKeyRing> {
+    Ok(MasterKeyRing::from_key_entries(
+        KeyVersion::new(2)?,
+        [
+            (
+                KeyVersion::new(1)?,
+                MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH]),
+            ),
+            (
+                KeyVersion::new(2)?,
+                MasterKey::from_bytes([12u8; MASTER_KEY_LENGTH]),
+            ),
+        ],
+    )?)
+}
+
+fn v02_prepared_secret_with_plaintext(
+    plaintext: Vec<u8>,
+) -> TestResult<(MasterKeyRing, PreparedSecretVersion, Vec<u8>)> {
+    let keyring = v02_keyring()?;
+    let input = sample_new_input(plaintext.clone())?;
+    let prepared = prepare_new_secret_version_with_keyring(&keyring, input)?;
+
+    Ok((keyring, prepared, plaintext))
+}
+
 fn base_input_parts(
     prepared: &PreparedSecretVersion,
     subject_user_id: &str,
@@ -102,10 +128,9 @@ fn base_input_parts(
         classification: prepared.classification().clone(),
         created_at: prepared.created_at().clone(),
         key_version: prepared.key_version(),
-        encrypted_data_key: prepared
-            .encrypted_data_key()
-            .expect("legacy prepared version should include encrypted_data_key")
-            .clone(),
+        encrypted_data_key: prepared.encrypted_data_key().cloned(),
+        wrapped_dek: prepared.wrapped_dek().cloned(),
+        dek_wrap_algorithm: prepared.dek_wrap_algorithm(),
         nonce_or_iv: *prepared.nonce_or_iv(),
         ciphertext: prepared.ciphertext().clone(),
         aad_context: prepared.aad_context().clone(),
@@ -196,6 +221,24 @@ fn decrypt_current_secret_version_round_trips_for_owner_and_current_version() ->
 }
 
 #[test]
+fn decrypt_current_secret_version_round_trips_v02_envelope() -> TestResult<()> {
+    let (keyring, prepared, plaintext) =
+        v02_prepared_secret_with_plaintext(b"dummy v02 secret from read test".to_vec())?;
+    let input = base_input(&prepared, OWNER_USER_ID, prepared.version())?;
+
+    let decrypted = decrypt_current_secret_version_with_keyring(&keyring, input)?;
+
+    assert_eq!(decrypted.as_bytes(), plaintext.as_slice());
+    assert!(prepared.encrypted_data_key().is_none());
+    assert_eq!(
+        prepared.dek_wrap_algorithm(),
+        Some(KekAlgorithm::EnvvarXchachaV2)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn decrypt_rejects_non_owner_before_crypto() -> TestResult<()> {
     let (_, prepared, _) = prepared_secret_with_plaintext(b"dummy secret from read test".to_vec())?;
     let wrong_master_key = MasterKey::from_bytes([99u8; MASTER_KEY_LENGTH]);
@@ -214,12 +257,56 @@ fn decrypt_rejects_non_owner_before_crypto() -> TestResult<()> {
 }
 
 #[test]
+fn decrypt_v02_rejects_non_owner_before_crypto() -> TestResult<()> {
+    let (_, prepared, _) =
+        v02_prepared_secret_with_plaintext(b"dummy v02 secret from read test".to_vec())?;
+    let wrong_keyring = MasterKeyRing::single(
+        KeyVersion::new(99)?,
+        MasterKey::from_bytes([99u8; MASTER_KEY_LENGTH]),
+    )?;
+    let input = base_input(&prepared, OTHER_USER_ID, prepared.version())?;
+
+    let result = decrypt_current_secret_version_with_keyring(&wrong_keyring, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Authorization(
+            AuthorizationError::OwnerMismatch
+        ))
+    ));
+
+    Ok(())
+}
+
+#[test]
 fn decrypt_rejects_non_current_version_before_crypto() -> TestResult<()> {
     let (_, prepared, _) = prepared_secret_with_plaintext(b"dummy secret from read test".to_vec())?;
     let wrong_master_key = MasterKey::from_bytes([99u8; MASTER_KEY_LENGTH]);
     let input = base_input(&prepared, OWNER_USER_ID, SecretVersion::new(2)?)?;
 
     let result = decrypt_current_secret_version(&wrong_master_key, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Authorization(
+            AuthorizationError::NotCurrentVersion
+        ))
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_v02_rejects_non_current_version_before_crypto() -> TestResult<()> {
+    let (_, prepared, _) =
+        v02_prepared_secret_with_plaintext(b"dummy v02 secret from read test".to_vec())?;
+    let wrong_keyring = MasterKeyRing::single(
+        KeyVersion::new(99)?,
+        MasterKey::from_bytes([99u8; MASTER_KEY_LENGTH]),
+    )?;
+    let input = base_input(&prepared, OWNER_USER_ID, SecretVersion::new(2)?)?;
+
+    let result = decrypt_current_secret_version_with_keyring(&wrong_keyring, input);
 
     assert!(matches!(
         result,
@@ -388,6 +475,92 @@ fn decrypt_rejects_wrong_key_version_as_key_unwrap_failure() -> TestResult<()> {
     assert!(matches!(
         result,
         Err(SecretDecryptError::Crypto(CryptoError::KeyUnwrapFailed))
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_legacy_rejects_missing_encrypted_data_key() -> TestResult<()> {
+    let (master_key, prepared, _) =
+        prepared_secret_with_plaintext(b"missing legacy key material".to_vec())?;
+    let mut parts = base_input_parts(&prepared, OWNER_USER_ID, prepared.version())?;
+    parts.encrypted_data_key = None;
+    let input = DecryptCurrentSecretVersionInput::new(parts);
+
+    let result = decrypt_current_secret_version(&master_key, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Crypto(
+            CryptoError::MissingEncryptedDataKey
+        ))
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_v02_rejects_missing_wrapped_dek() -> TestResult<()> {
+    let (keyring, prepared, _) =
+        v02_prepared_secret_with_plaintext(b"missing wrapped dek".to_vec())?;
+    let mut parts = base_input_parts(&prepared, OWNER_USER_ID, prepared.version())?;
+    parts.wrapped_dek = None;
+    let input = DecryptCurrentSecretVersionInput::new(parts);
+
+    let result = decrypt_current_secret_version_with_keyring(&keyring, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Crypto(CryptoError::MissingWrappedDek))
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_v02_uses_wrapped_kek_version_when_active_key_differs() -> TestResult<()> {
+    let old_keyring = MasterKeyRing::single(
+        KeyVersion::new(1)?,
+        MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH]),
+    )?;
+    let prepared = prepare_new_secret_version_with_keyring(
+        &old_keyring,
+        sample_new_input(b"old wrapped v02 secret".to_vec())?,
+    )?;
+    let rotated_keyring = v02_keyring()?;
+    let input = base_input(&prepared, OWNER_USER_ID, prepared.version())?;
+
+    let decrypted = decrypt_current_secret_version_with_keyring(&rotated_keyring, input)?;
+
+    assert_eq!(decrypted.as_bytes(), b"old wrapped v02 secret");
+
+    Ok(())
+}
+
+#[test]
+fn decrypt_v02_fails_closed_when_wrapped_kek_version_is_unavailable() -> TestResult<()> {
+    let old_keyring = MasterKeyRing::single(
+        KeyVersion::new(1)?,
+        MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH]),
+    )?;
+    let prepared = prepare_new_secret_version_with_keyring(
+        &old_keyring,
+        sample_new_input(b"missing old kek".to_vec())?,
+    )?;
+    let active_only_keyring = MasterKeyRing::single(
+        KeyVersion::new(2)?,
+        MasterKey::from_bytes([12u8; MASTER_KEY_LENGTH]),
+    )?;
+    let input = base_input(&prepared, OWNER_USER_ID, prepared.version())?;
+
+    let result = decrypt_current_secret_version_with_keyring(&active_only_keyring, input);
+
+    assert!(matches!(
+        result,
+        Err(SecretDecryptError::Keyring(
+            KeyringError::KeyUnavailable { key_version }
+        )) if key_version == 1
     ));
 
     Ok(())
