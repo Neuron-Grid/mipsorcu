@@ -1,6 +1,6 @@
 use std::fmt;
 
-use sha2::{Digest, Sha256};
+use sha3::{Digest, Sha3_256};
 
 use super::canonical::LedgerCanonicalPayload;
 use super::constants::LEDGER_HASH_LENGTH;
@@ -40,7 +40,7 @@ impl LedgerHash {
     }
 
     pub fn from_canonical_payload(payload: &LedgerCanonicalPayload) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha3_256::new();
         hasher.update(payload.as_bytes());
         let digest = hasher.finalize();
         let mut hash = [0u8; LEDGER_HASH_LENGTH];

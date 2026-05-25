@@ -80,7 +80,7 @@ fn make_dto_row(
     pk_status: Option<&str>,
 ) -> LedgerVerificationMaterialRow {
     use mipsorcu::ledger::{
-        LEDGER_CANONICALIZATION_VERSION_V1, LEDGER_HASH_ALGORITHM_SHA256,
+        LEDGER_CANONICALIZATION_VERSION_V1, LEDGER_HASH_ALGORITHM_SHA3_256,
         LEDGER_SIGNATURE_ALGORITHM_ED25519,
     };
 
@@ -118,7 +118,7 @@ fn make_dto_row(
         error_code: signed.error_code().map(str::to_owned),
         payload: signed.payload().as_value(),
         canonicalization_version: LEDGER_CANONICALIZATION_VERSION_V1 as i32,
-        hash_algorithm: LEDGER_HASH_ALGORITHM_SHA256.to_owned(),
+        hash_algorithm: LEDGER_HASH_ALGORITHM_SHA3_256.to_owned(),
         signature_algorithm: LEDGER_SIGNATURE_ALGORITHM_ED25519.to_owned(),
         pk_key_version,
         pk_public_key,

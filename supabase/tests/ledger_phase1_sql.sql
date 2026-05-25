@@ -60,7 +60,7 @@ select is(
                 'ledger_entries_previous_entry_hash_len',
                 'ledger_entries_entry_hash_len',
                 'ledger_entries_signature_len',
-                'ledger_entries_hash_algorithm_sha256',
+                'ledger_entries_hash_algorithm_sha3_256',
                 'ledger_entries_signature_algorithm_ed25519',
                 'ledger_entries_canonicalization_version_v1'
             )
@@ -602,7 +602,7 @@ from public.rpc_append_ledger_entry(
     1,
     decode(repeat('00', 32), 'hex'),
     decode(repeat('11', 32), 'hex'),
-    'sha-256',
+    'sha3-256',
     decode(repeat('aa', 64), 'hex'),
     'ed25519',
     1
@@ -662,7 +662,7 @@ select is(
             1,
             decode(repeat('11', 32), 'hex'),
             decode(repeat('22', 32), 'hex'),
-            'sha-256',
+            'sha3-256',
             decode(repeat('bb', 64), 'hex'),
             'ed25519',
             1
@@ -703,7 +703,7 @@ from public.rpc_append_ledger_entry(
     1,
     decode(repeat('00', 32), 'hex'),
     decode(repeat('11', 32), 'hex'),
-    'sha-256',
+    'sha3-256',
     decode(repeat('aa', 64), 'hex'),
     'ed25519',
     1
@@ -749,7 +749,7 @@ select is(
         1,
         decode(repeat('00', 32), 'hex'),
         decode(repeat('11', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('aa', 64), 'hex'),
         'ed25519',
         1
@@ -776,7 +776,7 @@ select is(
         1,
         decode(repeat('00', 32), 'hex'),
         decode(repeat('11', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('aa', 64), 'hex'),
         'ed25519',
         1
@@ -803,7 +803,7 @@ select is(
         1,
         decode(repeat('11', 32), 'hex'),
         decode(repeat('33', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('cc', 64), 'hex'),
         'ed25519',
         1
@@ -830,7 +830,7 @@ select is(
         1,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('44', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('dd', 64), 'hex'),
         'ed25519',
         1
@@ -857,7 +857,7 @@ select is(
         1,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('22', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('ee', 64), 'hex'),
         'ed25519',
         1
@@ -884,7 +884,7 @@ select is(
         1,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('66', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('12', 64), 'hex'),
         'ed25519',
         1
@@ -911,7 +911,7 @@ select is(
         1,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('67', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('13', 64), 'hex'),
         'ed25519',
         1
@@ -938,7 +938,7 @@ select is(
         2,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('68', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('14', 64), 'hex'),
         'ed25519',
         1
@@ -992,7 +992,7 @@ select is(
         1,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('6a', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('16', 64), 'hex'),
         'ecdsa',
         1
@@ -1019,7 +1019,7 @@ select is(
         1,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('6b', 31), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('17', 64), 'hex'),
         'ed25519',
         1
@@ -1046,7 +1046,7 @@ select is(
         1,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('6c', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('18', 63), 'hex'),
         'ed25519',
         1
@@ -1073,7 +1073,7 @@ select is(
         1,
         decode(repeat('22', 32), 'hex'),
         decode(repeat('6d', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('19', 64), 'hex'),
         'ed25519',
         1

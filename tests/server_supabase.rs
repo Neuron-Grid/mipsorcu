@@ -777,7 +777,7 @@ async fn append_ledger_entry_uses_service_role_rpc_and_sql_parameter_names() {
     assert_bytea_hex(&body["p_previous_entry_hash"], 64);
     assert_eq!(body["p_entry_hash"], entry.entry_hash().to_bytea_hex());
     assert_bytea_hex(&body["p_entry_hash"], 64);
-    assert_eq!(body["p_hash_algorithm"], "sha-256");
+    assert_eq!(body["p_hash_algorithm"], "sha3-256");
     assert_eq!(body["p_signature"], entry.signature().to_bytea_hex());
     assert_bytea_hex(&body["p_signature"], 128);
     assert_eq!(body["p_signature_algorithm"], "ed25519");

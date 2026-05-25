@@ -5,7 +5,7 @@
 //! 具体的なバックエンド実装（FreeTSA / DigiCert 等）は別モジュールで行う。
 //!
 //! 信頼境界ノート: `TimestampingService::request_timestamp` の引数型は
-//! `&DigestHash`（32 バイト SHA-256）に限定される。`LedgerEntry` 全件・
+//! `&DigestHash`（32 バイト SHA3-256）に限定される。`LedgerEntry` 全件・
 //! `SignedMonthlyDigest` の他フィールド・平文・鍵・JWT が型レベルで送信不可。
 
 pub mod dummy;

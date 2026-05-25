@@ -1084,7 +1084,7 @@ begin
         or (p_ledger_entry ->> 'p_canonicalization_version')::integer is distinct from 1
         or octet_length(decode(substr(p_ledger_entry ->> 'p_previous_entry_hash', 3), 'hex')) is distinct from 32
         or octet_length(decode(substr(p_ledger_entry ->> 'p_entry_hash', 3), 'hex')) is distinct from 32
-        or p_ledger_entry ->> 'p_hash_algorithm' is distinct from 'sha-256'
+        or p_ledger_entry ->> 'p_hash_algorithm' is distinct from 'sha3-256'
         or octet_length(decode(substr(p_ledger_entry ->> 'p_signature', 3), 'hex')) is distinct from 64
         or p_ledger_entry ->> 'p_signature_algorithm' is distinct from 'ed25519'
         or coalesce((p_ledger_entry ->> 'p_signature_key_version')::integer <= 0, true)

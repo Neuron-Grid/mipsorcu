@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_hash_matches_sha256_of_token_bytes() {
+    async fn token_hash_matches_sha3_256_of_token_bytes() {
         use super::super::service::TimestampingTokenHash;
         let service = InMemoryTimestampingService::new();
         let digest_hash = make_digest_hash(0xaa);

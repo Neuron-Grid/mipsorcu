@@ -287,7 +287,7 @@ impl LedgerEntryRpcParams {
             p_canonicalization_version: crate::ledger::LEDGER_CANONICALIZATION_VERSION_V1,
             p_previous_entry_hash: entry.previous_entry_hash().to_bytea_hex(),
             p_entry_hash: entry.entry_hash().to_bytea_hex(),
-            p_hash_algorithm: crate::ledger::LEDGER_HASH_ALGORITHM_SHA256.to_owned(),
+            p_hash_algorithm: crate::ledger::LEDGER_HASH_ALGORITHM_SHA3_256.to_owned(),
             p_signature: entry.signature().to_bytea_hex(),
             p_signature_algorithm: crate::ledger::LEDGER_SIGNATURE_ALGORITHM_ED25519.to_owned(),
             p_signature_key_version: entry.signature_key_version().get(),

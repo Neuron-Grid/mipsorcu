@@ -9,9 +9,9 @@ use serde_json::{Map, Value, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-const CANONICAL_VECTOR: &str = r#"{"schema":"mipsorcu.ledger_entry.v1","sequence_no":1,"entry_type":"secret_created","source_event_at":"2026-04-08T12:00:00Z","request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","source_event_id":null,"target_secret_id":"550e8400-e29b-41d4-a716-446655440000","target_secret_version_id":"11111111-2222-4333-8444-555555555555","actor_user_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479","actor_device_id":"sbc-device-1","result":"success","error_code":null,"payload":{"algorithm":"xchacha20-poly1305","classification":"confidential","key_version":1,"version":1},"canonicalization_version":1,"previous_entry_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash_algorithm":"sha-256","signature_algorithm":"ed25519","signature_key_version":1}"#;
+const CANONICAL_VECTOR: &str = r#"{"schema":"mipsorcu.ledger_entry.v1","sequence_no":1,"entry_type":"secret_created","source_event_at":"2026-04-08T12:00:00Z","request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","source_event_id":null,"target_secret_id":"550e8400-e29b-41d4-a716-446655440000","target_secret_version_id":"11111111-2222-4333-8444-555555555555","actor_user_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479","actor_device_id":"sbc-device-1","result":"success","error_code":null,"payload":{"algorithm":"xchacha20-poly1305","classification":"confidential","key_version":1,"version":1},"canonicalization_version":1,"previous_entry_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash_algorithm":"sha3-256","signature_algorithm":"ed25519","signature_key_version":1}"#;
 const CANONICAL_VECTOR_HASH: &str =
-    "8d63bba7d0c4b972f0134df8ffad728330897312bb556ddbea27ff708294a93b";
+    "aa2efd1170c4097b759335c9ba7846e9f7177a3f834fb1fc923af1ad93d634f4";
 
 #[test]
 fn ledger_canonical_payload_matches_fixed_vector_and_is_stable() -> TestResult {
@@ -169,7 +169,7 @@ fn ledger_previous_entry_hash_participates_in_canonical_hash() -> TestResult {
 }
 
 #[test]
-fn ledger_hash_is_sha256_fixed_32_bytes() -> TestResult {
+fn ledger_hash_is_sha3_256_fixed_32_bytes() -> TestResult {
     let entry = sample_signed_entry(sample_payload_ordered()?, LedgerSequenceNo::new(1)?)?;
     let recomputed_hash = LedgerHash::from_canonical_payload(entry.canonical_payload());
 

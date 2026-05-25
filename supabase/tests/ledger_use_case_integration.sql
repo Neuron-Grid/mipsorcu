@@ -271,7 +271,7 @@ from public.rpc_append_audit_event_with_ledger(
     1,
     decode(repeat('66', 32), 'hex'),
     decode(repeat('77', 32), 'hex'),
-    'sha-256',
+    'sha3-256',
     decode(repeat('aa', 64), 'hex'),
     'ed25519',
     1
@@ -305,7 +305,7 @@ from public.rpc_append_audit_event_with_ledger(
     1,
     decode(repeat('77', 32), 'hex'),
     decode(repeat('88', 32), 'hex'),
-    'sha-256',
+    'sha3-256',
     decode(repeat('aa', 64), 'hex'),
     'ed25519',
     1

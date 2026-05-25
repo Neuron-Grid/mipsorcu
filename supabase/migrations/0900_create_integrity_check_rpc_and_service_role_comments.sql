@@ -747,8 +747,8 @@ create table public.ledger_entries (
         octet_length(entry_hash) = 32
     ),
     constraint ledger_entries_entry_hash_unique unique (entry_hash),
-    constraint ledger_entries_hash_algorithm_sha256 check (
-        hash_algorithm = 'sha-256'
+    constraint ledger_entries_hash_algorithm_sha3_256 check (
+        hash_algorithm = 'sha3-256'
     ),
     constraint ledger_entries_signature_len check (
         octet_length(signature) = 64
@@ -770,7 +770,7 @@ comment on column public.ledger_entries.source_event_id is 'Optional audit_event
 comment on column public.ledger_entries.target_secret_id is 'Optional secret UUID snapshot. No FK to keep ledger verification independent of later lifecycle changes.';
 comment on column public.ledger_entries.target_secret_version_id is 'Optional secret version UUID snapshot. No FK so four-generation purge cannot break ledger verification.';
 comment on column public.ledger_entries.payload is 'Allowlisted, non-secret, flat JSON object. Canonical JSONB serialization is not used for hashing.';
-comment on column public.ledger_entries.entry_hash is 'Rust/SBC-computed SHA-256 entry hash. SQL stores and chains it but does not recompute it.';
+comment on column public.ledger_entries.entry_hash is 'Rust/SBC-computed SHA3-256 entry hash. SQL stores and chains it but does not recompute it.';
 comment on column public.ledger_entries.signature is 'Rust/SBC-generated Ed25519 signature. SQL stores it but never holds signing private keys.';
 comment on column public.ledger_entries.created_at is 'Database insertion timestamp. Not part of the signed canonical ledger payload.';
 
@@ -1010,7 +1010,7 @@ begin
         or (p_result = 'success' and p_error_code is not null)
         or (p_actor_device_id is not null and (btrim(p_actor_device_id) = '' or length(p_actor_device_id) > 128))
         or p_canonicalization_version <> 1
-        or p_hash_algorithm <> 'sha-256'
+        or p_hash_algorithm <> 'sha3-256'
         or p_signature_algorithm <> 'ed25519'
         or p_signature_key_version <= 0
         or not public.ledger_payload_is_valid(p_entry_type, p_payload)
@@ -3904,7 +3904,7 @@ as $$
 $$;
 
 comment on function public.ledger_monthly_digest_hash_is_valid(text)
-is 'Validates that a digest_hash value is a 64-character lowercase hex string (SHA-256).';
+is 'Validates that a digest_hash value is a 64-character lowercase hex string (SHA3-256).';
 
 -- Monthly digest range lookup
 

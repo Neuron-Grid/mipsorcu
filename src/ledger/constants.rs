@@ -1,6 +1,6 @@
 pub const LEDGER_CANONICALIZATION_VERSION_V1: u8 = 1;
 pub const LEDGER_CANONICAL_SCHEMA_V1: &str = "mipsorcu.ledger_entry.v1";
-pub const LEDGER_HASH_ALGORITHM_SHA256: &str = "sha-256";
+pub const LEDGER_HASH_ALGORITHM_SHA3_256: &str = "sha3-256";
 pub const LEDGER_SIGNATURE_ALGORITHM_ED25519: &str = "ed25519";
 pub const LEDGER_HASH_LENGTH: usize = 32;
 pub const LEDGER_SIGNATURE_LENGTH: usize = 64;

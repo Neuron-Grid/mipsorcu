@@ -74,7 +74,7 @@ select is(
         1,
         decode(repeat('00', 32), 'hex'),
         decode(repeat('0a', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('1a', 64), 'hex'),
         'ed25519',
         1
@@ -101,7 +101,7 @@ select is(
         1,
         decode(repeat('0a', 32), 'hex'),
         decode(repeat('0b', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('1b', 64), 'hex'),
         'ed25519',
         1
@@ -128,7 +128,7 @@ select is(
         1,
         decode(repeat('0b', 32), 'hex'),
         decode(repeat('0c', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('1c', 64), 'hex'),
         'ed25519',
         2
@@ -157,7 +157,7 @@ select is(
         1,
         decode(repeat('0c', 32), 'hex'),
         decode(repeat('0d', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('1d', 64), 'hex'),
         'ed25519',
         999

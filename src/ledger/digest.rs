@@ -9,10 +9,10 @@
 use std::fmt;
 
 use serde::Serialize;
-use sha2::{Digest as _, Sha256};
+use sha3::{Digest as _, Sha3_256};
 
 use super::constants::{
-    LEDGER_HASH_ALGORITHM_SHA256, LEDGER_HASH_LENGTH, LEDGER_SIGNATURE_ALGORITHM_ED25519,
+    LEDGER_HASH_ALGORITHM_SHA3_256, LEDGER_HASH_LENGTH, LEDGER_SIGNATURE_ALGORITHM_ED25519,
 };
 use super::error::LedgerError;
 use super::hash::LedgerHash;
@@ -65,7 +65,7 @@ fn validate_year_month_format(value: &str) -> Result<(), LedgerError> {
 
 /// digest canonical form のバイト列。
 ///
-/// SHA-256 digest hash および Ed25519 署名の入力。
+/// SHA3-256 digest hash および Ed25519 署名の入力。
 /// `serde_json` compact 出力（余分な空白・改行なし）を UTF-8 として保持する。
 #[derive(Clone, PartialEq, Eq)]
 pub struct DigestCanonicalBytes(Vec<u8>);
@@ -85,17 +85,17 @@ impl fmt::Debug for DigestCanonicalBytes {
     }
 }
 
-/// digest canonical form の SHA-256 hash（32 バイト）。
+/// digest canonical form の SHA3-256 hash（32 バイト）。
 ///
-/// `LedgerHash::from_canonical_payload` と同一方式（SHA-256）を
+/// `LedgerHash::from_canonical_payload` と同一方式（SHA3-256）を
 /// digest canonical form に適用する。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DigestHash([u8; LEDGER_HASH_LENGTH]);
 
 impl DigestHash {
-    /// canonical bytes の SHA-256 hash を計算して生成する。
+    /// canonical bytes の SHA3-256 hash を計算して生成する。
     pub fn from_canonical_bytes(bytes: &DigestCanonicalBytes) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha3_256::new();
         hasher.update(bytes.as_bytes());
         let result = hasher.finalize();
         let mut hash = [0u8; LEDGER_HASH_LENGTH];
@@ -146,7 +146,7 @@ pub struct SignedMonthlyDigest {
     pub signature_key_version: LedgerSignatureKeyVersion,
     /// canonical JSON バイト列（署名対象）。
     pub canonical_bytes: DigestCanonicalBytes,
-    /// canonical bytes の SHA-256 hash（外部アーカイブ・timestamping 用）。
+    /// canonical bytes の SHA3-256 hash（外部アーカイブ・timestamping 用）。
     pub digest_hash: DigestHash,
     /// digest canonical bytes に対する Ed25519 署名。
     pub sbc_signature: LedgerSignature,
@@ -200,7 +200,7 @@ pub fn build_monthly_digest_canonical_form(
         end_sequence_no: end_sequence_no.get(),
         entry_count,
         generated_by: DIGEST_GENERATED_BY,
-        hash_algorithm: LEDGER_HASH_ALGORITHM_SHA256,
+        hash_algorithm: LEDGER_HASH_ALGORITHM_SHA3_256,
         signature_algorithm: LEDGER_SIGNATURE_ALGORITHM_ED25519,
         signature_key_version: signature_key_version.get(),
         start_entry_hash: &start_hash_hex,
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_hash_is_sha256_of_canonical_bytes() {
+    fn digest_hash_is_sha3_256_of_canonical_bytes() {
         let bytes = make_canonical_bytes();
         let hash = DigestHash::from_canonical_bytes(&bytes);
         assert_eq!(hash.to_hex().len(), 64);
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(parsed["entry_count"].as_u64(), Some(42));
         assert_eq!(
             parsed["hash_algorithm"].as_str(),
-            Some(LEDGER_HASH_ALGORITHM_SHA256)
+            Some(LEDGER_HASH_ALGORITHM_SHA3_256)
         );
         assert_eq!(
             parsed["signature_algorithm"].as_str(),

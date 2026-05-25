@@ -45,7 +45,7 @@ select lives_ok(
         1,
         decode(repeat('00', 32), 'hex'),
         decode(repeat('01', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('aa', 64), 'hex'),
         'ed25519',
         1
@@ -97,7 +97,7 @@ select lives_ok(
         1,
         decode(repeat('01', 32), 'hex'),
         decode(repeat('02', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('bb', 64), 'hex'),
         'ed25519',
         1
@@ -133,7 +133,7 @@ select is(
         1,
         decode(repeat('02', 32), 'hex'),
         decode(repeat('03', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('cc', 64), 'hex'),
         'ed25519',
         2
@@ -174,7 +174,7 @@ select lives_ok(
         1,
         decode(repeat('03', 32), 'hex'),
         decode(repeat('04', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('dd', 64), 'hex'),
         'ed25519',
         1
@@ -230,7 +230,7 @@ select lives_ok(
         1,
         decode(repeat('04', 32), 'hex'),
         decode(repeat('05', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('ee', 64), 'hex'),
         'ed25519',
         1
@@ -270,7 +270,7 @@ select throws_like(
         1,
         decode(repeat('05', 32), 'hex'),
         decode(repeat('06', 32), 'hex'),
-        'sha-256',
+        'sha3-256',
         decode(repeat('ff', 64), 'hex'),
         'ed25519',
         1

@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mipsorcu::{
     LEDGER_CANONICALIZATION_VERSION_V1, LEDGER_ED25519_SECRET_KEY_LENGTH,
-    LEDGER_HASH_ALGORITHM_SHA256, LEDGER_HASH_LENGTH, LEDGER_SIGNATURE_ALGORITHM_ED25519,
+    LEDGER_HASH_ALGORITHM_SHA3_256, LEDGER_HASH_LENGTH, LEDGER_SIGNATURE_ALGORITHM_ED25519,
     LEDGER_SIGNATURE_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey, MASTER_KEY_LENGTH,
     SourceEventAt,
 };
@@ -239,7 +239,7 @@ fn key_rotation_start_appends_audit_event_with_signed_ledger_entry()
         body["p_canonicalization_version"],
         Value::from(LEDGER_CANONICALIZATION_VERSION_V1)
     );
-    assert_eq!(body["p_hash_algorithm"], LEDGER_HASH_ALGORITHM_SHA256);
+    assert_eq!(body["p_hash_algorithm"], LEDGER_HASH_ALGORITHM_SHA3_256);
     assert_eq!(
         body["p_signature_algorithm"],
         LEDGER_SIGNATURE_ALGORITHM_ED25519

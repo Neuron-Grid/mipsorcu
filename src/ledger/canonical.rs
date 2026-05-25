@@ -8,7 +8,7 @@ use crate::audit::{AuditEventId, RequestId};
 use crate::types::{DeviceId, OwnerUserId, SecretId, SourceEventAt};
 
 use super::constants::{
-    LEDGER_CANONICAL_SCHEMA_V1, LEDGER_CANONICALIZATION_VERSION_V1, LEDGER_HASH_ALGORITHM_SHA256,
+    LEDGER_CANONICAL_SCHEMA_V1, LEDGER_CANONICALIZATION_VERSION_V1, LEDGER_HASH_ALGORITHM_SHA3_256,
     LEDGER_SIGNATURE_ALGORITHM_ED25519,
 };
 use super::entry_type::LedgerEntryType;
@@ -87,7 +87,7 @@ pub(super) fn build_canonical_payload(
         payload: fields.payload.canonical_serializer(),
         canonicalization_version: LEDGER_CANONICALIZATION_VERSION_V1,
         previous_entry_hash: &previous_entry_hash,
-        hash_algorithm: LEDGER_HASH_ALGORITHM_SHA256,
+        hash_algorithm: LEDGER_HASH_ALGORITHM_SHA3_256,
         signature_algorithm: LEDGER_SIGNATURE_ALGORITHM_ED25519,
         signature_key_version: fields.signature_key_version.get(),
     };

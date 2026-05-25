@@ -1,12 +1,12 @@
 //! `TimestampingService` trait と関連型の定義。
 //!
-//! 信頼境界ノート: `request_timestamp` の引数型は `&DigestHash`（32 バイト SHA-256）に
+//! 信頼境界ノート: `request_timestamp` の引数型は `&DigestHash`（32 バイト SHA3-256）に
 //! 限定される。`LedgerEntry` 全件・`SignedMonthlyDigest` の他フィールド・平文・Master Key・
 //! Data Key・JWT を引数として渡すことが型レベルで不可能。
 
 use std::fmt;
 
-use sha2::{Digest as _, Sha256};
+use sha3::{Digest as _, Sha3_256};
 
 use crate::ledger::DigestHash;
 
@@ -18,7 +18,7 @@ const TIMESTAMPING_TOKEN_MIN_LENGTH: usize = 1;
 /// （複数の中間証明書を含む）にも対応する余裕を持たせる。
 const TIMESTAMPING_TOKEN_MAX_LENGTH: usize = 4 * 1024 * 1024;
 
-/// timestamping token hash のバイト長（SHA-256）。
+/// timestamping token hash のバイト長（SHA3-256）。
 const TIMESTAMPING_TOKEN_HASH_LENGTH: usize = 32;
 
 /// 外部 timestamping サービスから返された不透明な token バイト列。
@@ -66,7 +66,7 @@ impl fmt::Debug for TimestampingToken {
     }
 }
 
-/// timestamping token の SHA-256 ハッシュ（32 バイト）。
+/// timestamping token の SHA3-256 ハッシュ（32 バイト）。
 ///
 /// `ledger_entries.payload.timestamp_token_hash` および
 /// `audit_events.metadata_json.timestamp_token_hash` 用の相関 ID。
@@ -75,9 +75,9 @@ impl fmt::Debug for TimestampingToken {
 pub struct TimestampingTokenHash([u8; TIMESTAMPING_TOKEN_HASH_LENGTH]);
 
 impl TimestampingTokenHash {
-    /// token のバイト列から SHA-256 ハッシュを計算する。
+    /// token のバイト列から SHA3-256 ハッシュを計算する。
     pub fn from_token(token: &TimestampingToken) -> Self {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha3_256::new();
         hasher.update(token.as_bytes());
         let result = hasher.finalize();
         let mut hash = [0u8; TIMESTAMPING_TOKEN_HASH_LENGTH];
@@ -134,7 +134,7 @@ impl std::error::Error for TimestampingServiceError {}
 pub trait TimestampingService: Send + Sync + 'static {
     /// digest hash に対する timestamping を要求する。
     ///
-    /// 引数は 32 バイトの SHA-256 ハッシュのみ。バックエンドは hash 以外の
+    /// 引数は 32 バイトの SHA3-256 ハッシュのみ。バックエンドは hash 以外の
     /// 情報にアクセスできない。
     async fn request_timestamp(
         &self,
@@ -182,13 +182,13 @@ mod tests {
     }
 
     #[test]
-    fn token_hash_is_sha256() {
+    fn token_hash_is_sha3_256() {
         let token = TimestampingToken::new(b"abc".to_vec()).unwrap();
         let hash = TimestampingTokenHash::from_token(&token);
-        // SHA-256("abc")
+        // SHA3-256("abc")
         assert_eq!(
             hash.to_hex(),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532"
         );
     }
 

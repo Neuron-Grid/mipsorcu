@@ -250,7 +250,7 @@ fn chain_export_body_with_entry_hash(m: &ValidTestMaterials, entry_hash_hex: &st
         "error_code": Value::Null,
         "payload": {},
         "canonicalization_version": 1i32,
-        "hash_algorithm": "sha-256",
+        "hash_algorithm": "sha3-256",
         "signature_algorithm": "ed25519",
         "pk_key_version": 1i32,
         "pk_public_key": format!("\\x{}", m.public_key_hex),

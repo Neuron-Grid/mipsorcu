@@ -830,7 +830,7 @@ select is(
                 'p_canonicalization_version', 1,
                 'p_previous_entry_hash', '\x' || repeat('11', 32),
                 'p_entry_hash', '\x' || repeat('22', 32),
-                'p_hash_algorithm', 'sha-256',
+                'p_hash_algorithm', 'sha3-256',
                 'p_signature', '\x' || repeat('aa', 64),
                 'p_signature_algorithm', 'ed25519',
                 'p_signature_key_version', 1
