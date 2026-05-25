@@ -67,6 +67,8 @@ impl EnvVarKek {
 
     pub fn active(&self) -> (KekVersion, &MasterKey) {
         let Some(master_key) = self.keys.get(&self.active_version) else {
+            // Construction validates that the active key is present; reaching this branch
+            // means the keyring invariant was broken after construction.
             unreachable!(
                 "EnvVarKek invariant violated: active key version must be present after construction"
             );
