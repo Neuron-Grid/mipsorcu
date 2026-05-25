@@ -1,9 +1,9 @@
 use mipsorcu::{
     ALGORITHM_XCHACHA20_POLY1305, AadV1, Classification, CreatedAt, CryptoError,
-    CurrentSecretVersionState, DATA_KEY_LENGTH, DeviceId, ExistingSecretVersionInput, InputError,
-    KeyVersion, KeyWrapContext, MASTER_KEY_LENGTH, MasterKey, MasterKeyRing, OwnerUserId,
-    Plaintext, SecretId, SecretVersion, SecretWriteError, decrypt_secret,
-    prepare_existing_secret_version, prepare_existing_secret_version_with_keyring,
+    CurrentSecretVersionState, DATA_KEY_LENGTH, DataKey, DeviceId, ExistingSecretVersionInput,
+    InputError, KekAlgorithm, KekProvider, KeyVersion, KeyWrapContext, MASTER_KEY_LENGTH,
+    MasterKey, MasterKeyRing, OwnerUserId, Plaintext, SecretId, SecretVersion, SecretWriteError,
+    decrypt_secret, prepare_existing_secret_version, prepare_existing_secret_version_with_keyring,
     prepare_new_secret_version, prepare_new_secret_version_with_keyring, unwrap_data_key,
 };
 use serde_json::Value;
@@ -54,7 +54,10 @@ fn current_state_from_prepared(
         prepared.owner_user_id().clone(),
         prepared.classification().clone(),
         prepared.key_version(),
-        prepared.encrypted_data_key().clone(),
+        prepared
+            .encrypted_data_key()
+            .expect("legacy prepared version should include encrypted_data_key")
+            .clone(),
     )
 }
 
@@ -78,7 +81,11 @@ fn prepare_new_secret_version_builds_rpc_payload_and_round_trips() -> Result<(),
     );
     assert!(!prepared.ciphertext().as_bytes().is_empty());
     assert_eq!(
-        prepared.encrypted_data_key().as_bytes().len(),
+        prepared
+            .encrypted_data_key()
+            .expect("legacy prepared version should include encrypted_data_key")
+            .as_bytes()
+            .len(),
         mipsorcu::ENCRYPTED_DATA_KEY_LENGTH
     );
     assert_eq!(prepared.created_by_device_id().as_str(), DEVICE_ID);
@@ -124,7 +131,9 @@ fn prepare_new_secret_version_builds_rpc_payload_and_round_trips() -> Result<(),
     let data_key = unwrap_data_key(
         &master_key,
         &key_wrap_context,
-        prepared.encrypted_data_key(),
+        prepared
+            .encrypted_data_key()
+            .expect("legacy prepared version should include encrypted_data_key"),
     )?;
     assert_eq!(data_key.as_bytes().len(), DATA_KEY_LENGTH);
 
@@ -173,8 +182,14 @@ fn prepare_existing_secret_version_reuses_data_key_and_round_trips() -> Result<(
     assert_eq!(rotated.key_version(), current.key_version());
     assert_eq!(rotated.created_by_device_id().as_str(), DEVICE_ID);
     assert_eq!(
-        rotated.encrypted_data_key().as_bytes(),
-        current.encrypted_data_key().as_bytes()
+        rotated
+            .encrypted_data_key()
+            .expect("legacy rotated version should include encrypted_data_key")
+            .as_bytes(),
+        current
+            .encrypted_data_key()
+            .expect("legacy current version should include encrypted_data_key")
+            .as_bytes()
     );
     assert_eq!(
         rotated
@@ -210,11 +225,21 @@ fn prepare_existing_secret_version_reuses_data_key_and_round_trips() -> Result<(
     );
 
     let current_context = KeyWrapContext::new(current.secret_id().clone(), current.key_version());
-    let current_data_key =
-        unwrap_data_key(&master_key, &current_context, current.encrypted_data_key())?;
+    let current_data_key = unwrap_data_key(
+        &master_key,
+        &current_context,
+        current
+            .encrypted_data_key()
+            .expect("legacy current version should include encrypted_data_key"),
+    )?;
     let rotated_context = KeyWrapContext::new(rotated.secret_id().clone(), rotated.key_version());
-    let rotated_data_key =
-        unwrap_data_key(&master_key, &rotated_context, rotated.encrypted_data_key())?;
+    let rotated_data_key = unwrap_data_key(
+        &master_key,
+        &rotated_context,
+        rotated
+            .encrypted_data_key()
+            .expect("legacy rotated version should include encrypted_data_key"),
+    )?;
     assert_eq!(rotated_data_key.as_bytes(), current_data_key.as_bytes());
     assert_eq!(rotated_data_key.as_bytes().len(), DATA_KEY_LENGTH);
 
@@ -240,20 +265,28 @@ fn prepare_new_secret_version_with_keyring_uses_active_key_version() -> Result<(
     let prepared = prepare_new_secret_version_with_keyring(&keyring, input)?;
 
     assert_eq!(prepared.key_version().get(), 2);
-    let active_master_key = keyring.get(KeyVersion::new(2)?)?;
-    let active_context = KeyWrapContext::new(prepared.secret_id().clone(), prepared.key_version());
-    let data_key = unwrap_data_key(
-        active_master_key,
-        &active_context,
-        prepared.encrypted_data_key(),
-    )?;
+    assert!(prepared.encrypted_data_key().is_none());
+    assert_eq!(
+        prepared.dek_wrap_algorithm(),
+        Some(KekAlgorithm::EnvvarXchachaV2)
+    );
+    assert_eq!(prepared.kek_version().map(|version| version.get()), Some(2));
+    let unwrapped = keyring
+        .as_envvar_kek()
+        .unwrap_dek(
+            prepared
+                .wrapped_dek()
+                .expect("v0.2 prepared version should include wrapped_dek"),
+        )
+        .expect("v0.2 wrapped DEK should unwrap with active KEK");
+    let data_key = DataKey::parse(unwrapped.as_bytes())?;
     assert_eq!(data_key.as_bytes().len(), DATA_KEY_LENGTH);
 
     Ok(())
 }
 
 #[test]
-fn prepare_existing_secret_version_with_keyring_rewraps_data_key_to_active_version()
+fn prepare_existing_secret_version_with_keyring_generates_fresh_envelope_dek()
 -> Result<(), SecretWriteError> {
     let old_master_key = sample_master_key();
     let current = prepare_new_secret_version(
@@ -273,24 +306,33 @@ fn prepare_existing_secret_version_with_keyring_rewraps_data_key_to_active_versi
     let rotated = prepare_existing_secret_version_with_keyring(&keyring, input)?;
 
     assert_eq!(rotated.key_version().get(), 2);
-    assert_ne!(
-        rotated.encrypted_data_key().as_bytes(),
-        current.encrypted_data_key().as_bytes()
+    assert!(rotated.encrypted_data_key().is_none());
+    assert_eq!(
+        rotated.dek_wrap_algorithm(),
+        Some(KekAlgorithm::EnvvarXchachaV2)
     );
+    assert_eq!(rotated.kek_version().map(|version| version.get()), Some(2));
+    assert_ne!(rotated.nonce_or_iv(), current.nonce_or_iv());
 
     let old_context = KeyWrapContext::new(current.secret_id().clone(), current.key_version());
     let old_data_key = unwrap_data_key(
         keyring.get(KeyVersion::new(1)?)?,
         &old_context,
-        current.encrypted_data_key(),
+        current
+            .encrypted_data_key()
+            .expect("legacy current version should include encrypted_data_key"),
     )?;
-    let new_context = KeyWrapContext::new(rotated.secret_id().clone(), rotated.key_version());
-    let new_data_key = unwrap_data_key(
-        keyring.get(KeyVersion::new(2)?)?,
-        &new_context,
-        rotated.encrypted_data_key(),
-    )?;
-    assert_eq!(new_data_key.as_bytes(), old_data_key.as_bytes());
+    let new_dek = keyring
+        .as_envvar_kek()
+        .unwrap_dek(
+            rotated
+                .wrapped_dek()
+                .expect("v0.2 rotated version should include wrapped_dek"),
+        )
+        .expect("v0.2 wrapped DEK should unwrap with active KEK");
+    let new_data_key = DataKey::parse(new_dek.as_bytes())?;
+    assert_ne!(new_data_key.as_bytes(), old_data_key.as_bytes());
+    assert_eq!(new_data_key.as_bytes().len(), DATA_KEY_LENGTH);
 
     let aad = AadV1::from_stored_context(rotated.aad_context())?;
     let decrypted = decrypt_secret(
@@ -299,6 +341,47 @@ fn prepare_existing_secret_version_with_keyring_rewraps_data_key_to_active_versi
         rotated.nonce_or_iv(),
         rotated.ciphertext(),
     )?;
+    assert_eq!(decrypted.as_bytes(), next_plaintext.as_slice());
+
+    Ok(())
+}
+
+#[test]
+fn prepare_existing_secret_version_with_keyring_accepts_metadata_only_current_state()
+-> Result<(), SecretWriteError> {
+    let keyring = rotation_keyring()?;
+    let current_secret_id = SecretId::generate()?;
+    let current_state = CurrentSecretVersionState::from_metadata(
+        current_secret_id.clone(),
+        SecretVersion::new(7)?,
+        OwnerUserId::parse(OWNER_USER_ID)?,
+        Classification::new(CLASSIFICATION)?,
+    );
+    let next_plaintext = b"rotated from metadata only".to_vec();
+    let input = ExistingSecretVersionInput::new(
+        current_state,
+        DeviceId::new(DEVICE_ID)?,
+        CreatedAt::parse(ROTATED_CREATED_AT)?,
+        Plaintext::new(next_plaintext.clone()),
+    );
+
+    let rotated = prepare_existing_secret_version_with_keyring(&keyring, input)?;
+
+    assert_eq!(rotated.secret_id(), &current_secret_id);
+    assert_eq!(rotated.version().get(), 8);
+    assert!(rotated.encrypted_data_key().is_none());
+    assert!(rotated.wrapped_dek().is_some());
+    let aad = AadV1::from_stored_context(rotated.aad_context())?;
+    let unwrapped = keyring
+        .as_envvar_kek()
+        .unwrap_dek(
+            rotated
+                .wrapped_dek()
+                .expect("v0.2 rotated version should include wrapped_dek"),
+        )
+        .expect("v0.2 wrapped DEK should unwrap with active KEK");
+    let data_key = DataKey::parse(unwrapped.as_bytes())?;
+    let decrypted = decrypt_secret(&data_key, &aad, rotated.nonce_or_iv(), rotated.ciphertext())?;
     assert_eq!(decrypted.as_bytes(), next_plaintext.as_slice());
 
     Ok(())
@@ -318,7 +401,10 @@ fn prepare_existing_secret_version_rejects_wrong_secret_context() -> Result<(), 
         current.owner_user_id().clone(),
         current.classification().clone(),
         current.key_version(),
-        current.encrypted_data_key().clone(),
+        current
+            .encrypted_data_key()
+            .expect("legacy current version should include encrypted_data_key")
+            .clone(),
     );
     let input = ExistingSecretVersionInput::new(
         current_state,
@@ -350,7 +436,10 @@ fn prepare_existing_secret_version_rejects_wrong_key_version_context()
         current.owner_user_id().clone(),
         current.classification().clone(),
         KeyVersion::new(2)?,
-        current.encrypted_data_key().clone(),
+        current
+            .encrypted_data_key()
+            .expect("legacy current version should include encrypted_data_key")
+            .clone(),
     );
     let input = ExistingSecretVersionInput::new(
         current_state,
@@ -381,7 +470,10 @@ fn prepare_existing_secret_version_rejects_version_overflow() -> Result<(), Secr
         current.owner_user_id().clone(),
         current.classification().clone(),
         current.key_version(),
-        current.encrypted_data_key().clone(),
+        current
+            .encrypted_data_key()
+            .expect("legacy current version should include encrypted_data_key")
+            .clone(),
     );
     let input = ExistingSecretVersionInput::new(
         current_state,

@@ -96,39 +96,36 @@ pub(in crate::server) async fn rotate_secret(
         AuditAction::EncryptRotate,
     );
 
-    let current = match read_model::fetch_current_secret_version(
-        state,
-        &requested_secret_id,
-        raw_jwt,
-    )
-    .await
-    {
-        Ok(current) => current,
-        Err(FetchCurrentSecretVersionError::Upstream(rpc_error)) => {
-            failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
-            if let Err(audit_err) = failure.record().await {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
+    let current =
+        match read_model::fetch_current_secret_write_state(state, &requested_secret_id, raw_jwt)
+            .await
+        {
+            Ok(current) => current,
+            Err(FetchCurrentSecretVersionError::Upstream(rpc_error)) => {
+                failure.log_upstream_failure(&rpc_error, "fetch_current_secret_write_state");
+                if let Err(audit_err) = failure.record().await {
+                    tracing::error!(
+                        request_id = %request_id.as_canonical_string(),
+                        error = %audit_err,
+                        "failure audit recording also failed"
+                    );
+                }
+                return Err(ApiError::from(rpc_error));
             }
-            return Err(ApiError::from(rpc_error));
-        }
-        Err(FetchCurrentSecretVersionError::Api(api_error)) => {
-            if let Err(audit_err) = failure
-                .log_and_record(&api_error, "fetch_current_secret_version")
-                .await
-            {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
+            Err(FetchCurrentSecretVersionError::Api(api_error)) => {
+                if let Err(audit_err) = failure
+                    .log_and_record(&api_error, "fetch_current_secret_write_state")
+                    .await
+                {
+                    tracing::error!(
+                        request_id = %request_id.as_canonical_string(),
+                        error = %audit_err,
+                        "failure audit recording also failed"
+                    );
+                }
+                return Err(api_error);
             }
-            return Err(api_error);
-        }
-    };
+        };
 
     if let Err(error) = authorize_existing_secret_version_write(claims, current.owner_user_id()) {
         if let Err(audit_err) = failure

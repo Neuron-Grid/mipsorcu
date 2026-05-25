@@ -53,5 +53,6 @@ pub use crate::types::supabase::{
     KeyRotationApplyOutcome, KeyRotationApplyRow, KeyRotationBatchRow, KeyRotationCompleteOutcome,
     KeyRotationStatus, LedgerAppendRpcFailure, LedgerEntryRpcParams, RestoreTestSampleRow,
     SecretAliasListRow, SecretAliasResolveRow, SecretReadJoin, SecretVersionReadRow,
-    SecretVersionRetentionSnapshot, WriteSecretVersionOutcome, WriteSecretVersionParams,
+    SecretVersionRetentionSnapshot, SecretVersionWriteStateRow, WriteSecretVersionOutcome,
+    WriteSecretVersionParams,
 };

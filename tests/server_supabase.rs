@@ -230,6 +230,56 @@ async fn current_secret_version_read_uses_expected_columns_and_publishable_auth(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn current_secret_write_state_read_uses_metadata_only_columns_and_publishable_auth() {
+    let (base_url, receiver, server_thread) =
+        spawn_capture_server(200, "[]").expect("capture server should start");
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        base_url,
+        "service-role-secret",
+        "publishable-key",
+    );
+    let secret_id =
+        SecretId::parse("550e8400-e29b-41d4-a716-446655440000").expect("secret id must be valid");
+    let raw_jwt = RawJwt::new("sample-user-jwt").expect("raw jwt must be valid");
+
+    let rows = client
+        .fetch_current_secret_write_state_for_user(&secret_id, &raw_jwt)
+        .await
+        .expect("current secret write state read should succeed");
+    let request = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("request should be captured");
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert!(rows.is_empty());
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.path,
+        "/rest/v1/secret_versions?select=id,secret_id,version,classification,created_by_user_id,created_at,secrets!inner(current_version_id,owner_user_id,classification)&secret_id=eq.550e8400-e29b-41d4-a716-446655440000"
+    );
+    assert_eq!(
+        request.headers.get("authorization"),
+        Some(&"Bearer sample-user-jwt".to_owned())
+    );
+    assert_eq!(
+        request.headers.get("apikey"),
+        Some(&"publishable-key".to_owned())
+    );
+    assert!(
+        !request
+            .headers
+            .values()
+            .any(|value| value.contains("service-role-secret"))
+    );
+    assert!(!request.path.contains("encrypted_data_key"));
+    assert!(!request.path.contains("wrapped_dek"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn secret_alias_resolution_uses_service_role_rpc_and_fingerprint() {
     let (base_url, receiver, server_thread) =
         spawn_capture_server(200, "[]").expect("capture server should start");

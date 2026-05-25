@@ -287,7 +287,7 @@ select is(
         with expected_secret_store_rpc(function_signature) as (
             values
                 (
-                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb,bytea,text,integer)'::regprocedure
                 ),
                 (
                     'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)'::regprocedure
@@ -363,7 +363,7 @@ select is(
         with expected_secret_store_rpc(function_signature) as (
             values
                 (
-                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb,bytea,text,integer)'::regprocedure
                 ),
                 (
                     'public.rpc_append_audit_event(uuid,uuid,uuid,text,text,uuid,text,integer,jsonb)'::regprocedure
@@ -590,17 +590,17 @@ select is(
             values
                 (
                     'anon',
-                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure,
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb,bytea,text,integer)'::regprocedure,
                     false
                 ),
                 (
                     'authenticated',
-                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure,
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb,bytea,text,integer)'::regprocedure,
                     false
                 ),
                 (
                     'service_role',
-                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb)'::regprocedure,
+                    'public.rpc_write_secret_version(uuid,text,uuid,uuid,text,text,timestamptz,integer,bytea,bytea,integer,text,bytea,jsonb,uuid,jsonb,bytea,text,integer)'::regprocedure,
                     true
                 ),
                 (

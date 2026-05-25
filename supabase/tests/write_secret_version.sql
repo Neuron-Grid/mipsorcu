@@ -29,10 +29,33 @@ from public.rpc_write_secret_version(
     )
 );
 
+create temp table envelope_write_result as
+select *
+from test_helpers.write_secret_version_v02_fixture(
+    '00000000-0000-4000-8000-000000000101',
+    'encrypt_create',
+    '650e8400-e29b-41d4-a716-446655440000',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:05:00Z',
+    1,
+    'ac',
+    '06',
+    'sbc-device-1',
+    'confidential',
+    'cd',
+    2
+);
+
 select is(
     (select count(*)::integer from first_write_result),
     1,
     'new secret write returns one row'
+);
+
+select is(
+    (select count(*)::integer from envelope_write_result),
+    1,
+    'v0.2 envelope write returns one row'
 );
 
 select is(
@@ -80,6 +103,61 @@ select is(
     ),
     'confidential',
     'secret_versions.classification stores RPC classification'
+);
+
+select is(
+    (
+        select sv.encrypted_data_key is null
+        from public.secret_versions sv
+        where sv.secret_id = '650e8400-e29b-41d4-a716-446655440000'
+            and sv.version = 1
+    ),
+    true,
+    'v0.2 envelope write stores null legacy encrypted_data_key'
+);
+
+select is(
+    (
+        select octet_length(sv.wrapped_dek)
+        from public.secret_versions sv
+        where sv.secret_id = '650e8400-e29b-41d4-a716-446655440000'
+            and sv.version = 1
+    ),
+    72,
+    'v0.2 envelope write stores wrapped_dek bytes'
+);
+
+select is(
+    (
+        select sv.dek_wrap_algorithm
+        from public.secret_versions sv
+        where sv.secret_id = '650e8400-e29b-41d4-a716-446655440000'
+            and sv.version = 1
+    ),
+    'envvar-xchacha-v2',
+    'v0.2 envelope write stores dek_wrap_algorithm'
+);
+
+select is(
+    (
+        select sv.kek_version
+        from public.secret_versions sv
+        where sv.secret_id = '650e8400-e29b-41d4-a716-446655440000'
+            and sv.version = 1
+    ),
+    2,
+    'v0.2 envelope write stores kek_version'
+);
+
+select is(
+    (
+        select sv.key_version
+        from public.secret_versions sv
+        where sv.secret_id = '650e8400-e29b-41d4-a716-446655440000'
+            and sv.version = 1
+    ),
+    2,
+    'v0.2 envelope write keeps key_version compatible with kek_version'
 );
 
 select is(

@@ -130,6 +130,32 @@ async fn create_secret_write_rpc_failure_audit_uses_write_action_metadata() -> T
                 "write RPC request should include p_secret_version_id",
             )
         })?;
+    assert!(
+        write_request.body["p_encrypted_data_key"].is_null(),
+        "v0.2 write RPC request should not send legacy encrypted_data_key"
+    );
+    assert_eq!(
+        write_request.body["p_dek_wrap_algorithm"],
+        "envvar-xchacha-v2"
+    );
+    assert_eq!(write_request.body["p_key_version"], 1);
+    assert_eq!(write_request.body["p_kek_version"], 1);
+    let wrapped_dek = write_request.body["p_wrapped_dek"]
+        .as_str()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "write RPC request should include p_wrapped_dek",
+            )
+        })?;
+    let wrapped_dek_hex = wrapped_dek.strip_prefix("\\x").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "p_wrapped_dek should use bytea hex encoding",
+        )
+    })?;
+    assert_eq!(hex::decode(wrapped_dek_hex)?.len(), 72);
+
     let append_body = append_request.body.as_object().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,

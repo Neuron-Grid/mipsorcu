@@ -152,6 +152,17 @@ select ok(
     'secret_versions_wrapped_dek_size exists'
 );
 
+select ok(
+    exists (
+        select 1
+        from pg_constraint c
+        where c.conrelid = 'public.secret_versions'::regclass
+            and c.conname = 'secret_versions_legacy_encrypted_data_key_required'
+            and c.contype = 'c'
+    ),
+    'secret_versions_legacy_encrypted_data_key_required exists'
+);
+
 select is(
     test_helpers.try_insert_secret_version_with_envelope_fields(
         '900e8400-e29b-41d4-a716-446655440000',

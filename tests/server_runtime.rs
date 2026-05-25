@@ -211,7 +211,12 @@ fn prepared_restore_test_row(
             ciphertext: format!("\\x{}", hex::encode(prepared.ciphertext().as_bytes())),
             encrypted_data_key: format!(
                 "\\x{}",
-                hex::encode(prepared.encrypted_data_key().as_bytes())
+                hex::encode(
+                    prepared
+                        .encrypted_data_key()
+                        .expect("legacy prepared version should include encrypted_data_key")
+                        .as_bytes()
+                )
             ),
             key_version: i32::try_from(prepared.key_version().get())?,
             classification: prepared.classification().as_str().to_owned(),
@@ -248,7 +253,12 @@ fn decrypt_row_json(plaintext: &[u8]) -> Result<(String, Value), Box<dyn std::er
             "ciphertext": format!("\\x{}", hex::encode(prepared.ciphertext().as_bytes())),
             "encrypted_data_key": format!(
                 "\\x{}",
-                hex::encode(prepared.encrypted_data_key().as_bytes())
+                hex::encode(
+                    prepared
+                        .encrypted_data_key()
+                        .expect("legacy prepared version should include encrypted_data_key")
+                        .as_bytes()
+                )
             ),
             "key_version": i32::try_from(prepared.key_version().get())?,
             "algorithm": mipsorcu::ALGORITHM_XCHACHA20_POLY1305,
@@ -3348,6 +3358,28 @@ async fn rotate_endpoint_maps_upstream_403_to_502_with_request_id() {
         write_request
             .path
             .ends_with("/rest/v1/rpc/rpc_write_secret_version")
+    );
+    let write_body = write_request
+        .body
+        .as_ref()
+        .expect("write RPC request should include JSON body");
+    assert!(
+        write_body["p_encrypted_data_key"].is_null(),
+        "v0.2 rotate write should not send legacy encrypted_data_key"
+    );
+    assert_eq!(write_body["p_dek_wrap_algorithm"], "envvar-xchacha-v2");
+    assert_eq!(write_body["p_key_version"], write_body["p_kek_version"]);
+    let wrapped_dek = write_body["p_wrapped_dek"]
+        .as_str()
+        .expect("v0.2 rotate write should include wrapped_dek");
+    let wrapped_dek_hex = wrapped_dek
+        .strip_prefix("\\x")
+        .expect("wrapped_dek should use bytea hex encoding");
+    assert_eq!(
+        hex::decode(wrapped_dek_hex)
+            .expect("wrapped_dek should be hex")
+            .len(),
+        72
     );
 
     app_task.abort();

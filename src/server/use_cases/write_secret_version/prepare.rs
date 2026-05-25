@@ -36,7 +36,7 @@ pub(super) async fn prepare_new_secret_version_for_request(
 
 pub(super) async fn prepare_existing_secret_version_for_request(
     state: &AppState,
-    current: read_model::PreparedDecryptRow,
+    current: read_model::PreparedCurrentSecretWriteState,
     command: RotateSecretCommand,
 ) -> Result<PreparedSecretVersion, ApiError> {
     let master_key_ring = state.master_key_ring.clone();

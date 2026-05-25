@@ -60,8 +60,9 @@ pub use authorization::{
     authorize_existing_secret_version_write, authorize_new_secret_create,
 };
 pub use crypto::{
-    ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, EnvVarKek, KekProvider, KeyWrapContext,
-    MasterKeyRing, decrypt_secret, encrypt_secret, unwrap_data_key, wrap_data_key,
+    ALGORITHM_XCHACHA20_POLY1305, EncryptedPayload, EnvVarKek, EnvelopeOutput, KekProvider,
+    KeyWrapContext, MasterKeyRing, decrypt_secret, encrypt_secret, seal_v02, unwrap_data_key,
+    wrap_data_key,
 };
 pub use error::{
     AadError, AuthorizationError, CryptoError, DecryptIntegrityError, InputError,
@@ -123,7 +124,7 @@ pub use types::{
 };
 pub use write::{
     CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,
-    PreparedSecretVersion, SecretWriteAction, prepare_existing_secret_version,
-    prepare_existing_secret_version_with_keyring, prepare_new_secret_version,
-    prepare_new_secret_version_with_keyring,
+    PreparedSecretVersion, PreparedSecretVersionKeyMaterial, SecretWriteAction,
+    prepare_existing_secret_version, prepare_existing_secret_version_with_keyring,
+    prepare_new_secret_version, prepare_new_secret_version_with_keyring,
 };

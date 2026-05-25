@@ -57,12 +57,21 @@ pub(super) async fn build_rpc_params(
         p_created_at: created_at,
         p_version: prepared.version().get(),
         p_ciphertext: encode_bytea(prepared.ciphertext().as_bytes()),
-        p_encrypted_data_key: encode_bytea(prepared.encrypted_data_key().as_bytes()),
+        p_encrypted_data_key: prepared
+            .encrypted_data_key()
+            .map(|encrypted_data_key| encode_bytea(encrypted_data_key.as_bytes())),
         p_key_version: prepared.key_version().get(),
         p_algorithm: prepared.algorithm().to_owned(),
         p_nonce_or_iv: encode_bytea(prepared.nonce_or_iv().as_bytes()),
         p_aad_context: prepared.aad_context().clone(),
         p_ledger_entries: ledger_entries,
+        p_wrapped_dek: prepared
+            .wrapped_dek()
+            .map(|wrapped_dek| encode_bytea(wrapped_dek.as_bytes())),
+        p_dek_wrap_algorithm: prepared
+            .dek_wrap_algorithm()
+            .map(|algorithm| algorithm.as_str().to_owned()),
+        p_kek_version: prepared.kek_version().map(crate::KekVersion::get),
     })
 }
 

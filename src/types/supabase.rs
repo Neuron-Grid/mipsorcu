@@ -23,6 +23,17 @@ pub struct SecretVersionReadRow {
     pub secrets: SecretReadJoin,
 }
 
+#[derive(Deserialize)]
+pub struct SecretVersionWriteStateRow {
+    pub id: String,
+    pub secret_id: String,
+    pub version: i32,
+    pub classification: String,
+    pub created_by_user_id: String,
+    pub created_at: String,
+    pub secrets: SecretReadJoin,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SecretReadJoin {
     pub current_version_id: String,
@@ -369,12 +380,15 @@ pub struct WriteSecretVersionParams {
     pub p_created_at: String,
     pub p_version: u32,
     pub p_ciphertext: String,
-    pub p_encrypted_data_key: String,
+    pub p_encrypted_data_key: Option<String>,
     pub p_key_version: u32,
     pub p_algorithm: String,
     pub p_nonce_or_iv: String,
     pub p_aad_context: Value,
     pub p_ledger_entries: Vec<LedgerEntryRpcParams>,
+    pub p_wrapped_dek: Option<String>,
+    pub p_dek_wrap_algorithm: Option<String>,
+    pub p_kek_version: Option<u32>,
 }
 
 #[derive(Debug)]

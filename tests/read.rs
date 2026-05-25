@@ -102,7 +102,10 @@ fn base_input_parts(
         classification: prepared.classification().clone(),
         created_at: prepared.created_at().clone(),
         key_version: prepared.key_version(),
-        encrypted_data_key: prepared.encrypted_data_key().clone(),
+        encrypted_data_key: prepared
+            .encrypted_data_key()
+            .expect("legacy prepared version should include encrypted_data_key")
+            .clone(),
         nonce_or_iv: *prepared.nonce_or_iv(),
         ciphertext: prepared.ciphertext().clone(),
         aad_context: prepared.aad_context().clone(),

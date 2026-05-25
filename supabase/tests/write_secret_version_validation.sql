@@ -327,6 +327,153 @@ select is(
     'new secret write rejects 74-byte encrypted_data_key'
 );
 
+select is(
+    test_helpers.try_write_secret_version(
+        '00000000-0000-4000-8000-000000000024',
+        'encrypt_create',
+        '8a0e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        null::bytea,
+        1,
+        'xchacha20-poly1305',
+        decode(repeat('01', 24), 'hex'),
+        test_helpers.aad_context(
+            '8a0e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'legacy write rejects null encrypted_data_key'
+);
+
+select is(
+    test_helpers.try_write_secret_version_with_envelope(
+        '00000000-0000-4000-8000-000000000025',
+        'encrypt_create',
+        '8b0e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        null::bytea,
+        2,
+        'xchacha20-poly1305',
+        decode(repeat('01', 24), 'hex'),
+        test_helpers.aad_context(
+            '8b0e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        ),
+        null::bytea,
+        'envvar-xchacha-v2',
+        2
+    ),
+    'invalid_rpc_input',
+    'v0.2 write rejects missing wrapped_dek'
+);
+
+select is(
+    test_helpers.try_write_secret_version_with_envelope(
+        '00000000-0000-4000-8000-000000000026',
+        'encrypt_create',
+        '8c0e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        null::bytea,
+        2,
+        'xchacha20-poly1305',
+        decode(repeat('01', 24), 'hex'),
+        test_helpers.aad_context(
+            '8c0e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        ),
+        decode(repeat('cc', 60), 'hex'),
+        'envvar-xchacha-v2',
+        null::integer
+    ),
+    'invalid_rpc_input',
+    'v0.2 write rejects missing kek_version'
+);
+
+select is(
+    test_helpers.try_write_secret_version_with_envelope(
+        '00000000-0000-4000-8000-000000000027',
+        'encrypt_create',
+        '8d0e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        null::bytea,
+        1,
+        'xchacha20-poly1305',
+        decode(repeat('01', 24), 'hex'),
+        test_helpers.aad_context(
+            '8d0e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        ),
+        decode(repeat('cc', 60), 'hex'),
+        'envvar-xchacha-v2',
+        2
+    ),
+    'invalid_rpc_input',
+    'v0.2 write rejects key_version and kek_version mismatch'
+);
+
+select is(
+    test_helpers.try_write_secret_version_with_envelope(
+        '00000000-0000-4000-8000-000000000028',
+        'encrypt_create',
+        '8e0e8400-e29b-41d4-a716-446655440000',
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        'sbc-device-1',
+        '2026-04-08T12:00:00Z',
+        1,
+        decode(repeat('aa', 32), 'hex'),
+        null::bytea,
+        2,
+        'xchacha20-poly1305',
+        decode(repeat('01', 24), 'hex'),
+        test_helpers.aad_context(
+            '8e0e8400-e29b-41d4-a716-446655440000',
+            1,
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            'confidential',
+            '2026-04-08T12:00:00Z'
+        ),
+        decode(repeat('cc', 60), 'hex'),
+        'unsupported-wrap',
+        2
+    ),
+    'invalid_rpc_input',
+    'write RPC rejects unsupported dek_wrap_algorithm'
+);
+
 select ok(
     position(
         'secret_versions_encrypted_data_key_length' in test_helpers.try_insert_secret_version_with_encrypted_data_key(
@@ -349,6 +496,18 @@ select ok(
         )
     ) > 0,
     'direct secret_versions insert rejects 74-byte encrypted_data_key'
+);
+
+select ok(
+    position(
+        'secret_versions_legacy_encrypted_data_key_required' in test_helpers.try_insert_secret_version_with_encrypted_data_key(
+            '8f0e8400-e29b-41d4-a716-446655440000',
+            'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            '2026-04-08T12:00:00Z',
+            null::bytea
+        )
+    ) > 0,
+    'direct legacy secret_versions insert rejects null encrypted_data_key'
 );
 
 select is(

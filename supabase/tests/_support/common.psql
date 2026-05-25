@@ -110,6 +110,59 @@ as $$
     );
 $$;
 
+create function test_helpers.write_secret_version_v02_fixture(
+    p_request_id uuid,
+    p_action text,
+    p_secret_id uuid,
+    p_owner_user_id uuid,
+    p_created_at timestamptz,
+    p_version integer,
+    p_ciphertext_byte text,
+    p_nonce_byte text,
+    p_created_by_device_id text default 'sbc-device-1',
+    p_classification text default 'confidential',
+    p_wrapped_dek_byte text default 'cc',
+    p_kek_version integer default 1
+)
+returns table (
+    secret_id uuid,
+    secret_version_id uuid,
+    version integer,
+    purged_version_ids uuid[]
+)
+language sql
+as $$
+    select *
+    from public.rpc_write_secret_version(
+        p_request_id => p_request_id,
+        p_action => p_action,
+        p_secret_id => p_secret_id,
+        p_owner_user_id => p_owner_user_id,
+        p_classification => p_classification,
+        p_created_by_device_id => p_created_by_device_id,
+        p_created_at => p_created_at,
+        p_version => p_version,
+        p_ciphertext => decode(repeat(p_ciphertext_byte, 32), 'hex'),
+        p_encrypted_data_key => null::bytea,
+        p_key_version => p_kek_version,
+        p_algorithm => 'xchacha20-poly1305',
+        p_nonce_or_iv => decode(repeat(p_nonce_byte, 24), 'hex'),
+        p_aad_context => test_helpers.aad_context(
+            p_secret_id,
+            p_version,
+            p_owner_user_id,
+            p_classification,
+            to_char(
+                p_created_at at time zone 'UTC',
+                'YYYY-MM-DD"T"HH24:MI:SS"Z"'
+            )
+        ),
+        p_wrapped_dek => decode(repeat(p_wrapped_dek_byte, 72), 'hex'),
+        p_dek_wrap_algorithm => 'envvar-xchacha-v2',
+        p_kek_version => p_kek_version
+    );
+$$;
+
 create function test_helpers.try_write_secret_version(
     p_request_id uuid,
     p_action text,
@@ -146,6 +199,57 @@ begin
         p_algorithm,
         p_nonce_or_iv,
         p_aad_context
+    );
+
+    return 'ok';
+exception
+    when others then
+        return sqlerrm;
+end;
+$$;
+
+create function test_helpers.try_write_secret_version_with_envelope(
+    p_request_id uuid,
+    p_action text,
+    p_secret_id uuid,
+    p_owner_user_id uuid,
+    p_classification text,
+    p_created_by_device_id text,
+    p_created_at timestamptz,
+    p_version integer,
+    p_ciphertext bytea,
+    p_encrypted_data_key bytea,
+    p_key_version integer,
+    p_algorithm text,
+    p_nonce_or_iv bytea,
+    p_aad_context jsonb,
+    p_wrapped_dek bytea,
+    p_dek_wrap_algorithm text,
+    p_kek_version integer
+)
+returns text
+language plpgsql
+as $$
+begin
+    perform *
+    from public.rpc_write_secret_version(
+        p_request_id => p_request_id,
+        p_action => p_action,
+        p_secret_id => p_secret_id,
+        p_owner_user_id => p_owner_user_id,
+        p_classification => p_classification,
+        p_created_by_device_id => p_created_by_device_id,
+        p_created_at => p_created_at,
+        p_version => p_version,
+        p_ciphertext => p_ciphertext,
+        p_encrypted_data_key => p_encrypted_data_key,
+        p_key_version => p_key_version,
+        p_algorithm => p_algorithm,
+        p_nonce_or_iv => p_nonce_or_iv,
+        p_aad_context => p_aad_context,
+        p_wrapped_dek => p_wrapped_dek,
+        p_dek_wrap_algorithm => p_dek_wrap_algorithm,
+        p_kek_version => p_kek_version
     );
 
     return 'ok';

@@ -5,7 +5,9 @@ use crate::read::{DecryptCurrentSecretVersionInput, DecryptCurrentSecretVersionI
 use crate::server::errors::ApiError;
 use crate::server::state::AppState;
 use crate::server::supabase::SupabaseRpcError;
-use crate::types::supabase::{RestoreTestSampleRow, SecretAliasResolveRow, SecretVersionReadRow};
+use crate::types::supabase::{
+    RestoreTestSampleRow, SecretAliasResolveRow, SecretVersionReadRow, SecretVersionWriteStateRow,
+};
 use crate::types::{
     Ciphertext, Classification, CreatedAt, EncryptedDataKey, KeyVersion, Nonce, OwnerUserId,
     SecretAliasId, SecretId, SecretRef, SecretVersion, SecretVersionId,
@@ -55,6 +57,20 @@ pub struct PreparedDecryptRow {
     aad_context: serde_json::Value,
 }
 
+pub struct PreparedCurrentSecretWriteState {
+    secret_id: SecretId,
+    version: SecretVersion,
+    owner_user_id: OwnerUserId,
+    classification: Classification,
+}
+
+struct PreparedCurrentSecretWriteStateParts {
+    secret_id: String,
+    version: i32,
+    owner_user_id: String,
+    classification: String,
+}
+
 struct PreparedDecryptRowParts {
     secret_id: String,
     secret_version_id: String,
@@ -102,17 +118,6 @@ impl PreparedDecryptRow {
         self.key_version
     }
 
-    pub fn into_current_secret_version_state(self) -> CurrentSecretVersionState {
-        CurrentSecretVersionState::new(
-            self.secret_id,
-            self.version,
-            self.owner_user_id,
-            self.classification,
-            self.key_version,
-            self.encrypted_data_key,
-        )
-    }
-
     pub fn into_decrypt_input(self, claims: VerifiedJwtClaims) -> DecryptCurrentSecretVersionInput {
         DecryptCurrentSecretVersionInput::new(DecryptCurrentSecretVersionInputParts {
             claims,
@@ -131,6 +136,21 @@ impl PreparedDecryptRow {
     }
 }
 
+impl PreparedCurrentSecretWriteState {
+    pub fn owner_user_id(&self) -> &OwnerUserId {
+        &self.owner_user_id
+    }
+
+    pub fn into_current_secret_version_state(self) -> CurrentSecretVersionState {
+        CurrentSecretVersionState::from_metadata(
+            self.secret_id,
+            self.version,
+            self.owner_user_id,
+            self.classification,
+        )
+    }
+}
+
 pub async fn fetch_current_secret_version(
     state: &AppState,
     secret_id: &SecretId,
@@ -144,6 +164,22 @@ pub async fn fetch_current_secret_version(
 
     select_single_current_secret_version_row(rows)
         .and_then(parse_decrypt_row)
+        .map_err(FetchCurrentSecretVersionError::Api)
+}
+
+pub async fn fetch_current_secret_write_state(
+    state: &AppState,
+    secret_id: &SecretId,
+    raw_jwt: &RawJwt,
+) -> Result<PreparedCurrentSecretWriteState, FetchCurrentSecretVersionError> {
+    let rows = state
+        .supabase_client
+        .fetch_current_secret_write_state_for_user(secret_id, raw_jwt)
+        .await
+        .map_err(FetchCurrentSecretVersionError::Upstream)?;
+
+    select_single_current_secret_write_state_row(rows)
+        .and_then(parse_current_secret_write_state)
         .map_err(FetchCurrentSecretVersionError::Api)
 }
 
@@ -173,6 +209,19 @@ pub async fn resolve_secret_ref(
                 .map_err(ResolveSecretRefError::Api)
         }
     }
+}
+
+fn parse_current_secret_write_state(
+    row: SecretVersionWriteStateRow,
+) -> Result<PreparedCurrentSecretWriteState, ApiError> {
+    validate_write_state_row_invariants(&row)?;
+
+    build_current_secret_write_state(PreparedCurrentSecretWriteStateParts {
+        secret_id: row.secret_id,
+        version: row.version,
+        owner_user_id: row.secrets.owner_user_id,
+        classification: row.classification,
+    })
 }
 
 fn parse_resolved_secret_alias_row(
@@ -336,6 +385,26 @@ fn select_single_current_secret_version_row(
     }
 }
 
+fn select_single_current_secret_write_state_row(
+    rows: Vec<SecretVersionWriteStateRow>,
+) -> Result<SecretVersionWriteStateRow, ApiError> {
+    let current_rows = rows
+        .into_iter()
+        .filter(|row| row.secrets.current_version_id == row.id)
+        .collect::<Vec<_>>();
+
+    match current_rows.len() {
+        0 => Err(ApiError::NotFound("secret not found".to_owned())),
+        1 => current_rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApiError::InternalInvariantViolation("missing write row".to_owned())),
+        count => Err(ApiError::InternalInvariantViolation(format!(
+            "expected one current secret write state row, got {count}"
+        ))),
+    }
+}
+
 fn decode_bytea(value: &str) -> Result<Vec<u8>, ApiError> {
     let hex_value = value.strip_prefix("\\x").ok_or(ApiError::DecryptFailed)?;
     hex::decode(hex_value).map_err(|_| ApiError::DecryptFailed)
@@ -380,6 +449,21 @@ fn build_prepared_decrypt_row(
     })
 }
 
+fn build_current_secret_write_state(
+    parts: PreparedCurrentSecretWriteStateParts,
+) -> Result<PreparedCurrentSecretWriteState, ApiError> {
+    Ok(PreparedCurrentSecretWriteState {
+        secret_id: SecretId::parse(&parts.secret_id)
+            .map_err(|_| ApiError::DbIntegrityViolation("secret_id is invalid".to_owned()))?,
+        version: parse_secret_version(parts.version, "version is invalid")?,
+        owner_user_id: OwnerUserId::parse(&parts.owner_user_id)
+            .map_err(|_| ApiError::DbIntegrityViolation("owner_user_id is invalid".to_owned()))?,
+        classification: Classification::new(&parts.classification).map_err(|_| {
+            ApiError::DbIntegrityViolation("secret version classification is invalid".to_owned())
+        })?,
+    })
+}
+
 fn validate_decrypt_row_invariants(row: &SecretVersionReadRow) -> Result<(), ApiError> {
     if row.algorithm != ALGORITHM_XCHACHA20_POLY1305 {
         return Err(ApiError::DbIntegrityViolation(
@@ -402,6 +486,34 @@ fn validate_decrypt_row_invariants(row: &SecretVersionReadRow) -> Result<(), Api
     if row.classification != row.secrets.classification {
         return Err(ApiError::DbIntegrityViolation(
             "secret version classification does not match secret classification".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_write_state_row_invariants(row: &SecretVersionWriteStateRow) -> Result<(), ApiError> {
+    if row.secrets.current_version_id != row.id {
+        return Err(ApiError::DbIntegrityViolation(
+            "current_version_id does not match the selected version row".to_owned(),
+        ));
+    }
+
+    if row.created_by_user_id != row.secrets.owner_user_id {
+        return Err(ApiError::DbIntegrityViolation(
+            "created_by_user_id does not match owner_user_id".to_owned(),
+        ));
+    }
+
+    if row.classification != row.secrets.classification {
+        return Err(ApiError::DbIntegrityViolation(
+            "secret version classification does not match secret classification".to_owned(),
+        ));
+    }
+
+    if CreatedAt::parse(&row.created_at).is_err() {
+        return Err(ApiError::DbIntegrityViolation(
+            "created_at is invalid".to_owned(),
         ));
     }
 

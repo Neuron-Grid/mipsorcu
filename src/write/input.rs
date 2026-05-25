@@ -74,11 +74,27 @@ pub struct CurrentSecretVersionState {
     current_version: SecretVersion,
     owner_user_id: OwnerUserId,
     classification: Classification,
-    key_version: KeyVersion,
-    encrypted_data_key: EncryptedDataKey,
+    key_version: Option<KeyVersion>,
+    encrypted_data_key: Option<EncryptedDataKey>,
 }
 
 impl CurrentSecretVersionState {
+    pub fn from_metadata(
+        secret_id: SecretId,
+        current_version: SecretVersion,
+        owner_user_id: OwnerUserId,
+        classification: Classification,
+    ) -> Self {
+        Self {
+            secret_id,
+            current_version,
+            owner_user_id,
+            classification,
+            key_version: None,
+            encrypted_data_key: None,
+        }
+    }
+
     pub fn new(
         secret_id: SecretId,
         current_version: SecretVersion,
@@ -92,8 +108,8 @@ impl CurrentSecretVersionState {
             current_version,
             owner_user_id,
             classification,
-            key_version,
-            encrypted_data_key,
+            key_version: Some(key_version),
+            encrypted_data_key: Some(encrypted_data_key),
         }
     }
 
@@ -113,12 +129,12 @@ impl CurrentSecretVersionState {
         &self.classification
     }
 
-    pub fn key_version(&self) -> KeyVersion {
+    pub fn key_version(&self) -> Option<KeyVersion> {
         self.key_version
     }
 
-    pub fn encrypted_data_key(&self) -> &EncryptedDataKey {
-        &self.encrypted_data_key
+    pub fn encrypted_data_key(&self) -> Option<&EncryptedDataKey> {
+        self.encrypted_data_key.as_ref()
     }
 
     pub(crate) fn into_parts(self) -> CurrentSecretVersionStateParts {
@@ -152,8 +168,8 @@ pub(crate) struct CurrentSecretVersionStateParts {
     pub(crate) current_version: SecretVersion,
     pub(crate) owner_user_id: OwnerUserId,
     pub(crate) classification: Classification,
-    pub(crate) key_version: KeyVersion,
-    pub(crate) encrypted_data_key: EncryptedDataKey,
+    pub(crate) key_version: Option<KeyVersion>,
+    pub(crate) encrypted_data_key: Option<EncryptedDataKey>,
 }
 
 pub struct ExistingSecretVersionInput {
