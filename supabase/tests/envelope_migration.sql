@@ -33,6 +33,33 @@ exception
 end;
 $$;
 
+create function test_helpers.envelope_migration_apply_row_json(
+    p_id uuid,
+    p_secret_id uuid,
+    p_version integer,
+    p_key_version integer,
+    p_ciphertext_seed text,
+    p_nonce_seed text,
+    p_wrapped_dek_seed text,
+    p_kek_version integer
+)
+returns jsonb
+language sql
+immutable
+as $$
+    select jsonb_build_object(
+        'id', p_id::text,
+        'secret_id', p_secret_id::text,
+        'version', p_version,
+        'key_version', p_key_version,
+        'ciphertext', '\x' || repeat(p_ciphertext_seed, 32),
+        'nonce_or_iv', '\x' || repeat(p_nonce_seed, 24),
+        'wrapped_dek', '\x' || repeat(p_wrapped_dek_seed, 72),
+        'dek_wrap_algorithm', 'envvar-xchacha-v2',
+        'kek_version', p_kek_version
+    );
+$$;
+
 create temp table legacy_write_result as
 select *
 from test_helpers.write_secret_version_fixture(
@@ -262,6 +289,476 @@ select is(
     'apply envelope migration appends matching ledger entry'
 );
 
+create temp table ledger_success_mismatch_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001720',
+    'encrypt_create',
+    '550e8400-e29b-41d4-a716-446655441720',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:02:00Z',
+    1,
+    'a3',
+    '55'
+);
+
+create temp table ledger_success_mismatch_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    10,
+    '550e8400-e29b-41d4-a716-446655441720'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001721',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from ledger_success_mismatch_batch),
+            '550e8400-e29b-41d4-a716-446655441720',
+            1,
+            1,
+            'c6',
+            '66',
+            'd6',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001722',
+        '2026-04-08T12:20:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001723',
+            2,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:20:00Z',
+            '00000000-0000-4000-8000-000000001721',
+            '00000000-0000-4000-8000-000000001722',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 0, 'failure_count', 0),
+            repeat('91', 32),
+            repeat('93', 32)
+        )
+    ),
+    'invalid_ledger_entry',
+    'apply envelope migration rejects success_count ledger payload mismatch'
+);
+
+select is(
+    (
+        select sv.dek_wrap_algorithm
+        from public.secret_versions sv
+        join ledger_success_mismatch_batch mb on mb.id = sv.id
+    ),
+    null::text,
+    'success_count mismatch leaves the row unchanged'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000001721'
+            or ae.id = '00000000-0000-4000-8000-000000001722'
+    ),
+    0,
+    'success_count mismatch does not record audit events'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.ledger_entries le
+        where le.source_event_id = '00000000-0000-4000-8000-000000001722'
+    ),
+    0,
+    'success_count mismatch does not append ledger entries'
+);
+
+create temp table ledger_failure_mismatch_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001724',
+    'encrypt_create',
+    '550e8400-e29b-41d4-a716-446655441724',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:03:00Z',
+    1,
+    'a4',
+    '57'
+);
+
+create temp table ledger_failure_mismatch_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    10,
+    '550e8400-e29b-41d4-a716-446655441724'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001725',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from ledger_failure_mismatch_batch),
+            '550e8400-e29b-41d4-a716-446655441724',
+            1,
+            1,
+            'c7',
+            '67',
+            'd7',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001726',
+        '2026-04-08T12:21:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001727',
+            2,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:21:00Z',
+            '00000000-0000-4000-8000-000000001725',
+            '00000000-0000-4000-8000-000000001726',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 1),
+            repeat('91', 32),
+            repeat('94', 32)
+        )
+    ),
+    'invalid_ledger_entry',
+    'apply envelope migration rejects failure_count ledger payload mismatch'
+);
+
+select is(
+    (
+        select sv.dek_wrap_algorithm
+        from public.secret_versions sv
+        join ledger_failure_mismatch_batch mb on mb.id = sv.id
+    ),
+    null::text,
+    'failure_count mismatch leaves the row unchanged'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000001725'
+            or ae.id = '00000000-0000-4000-8000-000000001726'
+    ),
+    0,
+    'failure_count mismatch does not record audit events'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.ledger_entries le
+        where le.source_event_id = '00000000-0000-4000-8000-000000001726'
+    ),
+    0,
+    'failure_count mismatch does not append ledger entries'
+);
+
+create temp table ledger_batch_mismatch_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001728',
+    'encrypt_create',
+    '550e8400-e29b-41d4-a716-446655441728',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:04:00Z',
+    1,
+    'a5',
+    '59'
+);
+
+create temp table ledger_batch_mismatch_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    10,
+    '550e8400-e29b-41d4-a716-446655441728'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001729',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from ledger_batch_mismatch_batch),
+            '550e8400-e29b-41d4-a716-446655441728',
+            1,
+            1,
+            'c8',
+            '68',
+            'd8',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001730',
+        '2026-04-08T12:22:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001731',
+            2,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:22:00Z',
+            '00000000-0000-4000-8000-000000001729',
+            '00000000-0000-4000-8000-000000001730',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 2, 'success_count', 1, 'failure_count', 0),
+            repeat('91', 32),
+            repeat('95', 32)
+        )
+    ),
+    'invalid_ledger_entry',
+    'apply envelope migration rejects batch_size ledger payload mismatch'
+);
+
+select is(
+    (
+        select sv.dek_wrap_algorithm
+        from public.secret_versions sv
+        join ledger_batch_mismatch_batch mb on mb.id = sv.id
+    ),
+    null::text,
+    'batch_size mismatch leaves the row unchanged'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000001729'
+            or ae.id = '00000000-0000-4000-8000-000000001730'
+    ),
+    0,
+    'batch_size mismatch does not record audit events'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.ledger_entries le
+        where le.source_event_id = '00000000-0000-4000-8000-000000001730'
+    ),
+    0,
+    'batch_size mismatch does not append ledger entries'
+);
+
+create temp table ledger_top_level_contract_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001732',
+    'encrypt_create',
+    '550e8400-e29b-41d4-a716-446655441732',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:05:00Z',
+    1,
+    'a6',
+    '5b'
+);
+
+create temp table ledger_top_level_contract_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    10,
+    '550e8400-e29b-41d4-a716-446655441732'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001733',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from ledger_top_level_contract_batch),
+            '550e8400-e29b-41d4-a716-446655441732',
+            1,
+            1,
+            'c9',
+            '69',
+            'd9',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001734',
+        '2026-04-08T12:23:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001735',
+            2,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:23:00Z',
+            '00000000-0000-4000-8000-000000001733',
+            '00000000-0000-4000-8000-000000001799',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0),
+            repeat('91', 32),
+            repeat('96', 32)
+        )
+    ),
+    'invalid_ledger_entry',
+    'apply envelope migration rejects source_event_id ledger mismatch'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001733',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from ledger_top_level_contract_batch),
+            '550e8400-e29b-41d4-a716-446655441732',
+            1,
+            1,
+            'ca',
+            '6a',
+            'da',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001734',
+        '2026-04-08T12:23:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001736',
+            2,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:23:00Z',
+            '00000000-0000-4000-8000-000000001798',
+            '00000000-0000-4000-8000-000000001734',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0),
+            repeat('91', 32),
+            repeat('97', 32)
+        )
+    ),
+    'invalid_ledger_entry',
+    'apply envelope migration rejects request_id ledger mismatch'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001733',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from ledger_top_level_contract_batch),
+            '550e8400-e29b-41d4-a716-446655441732',
+            1,
+            1,
+            'cb',
+            '6b',
+            'db',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001734',
+        '2026-04-08T12:23:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001737',
+            2,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:24:00Z',
+            '00000000-0000-4000-8000-000000001733',
+            '00000000-0000-4000-8000-000000001734',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0),
+            repeat('91', 32),
+            repeat('98', 32)
+        )
+    ),
+    'invalid_ledger_entry',
+    'apply envelope migration rejects source_event_at ledger mismatch'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001733',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from ledger_top_level_contract_batch),
+            '550e8400-e29b-41d4-a716-446655441732',
+            1,
+            1,
+            'cc',
+            '6c',
+            'dc',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001734',
+        '2026-04-08T12:23:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001738',
+            2,
+            'key_rotation_reencrypted',
+            '2026-04-08T12:23:00Z',
+            '00000000-0000-4000-8000-000000001733',
+            '00000000-0000-4000-8000-000000001734',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0),
+            repeat('91', 32),
+            repeat('99', 32)
+        )
+    ),
+    'invalid_ledger_entry',
+    'apply envelope migration rejects entry_type ledger mismatch'
+);
+
+select is(
+    (
+        select sv.dek_wrap_algorithm
+        from public.secret_versions sv
+        join ledger_top_level_contract_batch mb on mb.id = sv.id
+    ),
+    null::text,
+    'top-level ledger mismatches leave the row unchanged'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000001733'
+            or ae.id = '00000000-0000-4000-8000-000000001734'
+    ),
+    0,
+    'top-level ledger mismatches do not record audit events'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.ledger_entries le
+        where le.source_event_id = '00000000-0000-4000-8000-000000001734'
+    ),
+    0,
+    'top-level ledger mismatches do not append ledger entries'
+);
+
 create temp table legacy_failure_write_result as
 select *
 from test_helpers.write_secret_version_fixture(
@@ -341,6 +838,36 @@ select is(
     ),
     1,
     'pre-crypto failure row records failure audit'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.id = '00000000-0000-4000-8000-000000001707'
+            and ae.action = 'key_rotation_envelope_migrated'
+            and ae.result = 'success'
+            and ae.metadata_json = jsonb_build_object(
+                'batch_size', 1,
+                'success_count', 0,
+                'failure_count', 1,
+                'source_event_at', '2026-04-08T12:11:00Z'
+            )
+    ),
+    1,
+    'pre-crypto failure row records matching batch audit'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.ledger_entries le
+        where le.source_event_id = '00000000-0000-4000-8000-000000001707'
+            and le.entry_type = 'envelope_migration_batch_completed'
+            and le.payload = jsonb_build_object('batch_size', 1, 'success_count', 0, 'failure_count', 1)
+    ),
+    1,
+    'pre-crypto failure row appends matching batch ledger entry'
 );
 
 select is(
