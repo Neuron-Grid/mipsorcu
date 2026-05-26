@@ -7,6 +7,7 @@ use crate::server::supabase::SupabaseClient;
 mod audit_event;
 mod bytea;
 mod command;
+mod envelope_migration;
 mod error;
 mod flags;
 mod ledger;
@@ -18,6 +19,10 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), KeyRotati
     let Some((command, command_args)) = args.split_first() else {
         return Err(KeyRotationCliError::Usage(usage()));
     };
+    let migration_requested = args.iter().any(|arg| arg == "--migrate-envelope");
+    if migration_requested && command.as_str() != "--migrate-envelope" {
+        return Err(KeyRotationCliError::Usage(usage()));
+    }
 
     let http_client = crate::server::config::build_outbound_http_client(&config)
         .map_err(|error| KeyRotationCliError::Config(error.to_string()))?;
@@ -37,6 +42,9 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), KeyRotati
     ));
 
     match command.as_str() {
+        "--migrate-envelope" => {
+            envelope_migration::run(supabase_client, ledger_appender, &config, args).await
+        }
         "status" => command::status(supabase_client, command_args).await,
         "start" => {
             command::start_with_ledger(supabase_client, ledger_appender, &config, command_args)
@@ -52,7 +60,8 @@ pub fn usage() -> String {
     [
         "usage:",
         "  mipsorcu",
-        "  mipsorcu key-rotation status --key-version <n>",
+        "  mipsorcu key-rotation status [--key-version <n>] [--format text|json]",
+        "  mipsorcu key-rotation --migrate-envelope [--batch-size <n>] [--max-batches <n>] [--dry-run] [--secret-id <uuid>] [--format text|json]",
         "  mipsorcu key-rotation start --old-key-version <old> --new-key-version <new>",
         "  mipsorcu key-rotation rewrap --old-key-version <old> --new-key-version <new> --batch-limit <n>",
         "  mipsorcu key-rotation complete --old-key-version <old> --new-key-version <new>",

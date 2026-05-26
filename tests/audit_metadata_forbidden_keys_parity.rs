@@ -9,7 +9,7 @@ use mipsorcu::{
 const CURRENT_FORBIDDEN_KEY_MIGRATION_PATH: &str =
     "supabase/migrations/1250_security_forbidden_key_parity.sql";
 const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
-    "supabase/migrations/1230_complete_t05_alias_audit_extension.sql";
+    "supabase/migrations/1330_envelope_lazy_migration_rpcs.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -636,6 +636,8 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::KeyRotationStart,
         AuditAction::KeyRotationReencrypt,
         AuditAction::KeyRotationComplete,
+        AuditAction::KeyRotationEnvelopeMigrated,
+        AuditAction::KeyRotationEnvelopeFailed,
         AuditAction::SignatureKeyCreated,
         AuditAction::SignatureKeyActivated,
         AuditAction::SignatureKeyRetired,
@@ -715,6 +717,22 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "old_key_version",
                 "new_key_version",
                 "remaining_count",
+                "source_event_at",
+            ]
+        }
+        AuditAction::KeyRotationEnvelopeMigrated => {
+            vec![
+                "batch_size",
+                "success_count",
+                "failure_count",
+                "source_event_at",
+            ]
+        }
+        AuditAction::KeyRotationEnvelopeFailed => {
+            vec![
+                "secret_version_id",
+                "version",
+                "error_code",
                 "source_event_at",
             ]
         }

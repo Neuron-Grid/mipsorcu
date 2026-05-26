@@ -12,6 +12,8 @@ pub enum LedgerEntryType {
     KeyRotationReencrypted,
     KeyRotationCompleted,
     KeyRotationAborted,
+    /// legacy envelope 行を v0.2 envelope 形式へ batch migration した。
+    EnvelopeMigrationBatchCompleted,
     SignatureKeyCreated,
     SignatureKeyActivated,
     SignatureKeyRetired,
@@ -42,6 +44,7 @@ impl LedgerEntryType {
             "key_rotation_reencrypted" => Ok(Self::KeyRotationReencrypted),
             "key_rotation_completed" => Ok(Self::KeyRotationCompleted),
             "key_rotation_aborted" => Ok(Self::KeyRotationAborted),
+            "envelope_migration_batch_completed" => Ok(Self::EnvelopeMigrationBatchCompleted),
             "signature_key_created" => Ok(Self::SignatureKeyCreated),
             "signature_key_activated" => Ok(Self::SignatureKeyActivated),
             "signature_key_retired" => Ok(Self::SignatureKeyRetired),
@@ -71,6 +74,7 @@ impl LedgerEntryType {
             Self::KeyRotationReencrypted => "key_rotation_reencrypted",
             Self::KeyRotationCompleted => "key_rotation_completed",
             Self::KeyRotationAborted => "key_rotation_aborted",
+            Self::EnvelopeMigrationBatchCompleted => "envelope_migration_batch_completed",
             Self::SignatureKeyCreated => "signature_key_created",
             Self::SignatureKeyActivated => "signature_key_activated",
             Self::SignatureKeyRetired => "signature_key_retired",
@@ -118,6 +122,9 @@ impl LedgerEntryType {
                 &["new_key_version", "old_key_version", "remaining_count"]
             }
             Self::KeyRotationAborted => &["new_key_version", "old_key_version", "reason_code"],
+            Self::EnvelopeMigrationBatchCompleted => {
+                &["batch_size", "success_count", "failure_count"]
+            }
             Self::SignatureKeyCreated => &[
                 "created_at",
                 "public_key_fingerprint",

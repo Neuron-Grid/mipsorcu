@@ -49,10 +49,11 @@ pub use verify_digest_rpc::{
 };
 
 pub use crate::types::supabase::{
-    AppendLedgerEntryOutcome, IntegrityCheckSummary, IntegrityCheckViolationSummary,
-    KeyRotationApplyOutcome, KeyRotationApplyRow, KeyRotationBatchRow, KeyRotationCompleteOutcome,
-    KeyRotationStatus, LedgerAppendRpcFailure, LedgerEntryRpcParams, RestoreTestSampleRow,
-    SecretAliasListRow, SecretAliasResolveRow, SecretReadJoin, SecretVersionReadRow,
-    SecretVersionRetentionSnapshot, SecretVersionWriteStateRow, WriteSecretVersionOutcome,
-    WriteSecretVersionParams,
+    AppendLedgerEntryOutcome, EnvelopeMigrationApplyOutcome, EnvelopeMigrationApplyRow,
+    EnvelopeMigrationBatchRow, EnvelopeMigrationFailureRow, EnvelopeMigrationStatus,
+    IntegrityCheckSummary, IntegrityCheckViolationSummary, KeyRotationApplyOutcome,
+    KeyRotationApplyRow, KeyRotationBatchRow, KeyRotationCompleteOutcome, KeyRotationStatus,
+    LedgerAppendRpcFailure, LedgerEntryRpcParams, RestoreTestSampleRow, SecretAliasListRow,
+    SecretAliasResolveRow, SecretReadJoin, SecretVersionReadRow, SecretVersionRetentionSnapshot,
+    SecretVersionWriteStateRow, WriteSecretVersionOutcome, WriteSecretVersionParams,
 };

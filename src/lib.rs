@@ -43,6 +43,7 @@ pub use audit::{
     DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
     FORBIDDEN_AUDIT_METADATA_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
     IncidentDetectedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
+    KeyRotationEnvelopeFailedMetadata, KeyRotationEnvelopeMigratedMetadata,
     KeyRotationReencryptMetadata, KeyRotationStartMetadata, LocalAuditFallbackStore,
     LocalAuditStoreError, MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RequestId,
     ResendAuditSummary, RestoreTestMetadata, RolloverArchive, RolloverOutcome,

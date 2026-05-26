@@ -9,6 +9,7 @@ pub use builders::{
     ArchiveExportMetadata, AuditReportGenerateMetadata, AuditUiReadMetadata, AuthFailureMetadata,
     DecryptMetadata, DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
     IncidentDetectedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
+    KeyRotationEnvelopeFailedMetadata, KeyRotationEnvelopeMigratedMetadata,
     KeyRotationReencryptMetadata, KeyRotationStartMetadata, MonthlyDigestGenerateMetadata,
     MonthlyDigestVerifyMetadata, RestoreTestMetadata, SchedulerJobMetadata,
     SecretAliasCreateMetadata, SecretAliasDeleteMetadata, SecretAliasListMetadata,
@@ -316,6 +317,24 @@ impl AuditMetadata {
             .iter()
             .cloned()
             .collect(),
+            AuditAction::KeyRotationEnvelopeMigrated => [
+                "batch_size",
+                "success_count",
+                "failure_count",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            AuditAction::KeyRotationEnvelopeFailed => [
+                "secret_version_id",
+                "version",
+                "error_code",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
             AuditAction::SignatureKeyCreated => [
                 "created_at",
                 "public_key_fingerprint",
@@ -533,6 +552,12 @@ fn validate_required_metadata_keys(
         AuditAction::KeyRotationComplete => {
             vec!["old_key_version", "new_key_version", "remaining_count"]
         }
+        AuditAction::KeyRotationEnvelopeMigrated => {
+            vec!["batch_size", "success_count", "failure_count"]
+        }
+        AuditAction::KeyRotationEnvelopeFailed => {
+            vec!["secret_version_id", "version", "error_code"]
+        }
         AuditAction::SignatureKeyCreated => {
             vec![
                 "signature_key_version",
@@ -659,6 +684,8 @@ fn validate_metadata_values(
         "processed_count",
         "remaining_count",
         "result_count",
+        "success_count",
+        "failure_count",
     ] {
         if let Some(value) = object.get(key) {
             validate_u64_value(key, value)?;

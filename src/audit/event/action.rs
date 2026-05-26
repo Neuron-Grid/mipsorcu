@@ -12,6 +12,10 @@ pub enum AuditAction {
     KeyRotationStart,
     KeyRotationReencrypt,
     KeyRotationComplete,
+    /// legacy envelope 行を v0.2 envelope 形式へ batch migration した。
+    KeyRotationEnvelopeMigrated,
+    /// legacy envelope 行の v0.2 envelope migration に失敗した。
+    KeyRotationEnvelopeFailed,
     /// Ledger 署名公開鍵の registry 作成。
     SignatureKeyCreated,
     /// Ledger 署名鍵の新規署名用有効化。
@@ -59,6 +63,8 @@ impl AuditAction {
             "key_rotation_start" => Ok(Self::KeyRotationStart),
             "key_rotation_reencrypt" => Ok(Self::KeyRotationReencrypt),
             "key_rotation_complete" => Ok(Self::KeyRotationComplete),
+            "key_rotation_envelope_migrated" => Ok(Self::KeyRotationEnvelopeMigrated),
+            "key_rotation_envelope_failed" => Ok(Self::KeyRotationEnvelopeFailed),
             "signature_key_created" => Ok(Self::SignatureKeyCreated),
             "signature_key_activated" => Ok(Self::SignatureKeyActivated),
             "signature_key_retired" => Ok(Self::SignatureKeyRetired),
@@ -93,6 +99,8 @@ impl AuditAction {
             Self::KeyRotationStart => "key_rotation_start",
             Self::KeyRotationReencrypt => "key_rotation_reencrypt",
             Self::KeyRotationComplete => "key_rotation_complete",
+            Self::KeyRotationEnvelopeMigrated => "key_rotation_envelope_migrated",
+            Self::KeyRotationEnvelopeFailed => "key_rotation_envelope_failed",
             Self::SignatureKeyCreated => "signature_key_created",
             Self::SignatureKeyActivated => "signature_key_activated",
             Self::SignatureKeyRetired => "signature_key_retired",
@@ -122,7 +130,10 @@ impl AuditAction {
     pub fn is_failure_only(self) -> bool {
         matches!(
             self,
-            Self::AuthFailure | Self::SiemForwardFailure | Self::IncidentDetected
+            Self::AuthFailure
+                | Self::SiemForwardFailure
+                | Self::IncidentDetected
+                | Self::KeyRotationEnvelopeFailed
         )
     }
 }

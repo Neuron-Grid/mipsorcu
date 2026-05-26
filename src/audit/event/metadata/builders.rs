@@ -680,6 +680,106 @@ impl KeyRotationCompleteMetadata {
     }
 }
 
+/// `key_rotation_envelope_migrated` action metadata builder.
+#[derive(Debug, Clone)]
+pub struct KeyRotationEnvelopeMigratedMetadata {
+    batch_size: u64,
+    success_count: u64,
+    failure_count: u64,
+    source_event_at: Option<SourceEventAt>,
+}
+
+impl KeyRotationEnvelopeMigratedMetadata {
+    pub fn new(batch_size: u64, success_count: u64, failure_count: u64) -> Self {
+        Self {
+            batch_size,
+            success_count,
+            failure_count,
+            source_event_at: None,
+        }
+    }
+
+    pub fn with_source_event_at(mut self, source_event_at: SourceEventAt) -> Self {
+        self.source_event_at = Some(source_event_at);
+        self
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert(
+            "batch_size".to_owned(),
+            Value::Number(self.batch_size.into()),
+        );
+        object.insert(
+            "success_count".to_owned(),
+            Value::Number(self.success_count.into()),
+        );
+        object.insert(
+            "failure_count".to_owned(),
+            Value::Number(self.failure_count.into()),
+        );
+        if let Some(source_event_at) = self.source_event_at {
+            object.insert(
+                SOURCE_EVENT_AT_KEY.to_owned(),
+                Value::String(source_event_at.as_str().to_owned()),
+            );
+        }
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+/// `key_rotation_envelope_failed` action metadata builder.
+#[derive(Debug, Clone)]
+pub struct KeyRotationEnvelopeFailedMetadata {
+    secret_version_id: SecretVersionId,
+    version: SecretVersion,
+    error_code: &'static str,
+    source_event_at: Option<SourceEventAt>,
+}
+
+impl KeyRotationEnvelopeFailedMetadata {
+    pub fn new(
+        secret_version_id: SecretVersionId,
+        version: SecretVersion,
+        error_code: &'static str,
+    ) -> Self {
+        Self {
+            secret_version_id,
+            version,
+            error_code,
+            source_event_at: None,
+        }
+    }
+
+    pub fn with_source_event_at(mut self, source_event_at: SourceEventAt) -> Self {
+        self.source_event_at = Some(source_event_at);
+        self
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert(
+            "secret_version_id".to_owned(),
+            Value::String(self.secret_version_id.as_canonical_string()),
+        );
+        object.insert(
+            "version".to_owned(),
+            Value::Number(self.version.get().into()),
+        );
+        object.insert(
+            "error_code".to_owned(),
+            Value::String(self.error_code.to_owned()),
+        );
+        if let Some(source_event_at) = self.source_event_at {
+            object.insert(
+                SOURCE_EVENT_AT_KEY.to_owned(),
+                Value::String(source_event_at.as_str().to_owned()),
+            );
+        }
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
 /// `signature_key_created` action metadata builder.
 #[derive(Debug, Clone)]
 pub struct SignatureKeyCreatedMetadata {

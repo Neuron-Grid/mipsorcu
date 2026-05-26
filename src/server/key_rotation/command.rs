@@ -9,7 +9,7 @@ use crate::server::config::AppConfig;
 use crate::server::ledger_appender::LedgerAppender;
 use crate::server::supabase::SupabaseClient;
 use crate::types::KeyVersion;
-use crate::types::supabase::KeyRotationApplyRow;
+use crate::types::supabase::{EnvelopeMigrationStatus, KeyRotationApplyRow, KeyRotationStatus};
 
 use super::KeyRotationCliError;
 use super::audit_event::{
@@ -25,16 +25,146 @@ pub(super) async fn status(
     supabase_client: Arc<SupabaseClient>,
     args: &[String],
 ) -> Result<(), KeyRotationCliError> {
-    let key_version = parse_key_version_flag(args, "--key-version")?;
-    let status = supabase_client
-        .call_key_rotation_status(key_version)
-        .await?;
+    let options = parse_status_options(args)?;
+    let key_rotation_status = match options.key_version {
+        Some(key_version) => Some(
+            supabase_client
+                .call_key_rotation_status(key_version)
+                .await?,
+        ),
+        None => None,
+    };
+    let envelope_status = supabase_client.call_envelope_migration_status(None).await?;
 
-    println!(
-        "key_version={} remaining_count={}",
-        status.key_version, status.remaining_count
-    );
+    print_status(
+        key_rotation_status.as_ref(),
+        &envelope_status,
+        options.format,
+    )?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusOutputFormat {
+    Text,
+    Json,
+}
+
+struct StatusOptions {
+    key_version: Option<KeyVersion>,
+    format: StatusOutputFormat,
+}
+
+fn parse_status_options(args: &[String]) -> Result<StatusOptions, KeyRotationCliError> {
+    let mut key_version = None;
+    let mut format = StatusOutputFormat::Text;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--key-version" => {
+                if key_version.is_some() {
+                    return Err(KeyRotationCliError::Usage(
+                        "--key-version must be provided once".to_owned(),
+                    ));
+                }
+                let value = args.get(index + 1).ok_or_else(|| {
+                    KeyRotationCliError::Usage("--key-version requires a value".to_owned())
+                })?;
+                if value.starts_with("--") {
+                    return Err(KeyRotationCliError::Usage(
+                        "--key-version requires a value".to_owned(),
+                    ));
+                }
+                let parsed = value.parse::<u32>().map_err(|_| {
+                    KeyRotationCliError::Usage(
+                        "--key-version must be a positive integer".to_owned(),
+                    )
+                })?;
+                key_version = Some(KeyVersion::new(parsed).map_err(|_| {
+                    KeyRotationCliError::Usage(
+                        "--key-version must be a positive integer".to_owned(),
+                    )
+                })?);
+                index += 2;
+            }
+            "--format" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    KeyRotationCliError::Usage("--format requires a value".to_owned())
+                })?;
+                if value.starts_with("--") {
+                    return Err(KeyRotationCliError::Usage(
+                        "--format requires a value".to_owned(),
+                    ));
+                }
+                format = match value.as_str() {
+                    "text" => StatusOutputFormat::Text,
+                    "json" => StatusOutputFormat::Json,
+                    _ => {
+                        return Err(KeyRotationCliError::Usage(
+                            "--format must be text or json".to_owned(),
+                        ));
+                    }
+                };
+                index += 2;
+            }
+            _ => return Err(KeyRotationCliError::Usage(super::usage())),
+        }
+    }
+
+    Ok(StatusOptions {
+        key_version,
+        format,
+    })
+}
+
+fn print_status(
+    key_rotation_status: Option<&KeyRotationStatus>,
+    envelope_status: &EnvelopeMigrationStatus,
+    format: StatusOutputFormat,
+) -> Result<(), KeyRotationCliError> {
+    match format {
+        StatusOutputFormat::Text => {
+            if let Some(status) = key_rotation_status {
+                println!(
+                    "key_version={} remaining_count={}",
+                    status.key_version, status.remaining_count
+                );
+            }
+            println!(
+                "envelope_migration total_legacy_rows={} last_run_at={} last_batch_size={} last_success_count={} last_failure_count={}",
+                envelope_status.total_legacy_rows,
+                envelope_status.last_run_at.as_deref().unwrap_or("-"),
+                format_optional_i64(envelope_status.last_batch_size),
+                format_optional_i64(envelope_status.last_success_count),
+                format_optional_i64(envelope_status.last_failure_count),
+            );
+        }
+        StatusOutputFormat::Json => {
+            let value = json!({
+                "key_rotation": key_rotation_status.map(|status| json!({
+                    "key_version": status.key_version,
+                    "remaining_count": status.remaining_count,
+                })),
+                "envelope_migration": {
+                    "total_legacy_rows": envelope_status.total_legacy_rows,
+                    "last_run_at": envelope_status.last_run_at.clone(),
+                    "last_batch_size": envelope_status.last_batch_size,
+                    "last_success_count": envelope_status.last_success_count,
+                    "last_failure_count": envelope_status.last_failure_count,
+                }
+            });
+            let rendered = serde_json::to_string_pretty(&value)
+                .map_err(|error| KeyRotationCliError::Config(error.to_string()))?;
+            println!("{rendered}");
+        }
+    }
+
+    Ok(())
+}
+
+fn format_optional_i64(value: Option<i64>) -> String {
+    value.map_or_else(|| "-".to_owned(), |count| count.to_string())
 }
 
 pub(super) async fn start_with_ledger(

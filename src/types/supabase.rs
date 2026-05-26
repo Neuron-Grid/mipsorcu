@@ -199,6 +199,44 @@ pub struct KeyRotationApplyRow {
     pub encrypted_data_key: String,
 }
 
+#[derive(Clone, Deserialize)]
+pub struct EnvelopeMigrationBatchRow {
+    pub id: String,
+    pub secret_id: String,
+    pub version: i32,
+    pub ciphertext: String,
+    pub encrypted_data_key: String,
+    pub key_version: i32,
+    pub algorithm: String,
+    pub classification: String,
+    pub nonce_or_iv: String,
+    pub aad_context: Value,
+    pub created_at: String,
+    pub owner_user_id: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct EnvelopeMigrationApplyRow {
+    pub id: String,
+    pub secret_id: String,
+    pub version: u32,
+    pub key_version: u32,
+    pub ciphertext: String,
+    pub nonce_or_iv: String,
+    pub wrapped_dek: String,
+    pub dek_wrap_algorithm: String,
+    pub kek_version: u32,
+}
+
+#[derive(Clone, Serialize)]
+pub struct EnvelopeMigrationFailureRow {
+    pub id: String,
+    pub secret_id: String,
+    pub version: u32,
+    pub key_version: u32,
+    pub error_code: String,
+}
+
 #[derive(Debug)]
 pub struct KeyRotationStatus {
     pub key_version: i32,
@@ -210,6 +248,57 @@ impl KeyRotationStatus {
         Self {
             key_version,
             remaining_count,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EnvelopeMigrationStatus {
+    pub total_legacy_rows: i64,
+    pub last_run_at: Option<String>,
+    pub last_batch_size: Option<i64>,
+    pub last_success_count: Option<i64>,
+    pub last_failure_count: Option<i64>,
+}
+
+impl EnvelopeMigrationStatus {
+    pub(crate) fn new(
+        total_legacy_rows: i64,
+        last_run_at: Option<String>,
+        last_batch_size: Option<i64>,
+        last_success_count: Option<i64>,
+        last_failure_count: Option<i64>,
+    ) -> Self {
+        Self {
+            total_legacy_rows,
+            last_run_at,
+            last_batch_size,
+            last_success_count,
+            last_failure_count,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EnvelopeMigrationApplyOutcome {
+    pub success_count: i64,
+    pub failure_count: i64,
+    pub remaining_legacy_rows: i64,
+    pub retry_secret_version_ids: Vec<String>,
+}
+
+impl EnvelopeMigrationApplyOutcome {
+    pub(crate) fn new(
+        success_count: i64,
+        failure_count: i64,
+        remaining_legacy_rows: i64,
+        retry_secret_version_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            success_count,
+            failure_count,
+            remaining_legacy_rows,
+            retry_secret_version_ids,
         }
     }
 }

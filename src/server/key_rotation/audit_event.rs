@@ -1,6 +1,7 @@
 use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult,
-    KeyRotationCompleteMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata, RequestId,
+    KeyRotationCompleteMetadata, KeyRotationEnvelopeMigratedMetadata, KeyRotationReencryptMetadata,
+    KeyRotationStartMetadata, RequestId,
 };
 use crate::types::KeyVersion;
 
@@ -90,6 +91,34 @@ pub(super) fn build_key_rotation_complete_event(
         target_secret_id: None,
         result: AuditResult::Success,
         key_version: Some(new_key_version),
+        metadata_json: metadata,
+    })
+    .map_err(|error| KeyRotationCliError::Audit(error.to_string()))
+}
+
+pub(super) fn build_key_rotation_envelope_migrated_event(
+    request_id: &RequestId,
+    batch_size: u64,
+    success_count: u64,
+    failure_count: u64,
+) -> Result<AuditEvent, KeyRotationCliError> {
+    let metadata =
+        KeyRotationEnvelopeMigratedMetadata::new(batch_size, success_count, failure_count)
+            .build()
+            .and_then(|m| m.with_current_source_event_at())
+            .map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+    let audit_event_id =
+        AuditEventId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
+
+    AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: request_id.clone(),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::KeyRotationEnvelopeMigrated,
+        target_secret_id: None,
+        result: AuditResult::Success,
+        key_version: None,
         metadata_json: metadata,
     })
     .map_err(|error| KeyRotationCliError::Audit(error.to_string()))

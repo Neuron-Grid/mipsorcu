@@ -104,6 +104,50 @@ fn spawn_key_rotation_start_server(
     Ok((format!("http://{addr}"), receiver, thread))
 }
 
+fn spawn_envelope_migration_dry_run_server() -> Result<TestServerHandle, Box<dyn std::error::Error>>
+{
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let path = request.path.clone();
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if path == "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status" {
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "OK",
+                    &ledger_signing_public_key_status_body(),
+                )?;
+            } else if path == "/rest/v1/rpc/rpc_envelope_migration_status" {
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "OK",
+                    r#"[{"total_legacy_rows":7,"last_run_at":null,"last_batch_size":null,"last_success_count":null,"last_failure_count":null}]"#,
+                )?;
+            } else if path == "/rest/v1/rpc/rpc_list_envelope_migration_batch" {
+                write_http_response(&mut stream, 200, "OK", r#"[]"#)?;
+            } else {
+                write_http_response(&mut stream, 500, "Unexpected Request", r#""unexpected""#)?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
 fn run_key_rotation_start(
     supabase_url: &str,
     test_name: &str,
@@ -151,6 +195,65 @@ fn run_key_rotation_start(
             "1",
             "--new-key-version",
             "2",
+        ])
+        .output()?;
+
+    Ok(KeyRotationCliRun {
+        output,
+        temp_dir,
+        fallback_path,
+    })
+}
+
+fn run_key_rotation_migrate_dry_run(
+    supabase_url: &str,
+    test_name: &str,
+) -> Result<KeyRotationCliRun, Box<dyn std::error::Error>> {
+    let temp_dir = temp_dir(test_name);
+    let key_dir = temp_dir.join("keys");
+    let fallback_path = temp_dir.join("audit-fallback-current.jsonl");
+    let fallback_archive_dir = temp_dir.join("audit-fallback-archive");
+    fs::create_dir_all(&key_dir)?;
+    fs::write(key_dir.join("1.key"), hex::encode(OLD_MASTER_KEY_BYTES))?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mipsorcu"))
+        .current_dir(&temp_dir)
+        .env_clear()
+        .env("MIPSORCU_MASTER_KEY_DIR", &key_dir)
+        .env("MIPSORCU_ACTIVE_KEY_VERSION", "1")
+        .env(
+            "MIPSORCU_ALIAS_ENCRYPTION_KEY",
+            hex::encode([3u8; MASTER_KEY_LENGTH]),
+        )
+        .env("MIPSORCU_ALIAS_ENCRYPTION_KEY_VERSION", "1")
+        .env(
+            "MIPSORCU_ALIAS_FINGERPRINT_KEY",
+            hex::encode([4u8; MASTER_KEY_LENGTH]),
+        )
+        .env("MIPSORCU_ALIAS_FINGERPRINT_KEY_VERSION", "1")
+        .env("MIPSORCU_SUPABASE_URL", supabase_url)
+        .env("MIPSORCU_SUPABASE_SERVICE_ROLE_KEY", SERVICE_ROLE_KEY)
+        .env("MIPSORCU_SUPABASE_PUBLISHABLE_KEY", PUBLISHABLE_KEY)
+        .env(
+            "MIPSORCU_LEDGER_SIGNING_KEY",
+            hex::encode(LEDGER_SIGNING_KEY_BYTES),
+        )
+        .env("MIPSORCU_LEDGER_SIGNATURE_KEY_VERSION", "1")
+        .env("MIPSORCU_JWT_ISSUER", "issuer")
+        .env("MIPSORCU_JWT_AUDIENCE", "authenticated")
+        .env("MIPSORCU_JWKS_URL", "http://127.0.0.1:1/jwks")
+        .env("MIPSORCU_AUDIT_FALLBACK_PATH", &fallback_path)
+        .env("MIPSORCU_AUDIT_FALLBACK_ARCHIVE_DIR", &fallback_archive_dir)
+        .args([
+            "key-rotation",
+            "--migrate-envelope",
+            "--batch-size",
+            "100",
+            "--max-batches",
+            "10",
+            "--dry-run",
+            "--format",
+            "json",
         ])
         .output()?;
 
@@ -318,6 +421,60 @@ fn key_rotation_start_fails_when_append_audit_event_with_ledger_fails()
     assert!(!combined_output.contains("secret internal upstream details"));
     assert!(!combined_output.contains(SERVICE_ROLE_KEY));
     assert!(!combined_output.contains(PUBLISHABLE_KEY));
+    assert!(!run.fallback_path.exists());
+
+    fs::remove_dir_all(run.temp_dir)?;
+
+    Ok(())
+}
+
+#[test]
+fn envelope_migration_dry_run_does_not_call_apply_rpc() -> Result<(), Box<dyn std::error::Error>> {
+    let (supabase_url, receiver, server_thread) = spawn_envelope_migration_dry_run_server()?;
+
+    let run = run_key_rotation_migrate_dry_run(&supabase_url, "envelope-dry-run")?;
+    let status_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
+    let migration_status_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
+    let list_request = receiver.recv_timeout(std::time::Duration::from_secs(2))?;
+    server_thread
+        .join()
+        .map_err(|_| std::io::Error::other("dry-run server thread panicked"))??;
+
+    assert!(run.output.status.success());
+    assert_eq!(
+        status_request.path,
+        "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status"
+    );
+    assert_eq!(
+        migration_status_request.path,
+        "/rest/v1/rpc/rpc_envelope_migration_status"
+    );
+    assert_eq!(
+        list_request.path,
+        "/rest/v1/rpc/rpc_list_envelope_migration_batch"
+    );
+
+    let status_body = migration_status_request
+        .body
+        .ok_or_else(|| std::io::Error::other("status body should be JSON"))?;
+    assert_eq!(status_body["p_secret_id"], Value::Null);
+    let list_body = list_request
+        .body
+        .ok_or_else(|| std::io::Error::other("list body should be JSON"))?;
+    assert_eq!(list_body["p_limit"], 100);
+    assert_eq!(list_body["p_secret_id"], Value::Null);
+
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed["envelope_migration"]["dry_run"], true);
+    assert_eq!(parsed["envelope_migration"]["selected_count"], 0);
+    assert_eq!(parsed["envelope_migration"]["remaining_legacy_rows"], 7);
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(
+        stderr.is_empty(),
+        "dry-run stderr should be empty: {stderr}"
+    );
+    assert_no_secret_material(&parsed, "dry-run stdout")?;
     assert!(!run.fallback_path.exists());
 
     fs::remove_dir_all(run.temp_dir)?;
