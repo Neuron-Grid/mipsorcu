@@ -1,0 +1,21 @@
+{
+    "format": "v01",
+    "secret_id": "550e8400-e29b-41d4-a716-446655440000",
+    "owner_user_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "classification": "confidential",
+    "created_at": "2026-04-08T12:00:00Z",
+    "version": 1,
+    "key_version": 1,
+    "plaintext_utf8": "hello world v01",
+    "ciphertext_hex": "991a3287a31819f203816d64bd03c1ac478be3f37af02ca3ee4f08bb1c54a3",
+    "nonce_hex": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+    "encrypted_data_key_hex": "01292929292929292929292929292929292929292929292929df0f397636dc2abb9276d2e88153fc4b969153fe0e6aa861234acb9847128661ace8848a90ba7990745923817e712cd8",
+    "aad_context": {
+        "aad_version": 1,
+        "secret_id": "550e8400-e29b-41d4-a716-446655440000",
+        "version": 1,
+        "owner_user_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "classification": "confidential",
+        "created_at": "2026-04-08T12:00:00Z"
+    }
+}

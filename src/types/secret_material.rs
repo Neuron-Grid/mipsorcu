@@ -46,11 +46,15 @@ impl DekPlaintext {
     pub fn as_bytes(&self) -> &[u8; DATA_KEY_LENGTH] {
         &self.0
     }
+
+    fn zeroize_in_place(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 impl Drop for DekPlaintext {
     fn drop(&mut self) {
-        self.0.zeroize();
+        self.zeroize_in_place();
     }
 }
 
@@ -267,6 +271,30 @@ impl Drop for AliasEncryptionKey {
 impl fmt::Debug for AliasEncryptionKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("AliasEncryptionKey(<redacted>)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dek_plaintext_zeroize_path_clears_bytes_without_unsafe_observation() {
+        let mut dek = DekPlaintext::from_bytes([7u8; DATA_KEY_LENGTH]);
+
+        dek.zeroize_in_place();
+
+        assert_eq!(dek.as_bytes(), &[0u8; DATA_KEY_LENGTH]);
+    }
+
+    #[test]
+    fn dek_plaintext_debug_redacts_material() {
+        let dek = DekPlaintext::from_bytes([7u8; DATA_KEY_LENGTH]);
+
+        let rendered = format!("{dek:?}");
+
+        assert_eq!(rendered, "DekPlaintext(<redacted>)");
+        assert!(!rendered.contains("7, 7"));
     }
 }
 

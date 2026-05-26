@@ -1002,6 +1002,265 @@ select is(
     'apply envelope migration rejects malformed bytea strings before decode'
 );
 
+create temp table task08_v1_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001800',
+    'encrypt_create',
+    '550e8400-e29b-41d4-a716-446655441800',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:20:00Z',
+    1,
+    'a8',
+    '81'
+);
+
+create temp table task08_v2_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001801',
+    'encrypt_rotate',
+    '550e8400-e29b-41d4-a716-446655441800',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:21:00Z',
+    2,
+    'a9',
+    '82'
+);
+
+create temp table task08_limited_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    1,
+    '550e8400-e29b-41d4-a716-446655441800'
+);
+
+select is(
+    (select count(*)::integer from task08_limited_batch),
+    1,
+    'task08 migration list honors p_limit'
+);
+
+select is(
+    (select version from task08_limited_batch),
+    1,
+    'task08 migration list selects only the oldest legacy version when limited'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001802',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from task08_limited_batch),
+            '550e8400-e29b-41d4-a716-446655441800',
+            1,
+            1,
+            'c8',
+            '83',
+            'd8',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001803',
+        '2026-04-08T12:22:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001804',
+            3,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:22:00Z',
+            '00000000-0000-4000-8000-000000001802',
+            '00000000-0000-4000-8000-000000001803',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0),
+            repeat('92', 32),
+            repeat('96', 32)
+        )
+    ),
+    'ok',
+    'task08 applies one limited migration row'
+);
+
+select ok(
+    (
+        select sv.encrypted_data_key is null
+            and sv.wrapped_dek is not null
+            and sv.dek_wrap_algorithm = 'envvar-xchacha-v2'
+            and sv.kek_version = 2
+            and sv.key_version = sv.kek_version
+        from public.secret_versions sv
+        join task08_limited_batch mb on mb.id = sv.id
+    ),
+    'task08 migrated row has v0.2 envelope key material only'
+);
+
+select is(
+    (
+        select sv.created_at
+        from public.secret_versions sv
+        join task08_limited_batch mb on mb.id = sv.id
+    ),
+    '2026-04-08T12:20:00Z'::timestamptz,
+    'task08 migration keeps migrated row created_at unchanged'
+);
+
+select is(
+    (
+        select sv.aad_context
+        from public.secret_versions sv
+        join task08_limited_batch mb on mb.id = sv.id
+    ),
+    test_helpers.aad_context(
+        '550e8400-e29b-41d4-a716-446655441800',
+        1,
+        'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        'confidential',
+        '2026-04-08T12:20:00Z'
+    ),
+    'task08 migration keeps migrated row aad_context unchanged'
+);
+
+select ok(
+    (
+        select sv.dek_wrap_algorithm is null
+            and sv.encrypted_data_key is not null
+            and sv.wrapped_dek is null
+            and sv.created_at = '2026-04-08T12:21:00Z'::timestamptz
+        from public.secret_versions sv
+        where sv.secret_id = '550e8400-e29b-41d4-a716-446655441800'
+            and sv.version = 2
+    ),
+    'task08 limited migration leaves other versions unchanged'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.id = '00000000-0000-4000-8000-000000001803'
+            and ae.action = 'key_rotation_envelope_migrated'
+            and ae.result = 'success'
+            and ae.metadata_json = jsonb_build_object(
+                'batch_size', 1,
+                'success_count', 1,
+                'failure_count', 0,
+                'source_event_at', '2026-04-08T12:22:00Z'
+            )
+    ),
+    1,
+    'task08 migration writes success audit'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.ledger_entries le
+        where le.source_event_id = '00000000-0000-4000-8000-000000001803'
+            and le.entry_type = 'envelope_migration_batch_completed'
+            and le.payload = jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0)
+    ),
+    1,
+    'task08 migration writes matching ledger entry'
+);
+
+create temp table task08_remaining_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    10,
+    '550e8400-e29b-41d4-a716-446655441800'
+);
+
+select is(
+    (select count(*)::integer from task08_remaining_batch),
+    1,
+    'task08 only one legacy row remains after limited migration'
+);
+
+select is(
+    (select version from task08_remaining_batch),
+    2,
+    'task08 remaining legacy row is the untouched version'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001805',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from task08_remaining_batch),
+            '550e8400-e29b-41d4-a716-446655441800',
+            2,
+            1,
+            'c9',
+            '83',
+            'd9',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001806',
+        '2026-04-08T12:23:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001807',
+            4,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:23:00Z',
+            '00000000-0000-4000-8000-000000001805',
+            '00000000-0000-4000-8000-000000001806',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0),
+            repeat('96', 32),
+            repeat('97', 32)
+        )
+    ),
+    'envelope_migration_nonce_reuse',
+    'task08 migration fails closed on duplicate nonce for same secret'
+);
+
+select ok(
+    (
+        select sv.dek_wrap_algorithm is null
+            and sv.encrypted_data_key is not null
+            and sv.wrapped_dek is null
+        from public.secret_versions sv
+        where sv.secret_id = '550e8400-e29b-41d4-a716-446655441800'
+            and sv.version = 2
+    ),
+    'task08 nonce conflict rollback leaves remaining version legacy'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.id = '00000000-0000-4000-8000-000000001806'
+    ),
+    0,
+    'task08 nonce conflict does not write success audit'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from (
+            select sv.secret_id, sv.nonce_or_iv
+            from public.secret_versions sv
+            where sv.secret_id = '550e8400-e29b-41d4-a716-446655441800'
+            group by sv.secret_id, sv.nonce_or_iv
+            having count(*) > 1
+        ) duplicate_nonces
+    ),
+    0,
+    'task08 migration keeps secret_id nonce uniqueness invariant'
+);
+
 select *
 from finish();
 

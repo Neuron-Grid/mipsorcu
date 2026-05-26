@@ -1,0 +1,23 @@
+{
+    "format": "v02",
+    "secret_id": "550e8400-e29b-41d4-a716-446655440000",
+    "owner_user_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "classification": "confidential",
+    "created_at": "2026-04-08T12:00:00Z",
+    "version": 1,
+    "key_version": 2,
+    "kek_version": 2,
+    "plaintext_utf8": "hello world v01",
+    "ciphertext_hex": "53a90c0a7d611c96aaf45a847b8efdc96ffb0d3a3678783180bde91b14e59f",
+    "nonce_hex": "202020202020202020202020202020202020202020202020",
+    "wrapped_dek_hex": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a95e1b5d015b4fb4abb4ddff7d7a671b8b5c9e0de6d83c69369149609fc48c54c70226d793dbbfec427a444725a1ce2ed",
+    "dek_wrap_algorithm": "envvar-xchacha-v2",
+    "aad_context": {
+        "aad_version": 1,
+        "secret_id": "550e8400-e29b-41d4-a716-446655440000",
+        "version": 1,
+        "owner_user_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "classification": "confidential",
+        "created_at": "2026-04-08T12:00:00Z"
+    }
+}
