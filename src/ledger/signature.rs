@@ -37,12 +37,34 @@ impl LedgerSignature {
         Self::from_bytes(&bytes)
     }
 
+    /// 128 文字の小文字 hex 文字列から Ed25519 署名を復元する。
+    ///
+    /// `monthly_digest` payload の `sbc_signature` は JSON 文字列として保存されるため、
+    /// PostgreSQL `bytea` 形式の `\\x` prefix を持たない。
+    pub fn from_lower_hex(value: &str) -> Result<Self, LedgerError> {
+        if value.len() != LEDGER_SIGNATURE_LENGTH * 2
+            || !value
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        {
+            return Err(LedgerError::InvalidSignatureEncoding);
+        }
+
+        let bytes = hex::decode(value).map_err(|_| LedgerError::InvalidSignatureEncoding)?;
+        Self::from_bytes(&bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8; LEDGER_SIGNATURE_LENGTH] {
         &self.0
     }
 
     pub fn to_bytea_hex(self) -> String {
         format!("\\x{}", hex::encode(self.0))
+    }
+
+    /// 128 文字の小文字 hex 文字列へ変換する。
+    pub fn to_lower_hex(self) -> String {
+        hex::encode(self.0)
     }
 }
 

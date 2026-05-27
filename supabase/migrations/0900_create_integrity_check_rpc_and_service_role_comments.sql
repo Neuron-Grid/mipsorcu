@@ -381,6 +381,7 @@ as $$
             'digest_hash',
             'end_sequence_no',
             'entry_count',
+            'sbc_signature',
             'start_sequence_no',
             'target_year_month'
         ]::text[]
@@ -617,6 +618,16 @@ begin
             v_text := v_value #>> '{}';
 
             if v_text !~ '^[0-9a-f]{64}$' then
+                return false;
+            end if;
+        elsif v_key = 'sbc_signature' then
+            if jsonb_typeof(v_value) <> 'string' then
+                return false;
+            end if;
+
+            v_text := v_value #>> '{}';
+
+            if v_text !~ '^[0-9a-f]{128}$' then
                 return false;
             end if;
         elsif v_key = 'target_year_month' then
@@ -4043,6 +4054,7 @@ returns table(
     target_year_month       text,
     digest_generated_at     text,
     signature               text,
+    sbc_signature           text,
     signature_key_version   integer,
     public_key              text,
     start_entry_hash        text,
@@ -4067,6 +4079,7 @@ begin
         le.payload->>'target_year_month',
         le.source_event_at,
         '\x' || encode(le.signature, 'hex'),
+        le.payload->>'sbc_signature',
         le.signature_key_version,
         '\x' || encode(pk.public_key, 'hex'),
         '\x' || encode(le_start.entry_hash, 'hex'),

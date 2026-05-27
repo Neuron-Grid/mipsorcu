@@ -2,7 +2,7 @@ use serde_json::{Map, Value};
 
 use crate::alias::AliasFingerprint;
 use crate::archive::backend::ArchiveObjectKey;
-use crate::ledger::{LedgerSignatureKeyVersion, MonthlyDigestPeriod};
+use crate::ledger::{DigestHash, LedgerSequenceNo, LedgerSignatureKeyVersion, MonthlyDigestPeriod};
 use crate::types::supabase::IntegrityCheckViolationSummary;
 use crate::types::{
     AliasFingerprintSchemaVersion, KeyVersion, SecretId, SecretVersion, SecretVersionId,
@@ -1121,15 +1121,21 @@ mod tests {
 // MonthlyDigestGenerateMetadata / MonthlyDigestVerifyMetadata
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `monthly_digest_generate` failure audit metadata builder.
+/// `monthly_digest_generate` audit metadata builder.
 #[derive(Debug, Clone)]
 pub struct MonthlyDigestGenerateMetadata {
     target_year_month: String,
-    error_code: String,
+    start_sequence_no: Option<LedgerSequenceNo>,
+    end_sequence_no: Option<LedgerSequenceNo>,
+    entry_count: Option<u64>,
+    signature_key_version: Option<LedgerSignatureKeyVersion>,
+    digest_hash: Option<String>,
+    error_code: Option<String>,
     source_event_at: SourceEventAt,
 }
 
 impl MonthlyDigestGenerateMetadata {
+    /// 失敗監査用 metadata を構築する。
     pub fn new(
         period: &MonthlyDigestPeriod,
         error_code: impl Into<String>,
@@ -1137,14 +1143,67 @@ impl MonthlyDigestGenerateMetadata {
     ) -> Self {
         Self {
             target_year_month: period.as_str().to_owned(),
-            error_code: error_code.into(),
+            start_sequence_no: None,
+            end_sequence_no: None,
+            entry_count: None,
+            signature_key_version: None,
+            digest_hash: None,
+            error_code: Some(error_code.into()),
+            source_event_at,
+        }
+    }
+
+    /// 成功監査用 metadata を構築する。
+    pub fn success(
+        period: &MonthlyDigestPeriod,
+        start_sequence_no: LedgerSequenceNo,
+        end_sequence_no: LedgerSequenceNo,
+        entry_count: u64,
+        signature_key_version: LedgerSignatureKeyVersion,
+        digest_hash: DigestHash,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            target_year_month: period.as_str().to_owned(),
+            start_sequence_no: Some(start_sequence_no),
+            end_sequence_no: Some(end_sequence_no),
+            entry_count: Some(entry_count),
+            signature_key_version: Some(signature_key_version),
+            digest_hash: Some(digest_hash.to_hex()),
+            error_code: None,
             source_event_at,
         }
     }
 
     pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
         let mut object = Map::new();
-        object.insert("error_code".to_owned(), Value::String(self.error_code));
+        if let Some(error_code) = self.error_code {
+            object.insert("error_code".to_owned(), Value::String(error_code));
+        }
+        if let Some(start_sequence_no) = self.start_sequence_no {
+            object.insert(
+                "start_sequence_no".to_owned(),
+                Value::Number(start_sequence_no.get().into()),
+            );
+        }
+        if let Some(end_sequence_no) = self.end_sequence_no {
+            object.insert(
+                "end_sequence_no".to_owned(),
+                Value::Number(end_sequence_no.get().into()),
+            );
+        }
+        if let Some(entry_count) = self.entry_count {
+            object.insert("entry_count".to_owned(), Value::Number(entry_count.into()));
+        }
+        if let Some(signature_key_version) = self.signature_key_version {
+            object.insert(
+                "signature_key_version".to_owned(),
+                Value::Number(signature_key_version.get().into()),
+            );
+        }
+        if let Some(digest_hash) = self.digest_hash {
+            object.insert("digest_hash".to_owned(), Value::String(digest_hash));
+        }
         object.insert(
             "target_year_month".to_owned(),
             Value::String(self.target_year_month),
@@ -1157,15 +1216,17 @@ impl MonthlyDigestGenerateMetadata {
     }
 }
 
-/// `monthly_digest_verify` failure audit metadata builder.
+/// `monthly_digest_verify` audit metadata builder.
 #[derive(Debug, Clone)]
 pub struct MonthlyDigestVerifyMetadata {
     target_year_month: String,
-    error_code: String,
+    verify_result: &'static str,
+    error_code: Option<String>,
     source_event_at: SourceEventAt,
 }
 
 impl MonthlyDigestVerifyMetadata {
+    /// 失敗監査用 metadata を構築する。
     pub fn new(
         period: &MonthlyDigestPeriod,
         error_code: impl Into<String>,
@@ -1173,17 +1234,34 @@ impl MonthlyDigestVerifyMetadata {
     ) -> Self {
         Self {
             target_year_month: period.as_str().to_owned(),
-            error_code: error_code.into(),
+            verify_result: "invalid",
+            error_code: Some(error_code.into()),
+            source_event_at,
+        }
+    }
+
+    /// 成功監査用 metadata を構築する。
+    pub fn success(period: &MonthlyDigestPeriod, source_event_at: SourceEventAt) -> Self {
+        Self {
+            target_year_month: period.as_str().to_owned(),
+            verify_result: "valid",
+            error_code: None,
             source_event_at,
         }
     }
 
     pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
         let mut object = Map::new();
-        object.insert("error_code".to_owned(), Value::String(self.error_code));
+        if let Some(error_code) = self.error_code {
+            object.insert("error_code".to_owned(), Value::String(error_code));
+        }
         object.insert(
             "target_year_month".to_owned(),
             Value::String(self.target_year_month),
+        );
+        object.insert(
+            "verify_result".to_owned(),
+            Value::String(self.verify_result.to_owned()),
         );
         object.insert(
             SOURCE_EVENT_AT_KEY.to_owned(),
@@ -1246,7 +1324,8 @@ mod monthly_digest_metadata_tests {
             value["source_event_at"].as_str(),
             Some("2026-06-01T00:00:00Z")
         );
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value["verify_result"].as_str(), Some("invalid"));
+        assert_eq!(value.as_object().unwrap().len(), 4);
         metadata
             .validate_allowlist_for_action(AuditAction::MonthlyDigestVerify, AuditResult::Failure)
             .unwrap();

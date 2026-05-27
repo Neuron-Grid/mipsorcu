@@ -8,6 +8,7 @@ use crate::types::SourceEventAt;
 use super::canonical::CanonicalPayloadObject;
 use super::constants::{
     FORBIDDEN_LEDGER_PAYLOAD_KEYS, LEDGER_I64_MAX_U64, LEDGER_PAYLOAD_MAX_CANONICAL_BYTES,
+    LEDGER_SIGNATURE_LENGTH,
 };
 use super::entry_type::LedgerEntryType;
 use super::error::LedgerError;
@@ -179,6 +180,7 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         "digest_hash" | "timestamp_token_hash" | "public_key_fingerprint" => {
             validate_digest_hash_value(key, value)
         }
+        "sbc_signature" => validate_signature_hex_value(key, value),
         "created_at" | "activated_at" | "retired_at" => validate_source_event_at_value(key, value),
         _ => Err(LedgerError::UnknownPayloadKey {
             key: key.to_owned(),
@@ -191,22 +193,31 @@ fn validate_required_payload_keys(
     entry_type: LedgerEntryType,
     object: &Map<String, Value>,
 ) -> Result<(), LedgerError> {
-    if entry_type != LedgerEntryType::IncidentDetected {
-        return Ok(());
-    }
+    let required_keys: &[&str] = match entry_type {
+        LedgerEntryType::IncidentDetected => &[
+            "incident_type",
+            "severity",
+            "detection_source",
+            "dedupe_key",
+            "notification_sink",
+            "notification_result",
+        ],
+        LedgerEntryType::MonthlyDigest => &[
+            "digest_hash",
+            "end_sequence_no",
+            "entry_count",
+            "sbc_signature",
+            "start_sequence_no",
+            "target_year_month",
+        ],
+        _ => return Ok(()),
+    };
 
-    for key in [
-        "incident_type",
-        "severity",
-        "detection_source",
-        "dedupe_key",
-        "notification_sink",
-        "notification_result",
-    ] {
+    for &key in required_keys {
         if !object.contains_key(key) {
             return Err(LedgerError::InvalidPayloadField {
                 key: key.to_owned(),
-                expected: "a required incident_detected payload key",
+                expected: "a required payload key for this entry type",
             });
         }
     }
@@ -276,6 +287,29 @@ fn validate_digest_hash_value(key: &str, value: &Value) -> Result<(), LedgerErro
         return Err(LedgerError::InvalidPayloadField {
             key: key.to_owned(),
             expected: "a 64-character lowercase hex string",
+        });
+    }
+
+    Ok(())
+}
+
+/// 128文字の小文字 hex 文字列を検証する（Ed25519 `sbc_signature` 用）。
+fn validate_signature_hex_value(key: &str, value: &Value) -> Result<(), LedgerError> {
+    let Some(text) = value.as_str() else {
+        return Err(LedgerError::InvalidPayloadField {
+            key: key.to_owned(),
+            expected: "a 128-character lowercase hex string",
+        });
+    };
+
+    if text.len() != LEDGER_SIGNATURE_LENGTH * 2
+        || !text
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+    {
+        return Err(LedgerError::InvalidPayloadField {
+            key: key.to_owned(),
+            expected: "a 128-character lowercase hex string",
         });
     }
 

@@ -1,4 +1,4 @@
-//! Supabase RPC クライアント拡張: 月次 digest 検証サポート。
+//! Supabase クライアント拡張: 月次 digest 検証 RPC 呼び出し。
 //!
 //! 信頼境界ノート: 本モジュールは非秘密メタデータ（digest fields, hashes, public key）
 //! のみを Supabase から取得する。秘密情報（平文・鍵・JWT）を送受しない。
@@ -16,7 +16,7 @@ use super::{SupabaseClient, SupabaseRpcError};
 
 const VERIFY_DIGEST_INVALID_RPC_INPUT_MARKER: &str = "invalid_rpc_input";
 
-/// digest 検証に必要な全情報。Supabase から一度に取得する。
+/// digest 検証に必要な全情報。Supabase RPC から一度に取得する。
 #[derive(Debug)]
 pub struct MonthlyDigestVerificationMaterials {
     pub start_sequence_no: LedgerSequenceNo,
@@ -26,7 +26,12 @@ pub struct MonthlyDigestVerificationMaterials {
     pub stored_digest_hash: String,
     pub target_year_month: MonthlyDigestPeriod,
     pub digest_generated_at: SourceEventAt,
+    /// ledger_entries.signature（ledger entry 自体の Ed25519 署名）。
+    /// digest 検証には使用しない（sbc_signature を使用する）。
     pub signature: LedgerSignature,
+    /// `monthly_digest` payload->>'sbc_signature'（128 文字 lowercase hex）。
+    /// digest canonical bytes に対する Ed25519 署名。digest 検証に使用する。
+    pub sbc_signature: LedgerSignature,
     pub signature_key_version: LedgerSignatureKeyVersion,
     /// None = ledger_signing_public_keys にキーが未登録。
     pub public_key: Option<LedgerVerifyingKey>,
@@ -82,6 +87,7 @@ struct DigestForVerificationResponse {
     target_year_month: String,
     digest_generated_at: String,
     signature: String,
+    sbc_signature: String,
     signature_key_version: i32,
     public_key: Option<String>,
     start_entry_hash: String,
@@ -131,6 +137,12 @@ impl TryFrom<DigestForVerificationResponse> for MonthlyDigestVerificationMateria
             )
         })?;
 
+        let sbc_signature = LedgerSignature::from_lower_hex(&r.sbc_signature).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "digest verification RPC returned invalid sbc_signature".to_owned(),
+            )
+        })?;
+
         let signature_key_version = LedgerSignatureKeyVersion::new(r.signature_key_version as u32)
             .map_err(|_| {
                 SupabaseRpcError::InvalidResponse(
@@ -162,6 +174,7 @@ impl TryFrom<DigestForVerificationResponse> for MonthlyDigestVerificationMateria
             target_year_month,
             digest_generated_at,
             signature,
+            sbc_signature,
             signature_key_version,
             public_key,
             start_entry_hash,

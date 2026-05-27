@@ -317,9 +317,11 @@ pub async fn verify_monthly_digest(
         return Err(VerifyMonthlyDigestError::DigestHashMismatch);
     }
 
-    // ── 9. Ed25519 署名を検証 ──
+    // ── 9. digest canonical bytes に対する Ed25519 署名を検証 ──
+    // sbc_signature は monthly_digest payload に保存された digest 専用署名であり、
+    // ledger_entries.signature（ledger entry 自体の署名）ではない。
     if let Err(error) =
-        public_key.verify_digest_bytes(canonical_bytes.as_bytes(), &materials.signature)
+        public_key.verify_digest_bytes(canonical_bytes.as_bytes(), &materials.sbc_signature)
     {
         tracing::warn!(
             request_id = %input.request_id.as_canonical_string(),

@@ -364,19 +364,29 @@ impl AuditMetadata {
             .collect(),
             // 月次 digest 生成失敗時の監査記録。
             // error_code は failure result 時のみ記録する。
-            AuditAction::MonthlyDigestGenerate => {
-                ["error_code", "target_year_month", SOURCE_EVENT_AT_KEY]
-                    .iter()
-                    .cloned()
-                    .collect()
-            }
+            AuditAction::MonthlyDigestGenerate => [
+                "digest_hash",
+                "end_sequence_no",
+                "entry_count",
+                "error_code",
+                "signature_key_version",
+                "start_sequence_no",
+                "target_year_month",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
             // 月次 digest 検証失敗時の監査記録。
-            AuditAction::MonthlyDigestVerify => {
-                ["error_code", "target_year_month", SOURCE_EVENT_AT_KEY]
-                    .iter()
-                    .cloned()
-                    .collect()
-            }
+            AuditAction::MonthlyDigestVerify => [
+                "error_code",
+                "target_year_month",
+                "verify_result",
+                SOURCE_EVENT_AT_KEY,
+            ]
+            .iter()
+            .cloned()
+            .collect(),
             // 外部アーカイブ export（成功・失敗両方を記録）。
             // archive_key は success 時のみ有効（validate_metadata_values で検証）。
             AuditAction::ArchiveExport => [
@@ -579,9 +589,27 @@ fn validate_required_metadata_keys(
                 "retired_at",
             ]
         }
-        // monthly_digest_generate / verify は failure 時のみ記録されるが、
-        // error_code は必須ではなく、source_event_at のみが必須。
-        AuditAction::MonthlyDigestGenerate | AuditAction::MonthlyDigestVerify => Vec::new(),
+        AuditAction::MonthlyDigestGenerate => {
+            if result == AuditResult::Success {
+                vec![
+                    "target_year_month",
+                    "start_sequence_no",
+                    "end_sequence_no",
+                    "entry_count",
+                    "signature_key_version",
+                    "digest_hash",
+                ]
+            } else {
+                vec!["target_year_month", "error_code"]
+            }
+        }
+        AuditAction::MonthlyDigestVerify => {
+            if result == AuditResult::Success {
+                vec!["target_year_month", "verify_result"]
+            } else {
+                vec!["target_year_month", "verify_result", "error_code"]
+            }
+        }
         // archive export は target_year_month が常に必須。
         AuditAction::ArchiveExport => vec!["target_year_month"],
         // digest timestamping も target_year_month が常に必須。
@@ -701,6 +729,8 @@ fn validate_metadata_values(
         "target_sequence_no",
         "start_sequence_no",
         "end_sequence_no",
+        "entry_count",
+        "signature_key_version",
         "alias_fingerprint_key_version",
         "alias_fingerprint_schema_version",
     ] {
@@ -778,6 +808,28 @@ fn validate_metadata_values(
 
     if let Some(value) = object.get("public_key_fingerprint") {
         validate_hex_string("public_key_fingerprint", value, 64)?;
+    }
+
+    if let Some(value) = object.get("digest_hash") {
+        validate_hex_string("digest_hash", value, 64)?;
+    }
+
+    if let Some(value) = object.get("verify_result") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue {
+                key: "verify_result",
+            })?;
+        let expected = if result == AuditResult::Success {
+            "valid"
+        } else {
+            "invalid"
+        };
+        if text != expected {
+            return Err(AuditEventError::InvalidMetadataValue {
+                key: "verify_result",
+            });
+        }
     }
 
     for key in [

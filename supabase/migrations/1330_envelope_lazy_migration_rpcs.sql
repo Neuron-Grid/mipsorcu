@@ -371,7 +371,7 @@ as $$
         when 'ledger_verified' then array['checked_count', 'duration_ms', 'end_sequence_no', 'start_sequence_no']::text[]
         when 'ledger_verification_failed' then array['end_sequence_no', 'error_code', 'failed_count', 'start_sequence_no']::text[]
         when 'audit_fallback_resent' then array['duration_ms', 'failed_count', 'resent_count']::text[]
-        when 'monthly_digest' then array['digest_hash', 'end_sequence_no', 'entry_count', 'start_sequence_no', 'target_year_month']::text[]
+        when 'monthly_digest' then array['digest_hash', 'end_sequence_no', 'entry_count', 'sbc_signature', 'start_sequence_no', 'target_year_month']::text[]
         when 'archive_exported' then array['archive_key', 'digest_hash', 'target_year_month']::text[]
         when 'digest_timestamped' then array['digest_hash', 'target_year_month', 'timestamp_token_hash']::text[]
         when 'scheduler_job_completed' then array['duration_ms', 'job_name', 'target_year_month', 'trigger']::text[]

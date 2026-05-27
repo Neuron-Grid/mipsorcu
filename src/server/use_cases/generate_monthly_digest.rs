@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventParts, AuditRecorder, AuditResult,
+    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder, AuditResult,
     MonthlyDigestGenerateMetadata, RequestId,
 };
 use crate::ledger::{
@@ -53,6 +53,8 @@ pub enum GenerateMonthlyDigestError {
     BuildFailed { code: String },
     /// ledger entry への追記エラー。
     AppendFailed { code: &'static str },
+    /// 成功監査の構築または追記に失敗した。
+    SuccessAuditFailed { code: &'static str },
 }
 
 impl GenerateMonthlyDigestError {
@@ -63,6 +65,7 @@ impl GenerateMonthlyDigestError {
             Self::FetchFailed { code } => code,
             Self::BuildFailed { code } => code.as_str(),
             Self::AppendFailed { code } => code,
+            Self::SuccessAuditFailed { code } => code,
         }
     }
 }
@@ -81,6 +84,9 @@ impl std::fmt::Display for GenerateMonthlyDigestError {
             Self::AppendFailed { code } => {
                 write!(formatter, "monthly digest ledger append failed: {code}")
             }
+            Self::SuccessAuditFailed { code } => {
+                write!(formatter, "monthly digest success audit failed: {code}")
+            }
         }
     }
 }
@@ -97,11 +103,12 @@ impl std::error::Error for GenerateMonthlyDigestError {}
 pub async fn generate_monthly_digest(
     supabase_client: &Arc<SupabaseClient>,
     ledger_appender: &Arc<LedgerAppender>,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     input: GenerateMonthlyDigestInput,
 ) -> Result<SignedMonthlyDigest, GenerateMonthlyDigestError> {
     let period = &input.period;
 
-    // ── 1. 重複チェック ──
+    // 1. 重複チェック
     let already_exists = supabase_client
         .check_monthly_digest_exists(period.as_str())
         .await
@@ -127,10 +134,10 @@ pub async fn generate_monthly_digest(
         return Err(GenerateMonthlyDigestError::DuplicateDigest);
     }
 
-    // ── 2. 対象月のエントリ範囲を取得 ──
+    // 2. 対象月のエントリ範囲を取得
     let range = fetch_ledger_range(supabase_client, &input).await?;
 
-    // ── 3. canonical form を生成 ──
+    // 3. canonical form を生成
     let signature_key_version = ledger_appender.signing_key_version();
     let canonical_bytes = build_monthly_digest_canonical_form(
         period,
@@ -154,10 +161,10 @@ pub async fn generate_monthly_digest(
         }
     })?;
 
-    // ── 4. digest hash を計算 ──
+    // 4. digest hash を計算
     let digest_hash = DigestHash::from_canonical_bytes(&canonical_bytes);
 
-    // ── 5. Ed25519 署名 ──
+    // 5. Ed25519 署名
     let sbc_signature = ledger_appender
         .sign_digest_bytes(canonical_bytes.as_bytes())
         .map_err(|error| {
@@ -186,8 +193,9 @@ pub async fn generate_monthly_digest(
         sbc_signature,
     };
 
-    // ── 6. ledger entry として追記 ──
+    // 6. ledger entry として追記
     append_digest_ledger_entry(ledger_appender, &signed_digest, &input).await?;
+    record_monthly_digest_success_audit(audit_recorder, &signed_digest, &input).await?;
 
     tracing::info!(
         request_id = %input.request_id.as_canonical_string(),
@@ -250,6 +258,7 @@ async fn append_digest_ledger_entry(
             "digest_hash": signed_digest.digest_hash.to_hex(),
             "end_sequence_no": signed_digest.end_sequence_no.get(),
             "entry_count": signed_digest.entry_count,
+            "sbc_signature": signed_digest.sbc_signature.to_lower_hex(),
             "start_sequence_no": signed_digest.start_sequence_no.get(),
             "target_year_month": signed_digest.period.as_str(),
         }),
@@ -298,6 +307,84 @@ async fn append_digest_ledger_entry(
         );
         GenerateMonthlyDigestError::AppendFailed {
             code: error.as_error_code(),
+        }
+    })?;
+
+    Ok(())
+}
+
+async fn record_monthly_digest_success_audit(
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
+    signed_digest: &SignedMonthlyDigest,
+    input: &GenerateMonthlyDigestInput,
+) -> Result<(), GenerateMonthlyDigestError> {
+    let audit_event_id = AuditEventId::generate().map_err(|error| {
+        tracing::error!(
+            request_id = %input.request_id.as_canonical_string(),
+            period = input.period.as_str(),
+            error = %error,
+            "failed to generate audit event id for monthly_digest_generate success audit"
+        );
+        GenerateMonthlyDigestError::SuccessAuditFailed {
+            code: "monthly_digest_success_audit_event_id_failed",
+        }
+    })?;
+
+    let metadata = MonthlyDigestGenerateMetadata::success(
+        &signed_digest.period,
+        signed_digest.start_sequence_no,
+        signed_digest.end_sequence_no,
+        signed_digest.entry_count,
+        signed_digest.signature_key_version,
+        signed_digest.digest_hash,
+        input.generated_at.clone(),
+    )
+    .build()
+    .map_err(|error| {
+        tracing::error!(
+            request_id = %input.request_id.as_canonical_string(),
+            period = input.period.as_str(),
+            error = %error,
+            "failed to build monthly_digest_generate success audit metadata"
+        );
+        GenerateMonthlyDigestError::SuccessAuditFailed {
+            code: "monthly_digest_success_audit_metadata_failed",
+        }
+    })?;
+
+    let event = AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: input.request_id.clone(),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::MonthlyDigestGenerate,
+        target_secret_id: None,
+        result: AuditResult::Success,
+        key_version: None,
+        metadata_json: metadata,
+    })
+    .map_err(|error| {
+        tracing::error!(
+            request_id = %input.request_id.as_canonical_string(),
+            period = input.period.as_str(),
+            error = %error,
+            "failed to build monthly_digest_generate success audit event"
+        );
+        GenerateMonthlyDigestError::SuccessAuditFailed {
+            code: "monthly_digest_success_audit_event_failed",
+        }
+    })?;
+
+    audit_recorder.record(&event).await.map_err(|error| {
+        tracing::error!(
+            request_id = %input.request_id.as_canonical_string(),
+            period = input.period.as_str(),
+            error = %error,
+            error_code = "monthly_digest_success_audit_record_failed",
+            "monthly digest success audit primary and fallback recording failed"
+        );
+        GenerateMonthlyDigestError::SuccessAuditFailed {
+            code: "monthly_digest_success_audit_record_failed",
         }
     })?;
 

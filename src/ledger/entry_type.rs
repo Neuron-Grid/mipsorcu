@@ -158,6 +158,7 @@ impl LedgerEntryType {
                 "digest_hash",
                 "end_sequence_no",
                 "entry_count",
+                "sbc_signature",
                 "start_sequence_no",
                 "target_year_month",
             ],

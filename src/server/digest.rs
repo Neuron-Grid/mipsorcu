@@ -184,7 +184,8 @@ async fn run_generate_command(
         request_id: request_id.clone(),
     };
 
-    match generate_monthly_digest(&supabase_client, &ledger_appender, input).await {
+    match generate_monthly_digest(&supabase_client, &ledger_appender, &audit_recorder, input).await
+    {
         Ok(signed_digest) => Ok(DigestGenerateOutput {
             period: signed_digest.period.as_str().to_owned(),
             start_sequence_no: signed_digest.start_sequence_no.get(),
