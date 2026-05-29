@@ -31,16 +31,9 @@ pub(in crate::server) async fn create_secret(
     );
 
     if let Err(error) = authorize_new_secret_create(claims) {
-        if let Err(audit_err) = failure
-            .log_and_record(&error, "authorize_new_secret_create")
-            .await
-        {
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                error = %audit_err,
-                "failure audit recording also failed"
-            );
-        }
+        failure
+            .record_and_warn(&error, "authorize_new_secret_create")
+            .await;
         return Err(ApiError::Forbidden("forbidden".to_owned()));
     }
 
@@ -48,16 +41,7 @@ pub(in crate::server) async fn create_secret(
         match prepare_new_secret_version_for_request(state, owner_user_id.clone(), command).await {
             Ok(prepared) => prepared,
             Err(error) => {
-                if let Err(audit_err) = failure
-                    .log_and_record(&error, "prepare_secret_version")
-                    .await
-                {
-                    tracing::error!(
-                        request_id = %request_id.as_canonical_string(),
-                        error = %audit_err,
-                        "failure audit recording also failed"
-                    );
-                }
+                failure.record_and_warn(&error, "prepare_secret_version").await;
                 return Err(error);
             }
         };
@@ -102,42 +86,23 @@ pub(in crate::server) async fn rotate_secret(
         {
             Ok(current) => current,
             Err(FetchCurrentSecretVersionError::Upstream(rpc_error)) => {
-                failure.log_upstream_failure(&rpc_error, "fetch_current_secret_write_state");
-                if let Err(audit_err) = failure.record().await {
-                    tracing::error!(
-                        request_id = %request_id.as_canonical_string(),
-                        error = %audit_err,
-                        "failure audit recording also failed"
-                    );
-                }
+                failure
+                    .record_upstream_and_warn(&rpc_error, "fetch_current_secret_write_state")
+                    .await;
                 return Err(ApiError::from(rpc_error));
             }
             Err(FetchCurrentSecretVersionError::Api(api_error)) => {
-                if let Err(audit_err) = failure
-                    .log_and_record(&api_error, "fetch_current_secret_write_state")
-                    .await
-                {
-                    tracing::error!(
-                        request_id = %request_id.as_canonical_string(),
-                        error = %audit_err,
-                        "failure audit recording also failed"
-                    );
-                }
+                failure
+                    .record_and_warn(&api_error, "fetch_current_secret_write_state")
+                    .await;
                 return Err(api_error);
             }
         };
 
     if let Err(error) = authorize_existing_secret_version_write(claims, current.owner_user_id()) {
-        if let Err(audit_err) = failure
-            .log_and_record(&error, "authorize_existing_secret_version_write")
-            .await
-        {
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                error = %audit_err,
-                "failure audit recording also failed"
-            );
-        }
+        failure
+            .record_and_warn(&error, "authorize_existing_secret_version_write")
+            .await;
         return Err(ApiError::Forbidden("forbidden".to_owned()));
     }
 
@@ -148,14 +113,9 @@ pub(in crate::server) async fn rotate_secret(
     {
         Ok(snapshot) => snapshot,
         Err(rpc_error) => {
-            failure.log_upstream_failure(&rpc_error, "fetch_secret_version_retention_snapshot");
-            if let Err(audit_err) = failure.record().await {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure
+                .record_upstream_and_warn(&rpc_error, "fetch_secret_version_retention_snapshot")
+                .await;
             return Err(ApiError::from(rpc_error));
         }
     };
@@ -164,16 +124,9 @@ pub(in crate::server) async fn rotate_secret(
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            if let Err(audit_err) = failure
-                .log_and_record(&error, "prepare_existing_secret_version")
-                .await
-            {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure
+                .record_and_warn(&error, "prepare_existing_secret_version")
+                .await;
             return Err(error);
         }
     };
@@ -195,23 +148,10 @@ async fn record_secret_ref_resolution_failure(
     match error {
         ResolveSecretRefError::Upstream(rpc_error) => {
             failure.log_upstream_failure_without_error_value(rpc_error, "resolve_secret_ref");
-            if let Err(audit_err) = failure.record().await {
-                tracing::error!(
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure.record_and_warn_on_secondary_failure().await;
         }
         ResolveSecretRefError::Api(api_error) => {
-            if let Err(audit_err) = failure
-                .log_and_record(api_error, "resolve_secret_ref")
-                .await
-            {
-                tracing::error!(
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure.record_and_warn(api_error, "resolve_secret_ref").await;
         }
     }
 

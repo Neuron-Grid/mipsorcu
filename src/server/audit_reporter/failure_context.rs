@@ -199,4 +199,29 @@ impl<'a> FailureAuditContext<'a> {
             }
         }
     }
+
+    /// 失敗 audit の記録を試み、記録自体が失敗した場合のみ二次エラーを warn ログに残す。
+    ///
+    /// 既に別経路でエラーをログ済みであることを前提とし、ここでは元エラーを上書きしない。
+    pub async fn record_and_warn_on_secondary_failure(&self) {
+        if let Err(audit_err) = self.record().await {
+            tracing::error!(
+                request_id = %self.request_id.as_canonical_string(),
+                error = %audit_err,
+                "failure audit recording also failed"
+            );
+        }
+    }
+
+    /// エラーをログし、失敗 audit を記録する。記録自体が失敗した場合は二次エラーを warn ログに残す。
+    pub async fn record_and_warn(&self, error: &impl Display, stage: &'static str) {
+        self.log(error, stage);
+        self.record_and_warn_on_secondary_failure().await;
+    }
+
+    /// upstream 失敗をログし、失敗 audit を記録する。記録失敗時は二次エラーを warn ログに残す。
+    pub async fn record_upstream_and_warn(&self, error: &SupabaseRpcError, stage: &'static str) {
+        self.log_upstream_failure(error, stage);
+        self.record_and_warn_on_secondary_failure().await;
+    }
 }

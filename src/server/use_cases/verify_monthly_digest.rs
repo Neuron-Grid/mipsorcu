@@ -21,10 +21,13 @@ use crate::audit::{
     MonthlyDigestVerifyMetadata, RequestId,
 };
 use crate::ledger::{
-    DigestHash, LedgerChainHead, LedgerError, LedgerSequenceNo, LedgerVerifyingKey,
-    MonthlyDigestPeriod, build_monthly_digest_canonical_form, verify_ledger_chain,
+    DigestHash, LedgerChainHead, LedgerError, LedgerHash, LedgerSequenceNo, LedgerVerifyingKey,
+    MonthlyDigestPeriod, SignedLedgerEntry, build_monthly_digest_canonical_form,
+    verify_ledger_chain,
 };
-use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
+use crate::server::supabase::{
+    MonthlyDigestVerificationMaterials, SupabaseAuditAppender, SupabaseClient,
+};
 use crate::types::SourceEventAt;
 
 pub struct VerifyMonthlyDigestInput {
@@ -110,21 +113,64 @@ pub async fn verify_monthly_digest(
     supabase_client: &Arc<SupabaseClient>,
     input: &VerifyMonthlyDigestInput,
 ) -> Result<VerifiedMonthlyDigestInfo, VerifyMonthlyDigestError> {
-    let period = &input.period;
+    // 手順1: digest 検証マテリアルを取得。
+    let materials = fetch_verification_materials(supabase_client, input).await?;
+    // 手順2-3: 対象範囲の chain エントリと公開鍵を取得・復元。
+    let chain = export_and_restore_chain(supabase_client, input, &materials).await?;
+    // 手順4-6: chain 連続性と末尾 hash の一致を検証。
+    verify_chain_continuity(
+        input,
+        &materials,
+        &chain.entries,
+        &chain.verification_keys,
+        chain.first_previous_hash,
+    )?;
+    // 手順7-9: digest の hash 再計算と Ed25519 署名を検証。
+    verify_digest_hash_and_signature(input, &materials)?;
+    // 手順10: 生成後の range 変更を検知。
+    detect_range_modification(supabase_client, input, &materials).await?;
 
-    // ── 1. digest 検証マテリアルを取得 ──
-    let materials = match supabase_client
+    tracing::info!(
+        request_id = %input.request_id.as_canonical_string(),
+        period = input.period.as_str(),
+        start_sequence_no = materials.start_sequence_no.get(),
+        end_sequence_no = materials.end_sequence_no.get(),
+        entry_count = materials.stored_entry_count,
+        "monthly digest verified successfully"
+    );
+
+    Ok(VerifiedMonthlyDigestInfo {
+        start_sequence_no: materials.start_sequence_no,
+        end_sequence_no: materials.end_sequence_no,
+        entry_count: materials.stored_entry_count,
+    })
+}
+
+/// 手順2-3 で復元した chain 検証用の素材。
+struct RestoredChain {
+    entries: Vec<SignedLedgerEntry>,
+    verification_keys: Vec<LedgerVerifyingKey>,
+    first_previous_hash: LedgerHash,
+}
+
+/// 手順1: digest 検証マテリアルを取得する。
+async fn fetch_verification_materials(
+    supabase_client: &Arc<SupabaseClient>,
+    input: &VerifyMonthlyDigestInput,
+) -> Result<MonthlyDigestVerificationMaterials, VerifyMonthlyDigestError> {
+    let period = &input.period;
+    match supabase_client
         .fetch_monthly_digest_for_verification(period.as_str())
         .await
     {
-        Ok(Some(m)) => m,
+        Ok(Some(m)) => Ok(m),
         Ok(None) => {
             tracing::warn!(
                 request_id = %input.request_id.as_canonical_string(),
                 period = period.as_str(),
                 "monthly digest not found for verification"
             );
-            return Err(VerifyMonthlyDigestError::DigestNotFound);
+            Err(VerifyMonthlyDigestError::DigestNotFound)
         }
         Err(error) => {
             tracing::error!(
@@ -134,13 +180,21 @@ pub async fn verify_monthly_digest(
                 error_code = "monthly_digest_verify_materials_fetch_failed",
                 "failed to fetch monthly digest verification materials"
             );
-            return Err(VerifyMonthlyDigestError::FetchFailed {
+            Err(VerifyMonthlyDigestError::FetchFailed {
                 code: "monthly_digest_verify_materials_fetch_failed",
-            });
+            })
         }
-    };
+    }
+}
 
-    // ── 2. 対象範囲の chain エントリを取得 ──
+/// 手順2-3: 対象範囲の chain エントリと公開鍵を取得し復元する。
+async fn export_and_restore_chain(
+    supabase_client: &Arc<SupabaseClient>,
+    input: &VerifyMonthlyDigestInput,
+    materials: &MonthlyDigestVerificationMaterials,
+) -> Result<RestoredChain, VerifyMonthlyDigestError> {
+    let period = &input.period;
+
     let rows = match supabase_client
         .export_ledger_verification_materials(
             materials.start_sequence_no,
@@ -163,7 +217,6 @@ pub async fn verify_monthly_digest(
         }
     };
 
-    // ── 3. エントリと公開鍵を復元 ──
     if rows.is_empty() {
         tracing::error!(
             request_id = %input.request_id.as_canonical_string(),
@@ -221,8 +274,27 @@ pub async fn verify_monthly_digest(
         }
     }
 
-    // ── 4. initial_head を構築（最初のエントリの previous_entry_hash を使用） ──
+    // rows は上で空でないことを確認済みのため [0] は安全。
     let first_previous_hash = rows[0].previous_entry_hash;
+
+    Ok(RestoredChain {
+        entries,
+        verification_keys,
+        first_previous_hash,
+    })
+}
+
+/// 手順4-6: initial_head を構築し chain 連続性と末尾 hash の一致を検証する。
+fn verify_chain_continuity(
+    input: &VerifyMonthlyDigestInput,
+    materials: &MonthlyDigestVerificationMaterials,
+    entries: &[SignedLedgerEntry],
+    verification_keys: &[LedgerVerifyingKey],
+    first_previous_hash: LedgerHash,
+) -> Result<(), VerifyMonthlyDigestError> {
+    let period = &input.period;
+
+    // 最初のエントリの previous_entry_hash を initial_head に使用する。
     let initial_head =
         LedgerChainHead::new(materials.start_sequence_no.get() - 1, first_previous_hash).map_err(
             |error| {
@@ -239,8 +311,7 @@ pub async fn verify_monthly_digest(
             },
         )?;
 
-    // ── 5. chain 連続性を検証 ──
-    let final_head = match verify_ledger_chain(&entries, initial_head, &verification_keys) {
+    let final_head = match verify_ledger_chain(entries, initial_head, verification_keys) {
         Ok(head) => head,
         Err(error) => {
             let code = map_ledger_error_to_code(&error);
@@ -257,7 +328,6 @@ pub async fn verify_monthly_digest(
         }
     };
 
-    // ── 6. chain 末尾 hash と digest の end_entry_hash が一致するか確認 ──
     if final_head.last_entry_hash() != materials.end_entry_hash {
         tracing::warn!(
             request_id = %input.request_id.as_canonical_string(),
@@ -268,7 +338,16 @@ pub async fn verify_monthly_digest(
         return Err(VerifyMonthlyDigestError::EndHashMismatch);
     }
 
-    // ── 7. 公開鍵が存在するか確認 ──
+    Ok(())
+}
+
+/// 手順7-9: 公開鍵の存在確認、canonical bytes の hash 再計算、Ed25519 署名検証。
+fn verify_digest_hash_and_signature(
+    input: &VerifyMonthlyDigestInput,
+    materials: &MonthlyDigestVerificationMaterials,
+) -> Result<(), VerifyMonthlyDigestError> {
+    let period = &input.period;
+
     let public_key = match materials.public_key {
         Some(ref key) => key,
         None => {
@@ -282,7 +361,6 @@ pub async fn verify_monthly_digest(
         }
     };
 
-    // ── 8. canonical bytes を再構築し hash を再計算して比較 ──
     let canonical_bytes = build_monthly_digest_canonical_form(
         period,
         materials.start_sequence_no,
@@ -317,7 +395,6 @@ pub async fn verify_monthly_digest(
         return Err(VerifyMonthlyDigestError::DigestHashMismatch);
     }
 
-    // ── 9. digest canonical bytes に対する Ed25519 署名を検証 ──
     // sbc_signature は monthly_digest payload に保存された digest 専用署名であり、
     // ledger_entries.signature（ledger entry 自体の署名）ではない。
     if let Err(error) =
@@ -333,7 +410,17 @@ pub async fn verify_monthly_digest(
         return Err(VerifyMonthlyDigestError::DigestSignatureInvalid);
     }
 
-    // ── 10. 現在の range と digest の range を比較 ──
+    Ok(())
+}
+
+/// 手順10: 現在の range と digest の range を比較し、生成後の変更を検知する。
+async fn detect_range_modification(
+    supabase_client: &Arc<SupabaseClient>,
+    input: &VerifyMonthlyDigestInput,
+    materials: &MonthlyDigestVerificationMaterials,
+) -> Result<(), VerifyMonthlyDigestError> {
+    let period = &input.period;
+
     match supabase_client
         .fetch_ledger_range_for_month(period.as_str())
         .await
@@ -354,6 +441,7 @@ pub async fn verify_monthly_digest(
                 );
                 return Err(VerifyMonthlyDigestError::RangeModifiedAfterDigest);
             }
+            Ok(())
         }
         Ok(None) => {
             tracing::error!(
@@ -362,9 +450,9 @@ pub async fn verify_monthly_digest(
                 error_code = "monthly_digest_range_fetch_empty",
                 "current ledger range fetch returned no entries despite digest existing"
             );
-            return Err(VerifyMonthlyDigestError::FetchFailed {
+            Err(VerifyMonthlyDigestError::FetchFailed {
                 code: "monthly_digest_range_fetch_empty",
-            });
+            })
         }
         Err(error) => {
             tracing::error!(
@@ -374,26 +462,11 @@ pub async fn verify_monthly_digest(
                 error_code = "monthly_digest_range_fetch_failed",
                 "failed to fetch current ledger range for range change detection"
             );
-            return Err(VerifyMonthlyDigestError::FetchFailed {
+            Err(VerifyMonthlyDigestError::FetchFailed {
                 code: "monthly_digest_range_fetch_failed",
-            });
+            })
         }
     }
-
-    tracing::info!(
-        request_id = %input.request_id.as_canonical_string(),
-        period = period.as_str(),
-        start_sequence_no = materials.start_sequence_no.get(),
-        end_sequence_no = materials.end_sequence_no.get(),
-        entry_count = materials.stored_entry_count,
-        "monthly digest verified successfully"
-    );
-
-    Ok(VerifiedMonthlyDigestInfo {
-        start_sequence_no: materials.start_sequence_no,
-        end_sequence_no: materials.end_sequence_no,
-        entry_count: materials.stored_entry_count,
-    })
 }
 
 /// 月次 digest 検証失敗を `audit_events` に同期記録するヘルパー。

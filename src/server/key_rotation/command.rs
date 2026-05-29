@@ -2,14 +2,16 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::LedgerEntryType;
 use crate::audit::RequestId;
 use crate::crypto::{KeyWrapContext, unwrap_data_key, wrap_data_key};
 use crate::server::config::AppConfig;
 use crate::server::ledger_appender::LedgerAppender;
 use crate::server::supabase::SupabaseClient;
 use crate::types::KeyVersion;
-use crate::types::supabase::{EnvelopeMigrationStatus, KeyRotationApplyRow, KeyRotationStatus};
+use crate::types::supabase::{
+    EnvelopeMigrationStatus, KeyRotationApplyRow, KeyRotationBatchRow, KeyRotationStatus,
+};
+use crate::{LedgerEntryType, MasterKey};
 
 use super::KeyRotationCliError;
 use super::audit_event::{
@@ -235,33 +237,20 @@ pub(super) async fn rewrap(
         return Ok(());
     }
 
-    let mut apply_rows = Vec::with_capacity(batch_rows.len());
-    for row in batch_rows {
-        let parsed = parse_rotation_batch_row(row, old_key_version)?;
-        let old_context = KeyWrapContext::new(parsed.secret_id.clone(), old_key_version);
-        let data_key = unwrap_data_key(old_master_key, &old_context, &parsed.encrypted_data_key)
-            .map_err(|error| KeyRotationCliError::Crypto(error.to_string()))?;
-        let new_context = KeyWrapContext::new(parsed.secret_id, new_key_version);
-        let rewrapped = wrap_data_key(new_master_key, &new_context, &data_key)
-            .map_err(|error| KeyRotationCliError::Crypto(error.to_string()))?;
-
-        apply_rows.push(KeyRotationApplyRow {
-            id: parsed.id,
-            encrypted_data_key: encode_bytea(rewrapped.as_bytes()),
-        });
-    }
+    let apply_rows = rewrap_batch_rows(
+        old_master_key,
+        new_master_key,
+        old_key_version,
+        new_key_version,
+        batch_rows,
+    )?;
 
     let status_before_apply = supabase_client
         .call_key_rotation_status(old_key_version)
         .await?;
     let batch_size = u64::try_from(apply_rows.len())
         .map_err(|_| KeyRotationCliError::Config("rotation batch size is invalid".to_owned()))?;
-    let old_remaining = u64::try_from(status_before_apply.remaining_count).map_err(|_| {
-        KeyRotationCliError::Config("rotation remaining_count is invalid".to_owned())
-    })?;
-    let remaining_count = old_remaining.checked_sub(batch_size).ok_or_else(|| {
-        KeyRotationCliError::Config("rotation remaining_count is inconsistent".to_owned())
-    })?;
+    let remaining_count = compute_remaining_count(&status_before_apply, batch_size)?;
     let request_id =
         RequestId::generate().map_err(|error| KeyRotationCliError::Audit(error.to_string()))?;
     let event = build_key_rotation_reencrypt_event(
@@ -303,6 +292,45 @@ pub(super) async fn rewrap(
         new_key_version.get()
     );
     Ok(())
+}
+
+/// バッチ各行のデータ鍵を旧マスター鍵で復号し新マスター鍵で再ラップする。
+fn rewrap_batch_rows(
+    old_master_key: &MasterKey,
+    new_master_key: &MasterKey,
+    old_key_version: KeyVersion,
+    new_key_version: KeyVersion,
+    batch_rows: Vec<KeyRotationBatchRow>,
+) -> Result<Vec<KeyRotationApplyRow>, KeyRotationCliError> {
+    let mut apply_rows = Vec::with_capacity(batch_rows.len());
+    for row in batch_rows {
+        let parsed = parse_rotation_batch_row(row, old_key_version)?;
+        let old_context = KeyWrapContext::new(parsed.secret_id.clone(), old_key_version);
+        let data_key = unwrap_data_key(old_master_key, &old_context, &parsed.encrypted_data_key)
+            .map_err(|error| KeyRotationCliError::Crypto(error.to_string()))?;
+        let new_context = KeyWrapContext::new(parsed.secret_id, new_key_version);
+        let rewrapped = wrap_data_key(new_master_key, &new_context, &data_key)
+            .map_err(|error| KeyRotationCliError::Crypto(error.to_string()))?;
+
+        apply_rows.push(KeyRotationApplyRow {
+            id: parsed.id,
+            encrypted_data_key: encode_bytea(rewrapped.as_bytes()),
+        });
+    }
+    Ok(apply_rows)
+}
+
+/// 適用前の残数からバッチ件数を差し引いた残数を算出する。
+fn compute_remaining_count(
+    status_before_apply: &KeyRotationStatus,
+    batch_size: u64,
+) -> Result<u64, KeyRotationCliError> {
+    let old_remaining = u64::try_from(status_before_apply.remaining_count).map_err(|_| {
+        KeyRotationCliError::Config("rotation remaining_count is invalid".to_owned())
+    })?;
+    old_remaining.checked_sub(batch_size).ok_or_else(|| {
+        KeyRotationCliError::Config("rotation remaining_count is inconsistent".to_owned())
+    })
 }
 
 pub(super) async fn complete(

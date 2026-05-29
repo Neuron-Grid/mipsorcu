@@ -271,127 +271,77 @@ struct LedgerVerificationMaterialResponse {
     pk_retired_at: Option<String>,
 }
 
+/// `export ledger verification materials` RPC レスポンスの必須フィールド欠落エラー。
+fn null_field_error(field: &str) -> SupabaseRpcError {
+    SupabaseRpcError::InvalidResponse(format!(
+        "export ledger verification materials RPC returned null {field}"
+    ))
+}
+
+/// `export ledger verification materials` RPC レスポンスの値不正エラー。
+fn invalid_field_error(field: &str) -> SupabaseRpcError {
+    SupabaseRpcError::InvalidResponse(format!(
+        "export ledger verification materials RPC returned invalid {field}"
+    ))
+}
+
+/// null 不可フィールドの presence を検証する。
+fn require<T>(value: Option<T>, field: &str) -> Result<T, SupabaseRpcError> {
+    value.ok_or_else(|| null_field_error(field))
+}
+
+/// null 不可な bytea hex フィールドを `LedgerHash` にデコードする。
+fn parse_required_hash(raw: Option<String>, field: &str) -> Result<LedgerHash, SupabaseRpcError> {
+    let raw = require(raw, field)?;
+    LedgerHash::from_bytea_hex(&raw).map_err(|_| invalid_field_error(field))
+}
+
+/// 公開鍵フィールドの整合性（pk_public_key があれば pk_key_version も必須）を検証する。
+fn validate_public_key_consistency(
+    response: &LedgerVerificationMaterialResponse,
+) -> Result<(), SupabaseRpcError> {
+    if response.pk_public_key.is_some() && response.pk_key_version.is_none() {
+        return Err(SupabaseRpcError::InvalidResponse(
+            "export ledger verification materials RPC returned pk_public_key without pk_key_version"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 impl TryFrom<LedgerVerificationMaterialResponse> for LedgerVerificationMaterialRow {
     type Error = SupabaseRpcError;
 
     fn try_from(response: LedgerVerificationMaterialResponse) -> Result<Self, Self::Error> {
-        let ledger_entry_id = LedgerEntryId::parse(&response.ledger_entry_id).map_err(|_| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned invalid ledger_entry_id"
-                    .to_owned(),
-            )
-        })?;
-        let sequence_no = LedgerSequenceNo::from_i64(response.sequence_no).map_err(|_| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned invalid sequence_no".to_owned(),
-            )
-        })?;
+        validate_public_key_consistency(&response)?;
 
-        let entry_hash_raw = response.entry_hash.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null entry_hash".to_owned(),
-            )
-        })?;
-        let entry_hash = LedgerHash::from_bytea_hex(&entry_hash_raw).map_err(|_| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned invalid entry_hash".to_owned(),
-            )
-        })?;
+        let ledger_entry_id = LedgerEntryId::parse(&response.ledger_entry_id)
+            .map_err(|_| invalid_field_error("ledger_entry_id"))?;
+        let sequence_no = LedgerSequenceNo::from_i64(response.sequence_no)
+            .map_err(|_| invalid_field_error("sequence_no"))?;
 
-        let previous_entry_hash_raw = response.previous_entry_hash.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null previous_entry_hash"
-                    .to_owned(),
-            )
-        })?;
+        let entry_hash = parse_required_hash(response.entry_hash, "entry_hash")?;
         let previous_entry_hash =
-            LedgerHash::from_bytea_hex(&previous_entry_hash_raw).map_err(|_| {
-                SupabaseRpcError::InvalidResponse(
-                    "export ledger verification materials RPC returned invalid previous_entry_hash"
-                        .to_owned(),
-                )
-            })?;
+            parse_required_hash(response.previous_entry_hash, "previous_entry_hash")?;
 
-        let signature_raw = response.signature.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null signature".to_owned(),
-            )
-        })?;
-        let signature = LedgerSignature::from_bytea_hex(&signature_raw).map_err(|_| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned invalid signature".to_owned(),
-            )
-        })?;
+        let signature_raw = require(response.signature, "signature")?;
+        let signature = LedgerSignature::from_bytea_hex(&signature_raw)
+            .map_err(|_| invalid_field_error("signature"))?;
 
-        let signature_key_version_raw = response.signature_key_version.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null signature_key_version"
-                    .to_owned(),
-            )
-        })?;
-        let signature_key_version =
-            LedgerSignatureKeyVersion::new(signature_key_version_raw as u32).map_err(|_| {
-                SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned invalid signature_key_version"
-                    .to_owned(),
-            )
-            })?;
+        let signature_key_version_raw =
+            require(response.signature_key_version, "signature_key_version")?;
+        let signature_key_version = LedgerSignatureKeyVersion::new(signature_key_version_raw as u32)
+            .map_err(|_| invalid_field_error("signature_key_version"))?;
 
-        let entry_type = response.entry_type.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null entry_type".to_owned(),
-            )
-        })?;
-
-        let source_event_at = response.source_event_at.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null source_event_at".to_owned(),
-            )
-        })?;
-
-        let request_id = response.request_id.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null request_id".to_owned(),
-            )
-        })?;
-
-        let result = response.result.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null result".to_owned(),
-            )
-        })?;
-
-        let payload = response.payload.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null payload".to_owned(),
-            )
-        })?;
-
-        let canonicalization_version = response.canonicalization_version.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null canonicalization_version"
-                    .to_owned(),
-            )
-        })?;
-
-        let hash_algorithm = response.hash_algorithm.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null hash_algorithm".to_owned(),
-            )
-        })?;
-
-        let signature_algorithm = response.signature_algorithm.ok_or_else(|| {
-            SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned null signature_algorithm"
-                    .to_owned(),
-            )
-        })?;
-
-        if response.pk_public_key.is_some() && response.pk_key_version.is_none() {
-            return Err(SupabaseRpcError::InvalidResponse(
-                "export ledger verification materials RPC returned pk_public_key without pk_key_version".to_owned(),
-            ));
-        }
+        let entry_type = require(response.entry_type, "entry_type")?;
+        let source_event_at = require(response.source_event_at, "source_event_at")?;
+        let request_id = require(response.request_id, "request_id")?;
+        let result = require(response.result, "result")?;
+        let payload = require(response.payload, "payload")?;
+        let canonicalization_version =
+            require(response.canonicalization_version, "canonicalization_version")?;
+        let hash_algorithm = require(response.hash_algorithm, "hash_algorithm")?;
+        let signature_algorithm = require(response.signature_algorithm, "signature_algorithm")?;
 
         Ok(Self {
             ledger_entry_id,
