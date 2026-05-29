@@ -1,5 +1,6 @@
 mod ids;
 mod secret_material;
+mod secret_string;
 pub mod supabase;
 mod time;
 
@@ -13,4 +14,5 @@ pub use secret_material::{
     ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KekAlgorithm, MASTER_KEY_LENGTH, MasterKey,
     NONCE_LENGTH, Nonce, Plaintext, WrappedDek,
 };
+pub use secret_string::{SecretString, SecretStringError};
 pub use time::{CreatedAt, SourceEventAt};

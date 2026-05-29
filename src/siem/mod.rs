@@ -14,7 +14,9 @@ pub mod buffer;
 pub mod dummy;
 pub mod event;
 pub mod forwarder;
+pub mod otlp;
 pub mod sink;
+pub mod splunk_hec;
 
 pub use buffer::{LocalSiemBufferError, LocalSiemFallbackBuffer};
 pub use dummy::{FailingSiemSink, InMemorySiemSink};
@@ -23,4 +25,6 @@ pub use forwarder::{
     SiemForwardOutcome, SiemForwarder, SiemForwarderStatus, SiemResendSummary,
     build_siem_forward_failure_audit_event,
 };
-pub use sink::{SiemSink, SiemSinkError};
+pub use otlp::OtlpSiemSink;
+pub use sink::{AnySiemSink, SiemSink, SiemSinkError};
+pub use splunk_hec::SplunkHecSiemSink;

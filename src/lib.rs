@@ -121,7 +121,8 @@ pub use types::{
     ENCRYPTED_DATA_KEY_CIPHERTEXT_LENGTH, ENCRYPTED_DATA_KEY_LENGTH, ENCRYPTED_DATA_KEY_TAG_LENGTH,
     ENCRYPTED_DATA_KEY_VERSION, EncryptedDataKey, KekAlgorithm, KekVersion, KeyVersion,
     MASTER_KEY_LENGTH, MasterKey, NONCE_LENGTH, Nonce, OwnerUserId, Plaintext, SecretAliasId,
-    SecretId, SecretRef, SecretVersion, SecretVersionId, SourceEventAt, WrappedDek,
+    SecretId, SecretRef, SecretString, SecretStringError, SecretVersion, SecretVersionId,
+    SourceEventAt, WrappedDek,
 };
 pub use write::{
     CurrentSecretVersionState, ExistingSecretVersionInput, NewSecretVersionInput,

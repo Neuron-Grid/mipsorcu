@@ -19,7 +19,9 @@ use super::constants::{
     ENV_INTEGRITY_CHECK_STARTUP_DELAY_SECONDS, ENV_JWKS_REFRESH_INTERVAL_SECONDS, ENV_JWKS_URL,
     ENV_JWT_AUDIENCE, ENV_JWT_ISSUER, ENV_LISTEN_ADDR, ENV_OUTBOUND_HTTP_CONNECT_TIMEOUT_SECONDS,
     ENV_OUTBOUND_HTTP_REQUEST_TIMEOUT_SECONDS, ENV_RESTORE_TEST_INTERVAL_SECONDS,
-    ENV_RESTORE_TEST_SAMPLE_LIMIT, ENV_RESTORE_TEST_STARTUP_DELAY_SECONDS, ENV_SCHEDULER_ENABLED,
+    ENV_RESTORE_TEST_SAMPLE_LIMIT, ENV_RESTORE_TEST_STARTUP_DELAY_SECONDS,
+    ENV_SCHEDULER_DAILY_HOUR_UTC, ENV_SCHEDULER_ENABLED,
+    ENV_SCHEDULER_ENVELOPE_MIGRATION_BATCH_SIZE, ENV_SCHEDULER_ENVELOPE_MIGRATION_MAX_BATCHES,
     ENV_SCHEDULER_LOCAL_ARCHIVE_DIR, ENV_SCHEDULER_MONTHLY_DAY, ENV_SCHEDULER_MONTHLY_HOUR_UTC,
     ENV_SCHEDULER_POLL_INTERVAL_SECONDS, ENV_SCHEDULER_QUARTERLY_HOUR_UTC,
     ENV_SCHEDULER_STARTUP_DELAY_SECONDS, ENV_SIEM_BUFFER_PATH,
@@ -41,11 +43,14 @@ use super::operational_checks::{
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
 };
 use super::scheduler::{
-    parse_scheduler_enabled, parse_scheduler_monthly_day, parse_scheduler_monthly_hour_utc,
-    parse_scheduler_poll_interval, parse_scheduler_quarterly_hour_utc,
-    parse_scheduler_startup_delay,
+    parse_scheduler_daily_hour_utc, parse_scheduler_enabled,
+    parse_scheduler_envelope_migration_batch_size, parse_scheduler_envelope_migration_max_batches,
+    parse_scheduler_monthly_day, parse_scheduler_monthly_hour_utc, parse_scheduler_poll_interval,
+    parse_scheduler_quarterly_hour_utc, parse_scheduler_startup_delay,
 };
-use super::siem::{parse_siem_long_failure_threshold, parse_siem_resend_interval};
+use super::siem::{
+    parse_siem_exporter_config, parse_siem_long_failure_threshold, parse_siem_resend_interval,
+};
 use crate::{AliasEncryptionKey, AliasFingerprintKey};
 
 pub fn load_config() -> Result<AppConfig, ConfigError> {
@@ -158,6 +163,9 @@ where
         dotenv,
         get_process_var,
     ))?;
+    let siem_exporter = parse_siem_exporter_config(dotenv, get_process_var)?;
+    let incident_notifier =
+        super::incident::parse_incident_notifier_config(dotenv, get_process_var)?;
     let audit_fallback_alert_threshold_bytes = parse_audit_fallback_alert_threshold(optional_var(
         ENV_AUDIT_FALLBACK_ALERT_THRESHOLD_BYTES,
         dotenv,
@@ -232,6 +240,23 @@ where
         dotenv,
         get_process_var,
     ))?;
+    let scheduler_daily_hour_utc = parse_scheduler_daily_hour_utc(optional_var(
+        ENV_SCHEDULER_DAILY_HOUR_UTC,
+        dotenv,
+        get_process_var,
+    ))?;
+    let scheduler_envelope_migration_batch_size =
+        parse_scheduler_envelope_migration_batch_size(optional_var(
+            ENV_SCHEDULER_ENVELOPE_MIGRATION_BATCH_SIZE,
+            dotenv,
+            get_process_var,
+        ))?;
+    let scheduler_envelope_migration_max_batches =
+        parse_scheduler_envelope_migration_max_batches(optional_var(
+            ENV_SCHEDULER_ENVELOPE_MIGRATION_MAX_BATCHES,
+            dotenv,
+            get_process_var,
+        ))?;
     let scheduler_local_archive_dir = PathBuf::from(
         optional_var(ENV_SCHEDULER_LOCAL_ARCHIVE_DIR, dotenv, get_process_var)
             .unwrap_or_else(|| DEFAULT_SCHEDULER_LOCAL_ARCHIVE_DIR.to_owned()),
@@ -260,6 +285,8 @@ where
         http_rate_limit_window,
         audit_fallback_path,
         siem_buffer_path,
+        siem_exporter,
+        incident_notifier,
         audit_resend_interval,
         siem_resend_interval,
         siem_long_failure_threshold,
@@ -279,6 +306,9 @@ where
         scheduler_monthly_day,
         scheduler_monthly_hour_utc,
         scheduler_quarterly_hour_utc,
+        scheduler_daily_hour_utc,
+        scheduler_envelope_migration_batch_size,
+        scheduler_envelope_migration_max_batches,
         scheduler_local_archive_dir,
     })
 }

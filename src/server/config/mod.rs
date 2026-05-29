@@ -3,6 +3,7 @@ mod constants;
 mod env;
 mod error;
 mod http;
+mod incident;
 mod keyring;
 mod ledger_signing;
 mod load;
@@ -24,6 +25,7 @@ pub use http::{
     parse_http_rate_limit_requests, parse_http_rate_limit_window, parse_jwks_refresh_interval,
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
 };
+pub use incident::{IncidentNotifierConfig, parse_incident_notifier_config};
 pub use load::{load_config, load_config_from_sources};
 pub use model::AppConfig;
 pub use operational_checks::{
@@ -35,4 +37,7 @@ pub use scheduler::{
     parse_scheduler_poll_interval, parse_scheduler_quarterly_hour_utc,
     parse_scheduler_startup_delay,
 };
-pub use siem::{parse_siem_long_failure_threshold, parse_siem_resend_interval};
+pub use siem::{
+    SiemExporterConfig, parse_siem_exporter_config, parse_siem_long_failure_threshold,
+    parse_siem_resend_interval,
+};

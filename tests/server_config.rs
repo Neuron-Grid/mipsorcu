@@ -904,6 +904,8 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         http_rate_limit_window: Duration::from_secs(10),
         audit_fallback_path: PathBuf::from("/tmp/mipsorcu-audit.jsonl"),
         siem_buffer_path: PathBuf::from("/tmp/mipsorcu-siem.jsonl"),
+        siem_exporter: mipsorcu::server::config::SiemExporterConfig::Disabled,
+        incident_notifier: mipsorcu::server::config::IncidentNotifierConfig::Disabled,
         audit_resend_interval: Duration::from_secs(60),
         siem_resend_interval: Duration::from_secs(61),
         siem_long_failure_threshold: Duration::from_secs(900),
@@ -923,6 +925,9 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         scheduler_monthly_day: 1,
         scheduler_monthly_hour_utc: 3,
         scheduler_quarterly_hour_utc: 4,
+        scheduler_daily_hour_utc: 4,
+        scheduler_envelope_migration_batch_size: 100,
+        scheduler_envelope_migration_max_batches: 10,
         scheduler_local_archive_dir: PathBuf::from("/tmp/mipsorcu-scheduler-archive"),
     };
 

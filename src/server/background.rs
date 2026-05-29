@@ -9,12 +9,12 @@ use crate::audit::{
     LocalAuditStoreError, ResendAuditSummary, RolloverOutcome,
 };
 use crate::auth::{JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, fetch_jwks};
-use crate::incident::{DummyNotificationSink, IncidentRecordInput, IncidentRecorder, IncidentType};
+use crate::incident::{AnyNotificationSink, IncidentRecordInput, IncidentRecorder, IncidentType};
 use crate::server::siem_forwarding::SiemForwardingService;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::{integrity_check, restore_test};
-use crate::siem::InMemorySiemSink;
+use crate::siem::AnySiemSink;
 
 const AUDIT_ARCHIVE_SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -230,8 +230,8 @@ pub(crate) async fn run_audit_resend_loop(
 }
 
 pub(crate) async fn run_siem_resend_loop(
-    siem_forwarding: Arc<SiemForwardingService<InMemorySiemSink>>,
-    incident_recorder: Arc<IncidentRecorder<DummyNotificationSink>>,
+    siem_forwarding: Arc<SiemForwardingService<AnySiemSink>>,
+    incident_recorder: Arc<IncidentRecorder<AnyNotificationSink>>,
     interval_duration: Duration,
     long_failure_threshold: Duration,
     mut shutdown_receiver: watch::Receiver<bool>,
@@ -270,8 +270,8 @@ pub(crate) async fn run_siem_resend_loop(
 
 async fn record_siem_resend_result(
     summary: crate::siem::SiemResendSummary,
-    siem_forwarding: &SiemForwardingService<InMemorySiemSink>,
-    incident_recorder: &IncidentRecorder<DummyNotificationSink>,
+    siem_forwarding: &SiemForwardingService<AnySiemSink>,
+    incident_recorder: &IncidentRecorder<AnyNotificationSink>,
     long_failure_threshold: Duration,
 ) {
     if summary.attempted > 0 {

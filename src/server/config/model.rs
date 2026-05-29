@@ -7,6 +7,8 @@ use crate::ledger::LedgerSigningKey;
 use crate::{AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MasterKeyRing};
 
 use super::constants::SECONDS_PER_DAY;
+use super::incident::IncidentNotifierConfig;
+use super::siem::SiemExporterConfig;
 
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
@@ -31,6 +33,8 @@ pub struct AppConfig {
     pub http_rate_limit_window: Duration,
     pub audit_fallback_path: PathBuf,
     pub siem_buffer_path: PathBuf,
+    pub siem_exporter: SiemExporterConfig,
+    pub incident_notifier: IncidentNotifierConfig,
     pub audit_resend_interval: Duration,
     pub siem_resend_interval: Duration,
     pub siem_long_failure_threshold: Duration,
@@ -50,6 +54,9 @@ pub struct AppConfig {
     pub scheduler_monthly_day: u8,
     pub scheduler_monthly_hour_utc: u8,
     pub scheduler_quarterly_hour_utc: u8,
+    pub scheduler_daily_hour_utc: u8,
+    pub scheduler_envelope_migration_batch_size: u32,
+    pub scheduler_envelope_migration_max_batches: u32,
     pub scheduler_local_archive_dir: PathBuf,
 }
 
@@ -103,6 +110,8 @@ impl fmt::Debug for AppConfig {
             )
             .field("audit_fallback_path", &self.audit_fallback_path)
             .field("siem_buffer_path", &self.siem_buffer_path)
+            .field("siem_exporter", &self.siem_exporter)
+            .field("incident_notifier", &self.incident_notifier)
             .field(
                 "audit_resend_interval_seconds",
                 &self.audit_resend_interval.as_secs(),
@@ -169,6 +178,15 @@ impl fmt::Debug for AppConfig {
             .field(
                 "scheduler_quarterly_hour_utc",
                 &self.scheduler_quarterly_hour_utc,
+            )
+            .field("scheduler_daily_hour_utc", &self.scheduler_daily_hour_utc)
+            .field(
+                "scheduler_envelope_migration_batch_size",
+                &self.scheduler_envelope_migration_batch_size,
+            )
+            .field(
+                "scheduler_envelope_migration_max_batches",
+                &self.scheduler_envelope_migration_max_batches,
             )
             .field(
                 "scheduler_local_archive_dir",

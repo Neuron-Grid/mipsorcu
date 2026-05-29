@@ -11,7 +11,7 @@ use crate::server::audit_reporter::{self, IntegrityCheckAudit};
 use crate::server::config::AppConfig;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
-use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
+use crate::siem::{AnySiemSink, InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
 use crate::types::supabase::IntegrityCheckSummary;
 use crate::{AuditRecorder, LocalAuditFallbackStore};
 
@@ -272,11 +272,11 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
     let incident_recorder = Arc::new(IncidentRecorder::new(
         supabase_client.clone(),
         ledger_appender.clone(),
-        DummyNotificationSink::new(),
+        crate::incident::AnyNotificationSink::Dummy(DummyNotificationSink::new()),
     ));
     let readiness_state = ReadinessState::new();
     let siem_forwarder = SiemForwarder::new(
-        InMemorySiemSink::new(),
+        AnySiemSink::InMemory(InMemorySiemSink::new()),
         LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone()),
     );
     let siem_forwarding = Arc::new(crate::server::siem_forwarding::SiemForwardingService::new(

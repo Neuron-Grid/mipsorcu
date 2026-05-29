@@ -5,8 +5,8 @@ use time::OffsetDateTime;
 
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::JwtVerifier;
-use crate::incident::{DummyNotificationSink, IncidentRecorder};
-use crate::siem::InMemorySiemSink;
+use crate::incident::{AnyNotificationSink, IncidentRecorder};
+use crate::siem::AnySiemSink;
 use crate::{AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MasterKeyRing};
 
 use super::ledger_appender::LedgerAppender;
@@ -24,8 +24,8 @@ pub struct AppState {
     pub supabase_client: Arc<SupabaseClient>,
     pub audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
     pub ledger_appender: Arc<LedgerAppender>,
-    pub incident_recorder: Arc<IncidentRecorder<DummyNotificationSink>>,
-    pub siem_forwarding: Arc<SiemForwardingService<InMemorySiemSink>>,
+    pub incident_recorder: Arc<IncidentRecorder<AnyNotificationSink>>,
+    pub siem_forwarding: Arc<SiemForwardingService<AnySiemSink>>,
     pub audit_fallback_store: LocalAuditFallbackStore,
     pub readiness_state: ReadinessState,
     pub health_readiness_poll_interval: Duration,

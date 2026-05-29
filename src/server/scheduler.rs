@@ -30,8 +30,11 @@ use crate::server::use_cases::export_digest_to_archive::export_digest_to_archive
 use crate::server::use_cases::generate_monthly_digest::{
     GenerateMonthlyDigestInput, generate_monthly_digest, record_monthly_digest_failure_audit,
 };
+use crate::server::use_cases::request_timestamping_for_digest::request_timestamping_for_digest_with_incident;
+use crate::timestamping::InMemoryTimestampingService;
 use crate::types::SourceEventAt;
 
+use super::key_rotation::envelope_migration::run_scheduled_envelope_migration;
 use super::restore_test;
 
 #[derive(Debug, Clone)]
@@ -41,6 +44,9 @@ pub struct SchedulerConfig {
     pub monthly_day: u8,
     pub monthly_hour_utc: u8,
     pub quarterly_hour_utc: u8,
+    pub daily_hour_utc: u8,
+    pub envelope_migration_batch_size: u32,
+    pub envelope_migration_max_batches: u32,
     pub restore_test_sample_limit: u32,
     pub local_archive_dir: std::path::PathBuf,
 }
@@ -51,6 +57,8 @@ enum ScheduledJobName {
     LedgerSignatureFullVerify,
     MonthlyDigestGenerate,
     ArchiveExport,
+    MonthlyTimestampingObtain,
+    DailyEnvelopeLazyMigration,
     RestoreTest,
     SignatureKeyReviewReminder,
     AuditorPermissionReviewReminder,
@@ -63,6 +71,8 @@ impl ScheduledJobName {
             Self::LedgerSignatureFullVerify => "ledger_signature_full_verify",
             Self::MonthlyDigestGenerate => "monthly_digest_generate",
             Self::ArchiveExport => "archive_export",
+            Self::MonthlyTimestampingObtain => "monthly_timestamping_obtain",
+            Self::DailyEnvelopeLazyMigration => "daily_envelope_lazy_migration",
             Self::RestoreTest => "restore_test",
             Self::SignatureKeyReviewReminder => "signature_key_review_reminder",
             Self::AuditorPermissionReviewReminder => "auditor_permission_review_reminder",
@@ -112,6 +122,8 @@ struct SchedulerRuntimeState {
     signature_lock: JobLock,
     digest_lock: JobLock,
     archive_lock: JobLock,
+    timestamping_lock: JobLock,
+    envelope_migration_lock: JobLock,
     restore_lock: JobLock,
     signature_review_lock: JobLock,
     auditor_review_lock: JobLock,
@@ -125,6 +137,8 @@ impl SchedulerRuntimeState {
             signature_lock: JobLock::new(),
             digest_lock: JobLock::new(),
             archive_lock: JobLock::new(),
+            timestamping_lock: JobLock::new(),
+            envelope_migration_lock: JobLock::new(),
             restore_lock: JobLock::new(),
             signature_review_lock: JobLock::new(),
             auditor_review_lock: JobLock::new(),
@@ -137,6 +151,8 @@ impl SchedulerRuntimeState {
             ScheduledJobName::LedgerSignatureFullVerify => &self.signature_lock,
             ScheduledJobName::MonthlyDigestGenerate => &self.digest_lock,
             ScheduledJobName::ArchiveExport => &self.archive_lock,
+            ScheduledJobName::MonthlyTimestampingObtain => &self.timestamping_lock,
+            ScheduledJobName::DailyEnvelopeLazyMigration => &self.envelope_migration_lock,
             ScheduledJobName::RestoreTest => &self.restore_lock,
             ScheduledJobName::SignatureKeyReviewReminder => &self.signature_review_lock,
             ScheduledJobName::AuditorPermissionReviewReminder => &self.auditor_review_lock,
@@ -341,10 +357,37 @@ async fn run_due_jobs(
             job_name: ScheduledJobName::ArchiveExport,
             period_key: archive_period.as_str().to_owned(),
         };
+        let timestamping_digest = signed_digest.clone();
         let _ = run_once_per_period(
             runtime_state,
             key,
             run_archive_export_job(state, config, signed_digest),
+        )
+        .await;
+
+        let timestamping_period = timestamping_digest.period.clone();
+        let key = JobRunKey {
+            job_name: ScheduledJobName::MonthlyTimestampingObtain,
+            period_key: timestamping_period.as_str().to_owned(),
+        };
+        let _ = run_once_per_period(
+            runtime_state,
+            key,
+            run_monthly_timestamping_obtain_job(state, timestamping_digest),
+        )
+        .await;
+    }
+
+    if daily_due(now, config.daily_hour_utc) {
+        let daily_key = daily_period_key(now);
+        let key = JobRunKey {
+            job_name: ScheduledJobName::DailyEnvelopeLazyMigration,
+            period_key: daily_key,
+        };
+        let _ = run_once_per_period(
+            runtime_state,
+            key,
+            run_daily_envelope_lazy_migration_job(state, config),
         )
         .await;
     }
@@ -761,6 +804,123 @@ async fn run_archive_export_job(
     Ok(())
 }
 
+async fn run_monthly_timestamping_obtain_job(
+    state: &AppState,
+    signed_digest: SignedMonthlyDigest,
+) -> Result<(), &'static str> {
+    let started_at = Instant::now();
+    let period = signed_digest.period.clone();
+    let request_id = RequestId::generate().map_err(|_| "scheduler_request_id_failed")?;
+    let requested_at = SourceEventAt::now_utc().map_err(|_| "scheduler_source_event_at_failed")?;
+    let service = InMemoryTimestampingService::new();
+    let outcome = request_timestamping_for_digest_with_incident(
+        &service,
+        &state.audit_recorder,
+        &state.ledger_appender,
+        state.incident_recorder.as_ref(),
+        &signed_digest,
+        request_id,
+        requested_at,
+    )
+    .await;
+    let (result, error_code): (AuditResult, Option<&'static str>) = match outcome {
+        Ok(_) => (AuditResult::Success, None),
+        Err(_) => (
+            AuditResult::Failure,
+            Some("monthly_timestamping_obtain_failed"),
+        ),
+    };
+    record_scheduler_job_result(
+        state,
+        ScheduledJobName::MonthlyTimestampingObtain,
+        result,
+        error_code,
+        Some(period),
+        elapsed_ms(started_at),
+    )
+    .await?;
+    if result == AuditResult::Success {
+        Ok(())
+    } else {
+        Err(error_code.unwrap_or("monthly_timestamping_obtain_failed"))
+    }
+}
+
+async fn run_daily_envelope_lazy_migration_job(
+    state: &AppState,
+    config: &SchedulerConfig,
+) -> Result<(), &'static str> {
+    let started_at = Instant::now();
+    let outcome = run_scheduled_envelope_migration(
+        state.supabase_client.clone(),
+        state.ledger_appender.clone(),
+        state.master_key_ring.clone(),
+        config.envelope_migration_batch_size,
+        config.envelope_migration_max_batches,
+    )
+    .await;
+
+    let (result, error_code): (AuditResult, Option<&'static str>) = match &outcome {
+        Ok(summary) => {
+            tracing::info!(
+                job_name = ScheduledJobName::DailyEnvelopeLazyMigration.as_str(),
+                selected_count = summary.selected_count,
+                success_count = summary.success_count,
+                failure_count = summary.failure_count,
+                remaining_legacy_rows = summary.remaining_legacy_rows,
+                batches_executed = summary.batches_executed,
+                "daily envelope lazy migration completed"
+            );
+            if summary.failure_count == 0 {
+                (AuditResult::Success, None)
+            } else {
+                (
+                    AuditResult::Failure,
+                    Some("envelope_migration_partial_failure"),
+                )
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                job_name = ScheduledJobName::DailyEnvelopeLazyMigration.as_str(),
+                error = %error,
+                "daily envelope lazy migration failed"
+            );
+            (
+                AuditResult::Failure,
+                Some(map_envelope_migration_error(error)),
+            )
+        }
+    };
+
+    let _ = outcome;
+    record_scheduler_job_result(
+        state,
+        ScheduledJobName::DailyEnvelopeLazyMigration,
+        result,
+        error_code,
+        None,
+        elapsed_ms(started_at),
+    )
+    .await?;
+    if result == AuditResult::Success {
+        Ok(())
+    } else {
+        Err(error_code.unwrap_or("envelope_migration_failed"))
+    }
+}
+
+fn map_envelope_migration_error(error: &super::key_rotation::KeyRotationCliError) -> &'static str {
+    use super::key_rotation::KeyRotationCliError;
+    match error {
+        KeyRotationCliError::Config(_) => "envelope_migration_config_invalid",
+        KeyRotationCliError::Supabase(_) => "envelope_migration_supabase_failed",
+        KeyRotationCliError::Audit(_) => "envelope_migration_audit_failed",
+        KeyRotationCliError::Crypto(_) => "envelope_migration_crypto_failed",
+        KeyRotationCliError::Usage(_) => "envelope_migration_failed",
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LedgerVerificationSummary {
     pub(crate) valid: bool,
@@ -1157,6 +1317,19 @@ fn quarterly_due(now: OffsetDateTime, monthly_day: u8, quarterly_hour_utc: u8) -
         && now.hour() >= quarterly_hour_utc
 }
 
+fn daily_due(now: OffsetDateTime, daily_hour_utc: u8) -> bool {
+    now.hour() >= daily_hour_utc
+}
+
+fn daily_period_key(now: OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}",
+        now.year(),
+        u8::from(now.month()),
+        now.day(),
+    )
+}
+
 fn previous_month_period(
     now: OffsetDateTime,
 ) -> Result<MonthlyDigestPeriod, crate::ledger::LedgerError> {
@@ -1206,6 +1379,83 @@ mod tests {
         assert!(quarterly_due(dt(2026, Month::April, 1, 4), 1, 4));
         assert!(!quarterly_due(dt(2026, Month::May, 1, 4), 1, 4));
         assert!(!quarterly_due(dt(2026, Month::April, 1, 3), 1, 4));
+    }
+
+    #[test]
+    fn daily_due_respects_hour_boundary() {
+        assert!(!daily_due(dt(2026, Month::June, 1, 3), 4));
+        assert!(daily_due(dt(2026, Month::June, 1, 4), 4));
+        assert!(daily_due(dt(2026, Month::June, 1, 5), 4));
+        assert!(daily_due(dt(2026, Month::June, 1, 23), 4));
+    }
+
+    #[test]
+    fn daily_period_key_encodes_year_month_day() {
+        assert_eq!(daily_period_key(dt(2026, Month::June, 1, 4)), "2026-06-01");
+        assert_eq!(
+            daily_period_key(dt(2025, Month::December, 31, 23)),
+            "2025-12-31"
+        );
+    }
+
+    #[test]
+    fn scheduled_job_name_includes_new_v02_jobs() {
+        assert_eq!(
+            ScheduledJobName::MonthlyTimestampingObtain.as_str(),
+            "monthly_timestamping_obtain"
+        );
+        assert_eq!(
+            ScheduledJobName::DailyEnvelopeLazyMigration.as_str(),
+            "daily_envelope_lazy_migration"
+        );
+    }
+
+    #[test]
+    fn scheduler_runtime_state_assigns_distinct_locks_for_new_jobs() {
+        let runtime_state = SchedulerRuntimeState::new();
+        let timestamping_lock_ptr = std::ptr::from_ref::<JobLock>(
+            runtime_state.lock_for(ScheduledJobName::MonthlyTimestampingObtain),
+        );
+        let envelope_lock_ptr = std::ptr::from_ref::<JobLock>(
+            runtime_state.lock_for(ScheduledJobName::DailyEnvelopeLazyMigration),
+        );
+        let archive_lock_ptr =
+            std::ptr::from_ref::<JobLock>(runtime_state.lock_for(ScheduledJobName::ArchiveExport));
+        assert_ne!(timestamping_lock_ptr, envelope_lock_ptr);
+        assert_ne!(timestamping_lock_ptr, archive_lock_ptr);
+        assert_ne!(envelope_lock_ptr, archive_lock_ptr);
+    }
+
+    #[tokio::test]
+    async fn run_once_per_period_marks_new_jobs_distinctly() {
+        let mut runtime_state = SchedulerRuntimeState::new();
+        let timestamping_key = JobRunKey {
+            job_name: ScheduledJobName::MonthlyTimestampingObtain,
+            period_key: "2026-05".to_owned(),
+        };
+        let envelope_key = JobRunKey {
+            job_name: ScheduledJobName::DailyEnvelopeLazyMigration,
+            period_key: "2026-05-29".to_owned(),
+        };
+
+        let first = run_once_per_period(&mut runtime_state, timestamping_key.clone(), async {
+            Ok::<_, &str>("ok")
+        })
+        .await;
+        let second = run_once_per_period(&mut runtime_state, envelope_key.clone(), async {
+            Ok::<_, &str>("ok")
+        })
+        .await;
+        let third = run_once_per_period(&mut runtime_state, timestamping_key.clone(), async {
+            Ok::<_, &str>("ok")
+        })
+        .await;
+
+        assert_eq!(first, Ok(Some("ok")));
+        assert_eq!(second, Ok(Some("ok")));
+        assert_eq!(third, Ok(None));
+        assert!(runtime_state.completed.contains(&timestamping_key));
+        assert!(runtime_state.completed.contains(&envelope_key));
     }
 
     #[test]

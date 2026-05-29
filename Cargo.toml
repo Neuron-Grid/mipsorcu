@@ -33,3 +33,4 @@ fs4 = "1.1.0"
 [dev-dependencies]
 proptest = "1.11.0"
 tokio = { version = "1", features = ["test-util"] }
+wiremock = "0.6"

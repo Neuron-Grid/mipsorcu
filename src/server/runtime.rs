@@ -6,14 +6,19 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::{JwksCache, JwtVerifier, JwtVerifierConfig, fetch_jwks};
-use crate::incident::{DummyNotificationSink, IncidentRecorder};
+use crate::incident::{
+    AnyNotificationSink, DummyNotificationSink, IncidentRecorder, WebhookNotificationSink,
+};
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::{
     audit_report, auditor, background, config, digest, integrity_check, key_rotation, restore_test,
     router, scheduler, signature_key,
 };
-use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
+use crate::siem::{
+    AnySiemSink, InMemorySiemSink, LocalSiemFallbackBuffer, OtlpSiemSink, SiemForwarder,
+    SplunkHecSiemSink,
+};
 
 pub use crate::server::background::{
     AuditFallbackSizeAlert, JwtVerifierInitError, audit_fallback_file_size,
@@ -189,6 +194,16 @@ async fn run_server_with_config(config: config::AppConfig) {
         shutdown_sender.subscribe(),
     ));
 
+    let siem_buffer = LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone());
+    let siem_sink = build_siem_sink(&config, http_client.clone()).unwrap_or_else(|error| {
+        tracing::error!(error = %error, "SIEM exporter initialization failed");
+        std::process::exit(1);
+    });
+    let notification_sink =
+        build_notification_sink(&config, http_client.clone()).unwrap_or_else(|error| {
+            tracing::error!(error = %error, "incident notification sink initialization failed");
+            std::process::exit(1);
+        });
     let supabase_client = Arc::new(SupabaseClient::new(
         http_client,
         config.supabase_url,
@@ -220,10 +235,9 @@ async fn run_server_with_config(config: config::AppConfig) {
     let incident_recorder = Arc::new(IncidentRecorder::new(
         supabase_client.clone(),
         ledger_appender.clone(),
-        DummyNotificationSink::new(),
+        notification_sink,
     ));
-    let siem_buffer = LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone());
-    let siem_forwarder = SiemForwarder::new(InMemorySiemSink::new(), siem_buffer);
+    let siem_forwarder = SiemForwarder::new(siem_sink, siem_buffer);
     let siem_forwarding = Arc::new(crate::server::siem_forwarding::SiemForwardingService::new(
         siem_forwarder,
         audit_recorder.clone(),
@@ -290,6 +304,9 @@ async fn run_server_with_config(config: config::AppConfig) {
                 monthly_day: config.scheduler_monthly_day,
                 monthly_hour_utc: config.scheduler_monthly_hour_utc,
                 quarterly_hour_utc: config.scheduler_quarterly_hour_utc,
+                daily_hour_utc: config.scheduler_daily_hour_utc,
+                envelope_migration_batch_size: config.scheduler_envelope_migration_batch_size,
+                envelope_migration_max_batches: config.scheduler_envelope_migration_max_batches,
                 restore_test_sample_limit: config.restore_test_sample_limit,
                 local_archive_dir: config.scheduler_local_archive_dir.clone(),
             },
@@ -298,6 +315,44 @@ async fn run_server_with_config(config: config::AppConfig) {
     }
 
     serve_app(state, listen_addr, shutdown_sender).await;
+}
+
+fn build_notification_sink(
+    config: &config::AppConfig,
+    http_client: reqwest::Client,
+) -> Result<AnyNotificationSink, &'static str> {
+    match &config.incident_notifier {
+        config::IncidentNotifierConfig::Disabled => {
+            Ok(AnyNotificationSink::Dummy(DummyNotificationSink::new()))
+        }
+        config::IncidentNotifierConfig::Webhook { endpoint, secret } => {
+            Ok(AnyNotificationSink::Webhook(WebhookNotificationSink::new(
+                http_client,
+                endpoint.clone(),
+                secret.clone(),
+            )))
+        }
+    }
+}
+
+fn build_siem_sink(
+    config: &config::AppConfig,
+    http_client: reqwest::Client,
+) -> Result<AnySiemSink, &'static str> {
+    match &config.siem_exporter {
+        config::SiemExporterConfig::Disabled => Ok(AnySiemSink::InMemory(InMemorySiemSink::new())),
+        config::SiemExporterConfig::Otlp {
+            endpoint,
+            auth_token,
+        } => Ok(AnySiemSink::Otlp(OtlpSiemSink::new(
+            http_client,
+            endpoint.clone(),
+            auth_token.clone(),
+        ))),
+        config::SiemExporterConfig::SplunkHec { endpoint, token } => Ok(AnySiemSink::SplunkHec(
+            SplunkHecSiemSink::new(http_client, endpoint.clone(), token.clone()),
+        )),
+    }
 }
 
 pub async fn run_restore_test_once(state: &AppState, sample_limit: u32) -> bool {

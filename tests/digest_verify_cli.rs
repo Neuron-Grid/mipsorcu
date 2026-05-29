@@ -216,7 +216,8 @@ fn digest_materials_body(m: &ValidTestMaterials) -> String {
         "stored_digest_hash": m.digest_hash_hex,
         "target_year_month": TEST_YEAR_MONTH,
         "digest_generated_at": DIGEST_GENERATED_AT,
-        "signature": format!("\\x{}", m.digest_signature_hex),
+        "signature": format!("\\x{}", m.entry_signature_hex),
+        "sbc_signature": m.digest_signature_hex,
         "signature_key_version": 1i32,
         "public_key": format!("\\x{}", m.public_key_hex),
         "start_entry_hash": format!("\\x{}", m.entry_hash_hex),
@@ -290,7 +291,8 @@ fn digest_materials_body_wrong_end_hash(m: &ValidTestMaterials) -> String {
         "stored_digest_hash": m.digest_hash_hex,
         "target_year_month": TEST_YEAR_MONTH,
         "digest_generated_at": DIGEST_GENERATED_AT,
-        "signature": format!("\\x{}", m.digest_signature_hex),
+        "signature": format!("\\x{}", m.entry_signature_hex),
+        "sbc_signature": m.digest_signature_hex,
         "signature_key_version": 1i32,
         "public_key": format!("\\x{}", m.public_key_hex),
         "start_entry_hash": format!("\\x{}", m.entry_hash_hex),
@@ -308,7 +310,8 @@ fn digest_materials_body_null_key(m: &ValidTestMaterials) -> String {
         "stored_digest_hash": m.digest_hash_hex,
         "target_year_month": TEST_YEAR_MONTH,
         "digest_generated_at": DIGEST_GENERATED_AT,
-        "signature": format!("\\x{}", m.digest_signature_hex),
+        "signature": format!("\\x{}", m.entry_signature_hex),
+        "sbc_signature": m.digest_signature_hex,
         "signature_key_version": 1i32,
         "public_key": Value::Null,
         "start_entry_hash": format!("\\x{}", m.entry_hash_hex),
@@ -327,7 +330,8 @@ fn digest_materials_body_wrong_digest_hash(m: &ValidTestMaterials) -> String {
         "stored_digest_hash": wrong_hash,
         "target_year_month": TEST_YEAR_MONTH,
         "digest_generated_at": DIGEST_GENERATED_AT,
-        "signature": format!("\\x{}", m.digest_signature_hex),
+        "signature": format!("\\x{}", m.entry_signature_hex),
+        "sbc_signature": m.digest_signature_hex,
         "signature_key_version": 1i32,
         "public_key": format!("\\x{}", m.public_key_hex),
         "start_entry_hash": format!("\\x{}", m.entry_hash_hex),
@@ -336,7 +340,9 @@ fn digest_materials_body_wrong_digest_hash(m: &ValidTestMaterials) -> String {
     .to_string()
 }
 
-/// digest materials where signature has first byte flipped — triggers signature invalid.
+/// digest materials where sbc_signature has first byte flipped — triggers signature invalid.
+/// The digest verification uses `sbc_signature` (not `signature`), so the corrupted byte
+/// must land there to reach the Ed25519 verification failure path.
 fn digest_materials_body_wrong_signature(m: &ValidTestMaterials) -> String {
     let mut sig_bytes = hex::decode(&m.digest_signature_hex).expect("valid hex");
     sig_bytes[0] ^= 0xff;
@@ -348,7 +354,8 @@ fn digest_materials_body_wrong_signature(m: &ValidTestMaterials) -> String {
         "stored_digest_hash": m.digest_hash_hex,
         "target_year_month": TEST_YEAR_MONTH,
         "digest_generated_at": DIGEST_GENERATED_AT,
-        "signature": format!("\\x{wrong_sig}"),
+        "signature": format!("\\x{}", m.entry_signature_hex),
+        "sbc_signature": wrong_sig,
         "signature_key_version": 1i32,
         "public_key": format!("\\x{}", m.public_key_hex),
         "start_entry_hash": format!("\\x{}", m.entry_hash_hex),

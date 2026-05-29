@@ -46,6 +46,37 @@ pub trait SiemSink: Send + Sync + 'static {
     async fn send_event(&self, event: &SiemEvent) -> Result<(), SiemSinkError>;
 }
 
+/// runtime で選択される SIEM exporter を 1 つの enum に閉じ込め、
+/// `SiemForwarder<S: SiemSink>` のジェネリック境界を維持したまま動的選択を
+/// 可能にする dispatcher。`Box<dyn SiemSink>` を避けることで async fn in trait の
+/// dyn-incompatibility を回避する。
+pub enum AnySiemSink {
+    InMemory(super::dummy::InMemorySiemSink),
+    Otlp(super::otlp::OtlpSiemSink),
+    SplunkHec(super::splunk_hec::SplunkHecSiemSink),
+}
+
+impl AnySiemSink {
+    /// runtime での経路名（log / audit metadata に使用）。
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::InMemory(_) => "in_memory",
+            Self::Otlp(_) => "otlp",
+            Self::SplunkHec(_) => "splunk_hec",
+        }
+    }
+}
+
+impl SiemSink for AnySiemSink {
+    async fn send_event(&self, event: &SiemEvent) -> Result<(), SiemSinkError> {
+        match self {
+            Self::InMemory(sink) => sink.send_event(event).await,
+            Self::Otlp(sink) => sink.send_event(event).await,
+            Self::SplunkHec(sink) => sink.send_event(event).await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

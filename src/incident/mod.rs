@@ -2,6 +2,7 @@ mod dummy;
 mod recorder;
 mod sink;
 mod types;
+mod webhook;
 
 pub use dummy::{DummyNotificationSink, FailingNotificationSink};
 pub use recorder::{
@@ -18,3 +19,4 @@ pub use types::{
     IncidentNotificationPayload, IncidentRecordInput, IncidentSeverity, IncidentType,
     NotificationResult,
 };
+pub use webhook::{AnyNotificationSink, WebhookNotificationSink};

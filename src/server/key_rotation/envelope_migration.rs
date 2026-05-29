@@ -124,7 +124,7 @@ pub(super) async fn run(
             .cloned()
             .map(|row| (row.id.clone(), row))
             .collect();
-        let prepared = prepare_batch(config, batch_rows)?;
+        let prepared = prepare_batch(&config.master_key_ring, batch_rows)?;
         let outcome =
             apply_prepared_batch(&supabase_client, &ledger_appender, &prepared, &mut totals)
                 .await?;
@@ -132,7 +132,7 @@ pub(super) async fn run(
         retry_nonce_reuse_rows(
             &supabase_client,
             &ledger_appender,
-            config,
+            &config.master_key_ring,
             &retry_sources,
             outcome.retry_secret_version_ids.clone(),
             &mut totals,
@@ -156,14 +156,14 @@ struct PreparedBatch {
 }
 
 fn prepare_batch(
-    config: &AppConfig,
+    master_key_ring: &MasterKeyRing,
     rows: Vec<EnvelopeMigrationBatchRow>,
 ) -> Result<PreparedBatch, KeyRotationCliError> {
     let mut success_rows = Vec::with_capacity(rows.len());
     let mut failure_rows = Vec::new();
 
     for row in rows {
-        match prepare_row(&config.master_key_ring, row) {
+        match prepare_row(master_key_ring, row) {
             Ok(success_row) => success_rows.push(success_row),
             Err(RowPreparationError::Failure(failure)) => {
                 failure_rows.push(failure.into_rpc_row());
@@ -365,7 +365,7 @@ async fn apply_prepared_batch(
 async fn retry_nonce_reuse_rows(
     supabase_client: &SupabaseClient,
     ledger_appender: &LedgerAppender,
-    config: &AppConfig,
+    master_key_ring: &MasterKeyRing,
     retry_sources: &HashMap<String, EnvelopeMigrationBatchRow>,
     mut retry_ids: Vec<String>,
     totals: &mut RunTotals,
@@ -376,7 +376,7 @@ async fn retry_nonce_reuse_rows(
         }
 
         let rows = retry_rows_from_sources(retry_sources, &retry_ids)?;
-        let prepared = prepare_batch(config, rows)?;
+        let prepared = prepare_batch(master_key_ring, rows)?;
         let outcome =
             apply_prepared_batch(supabase_client, ledger_appender, &prepared, totals).await?;
         retry_ids = outcome.retry_secret_version_ids;
@@ -734,4 +734,99 @@ mod tests {
 
         Ok(())
     }
+}
+
+/// scheduler から呼び出すための envelope lazy migration の集計結果。
+///
+/// 信頼境界ノート: フィールドはすべて非秘密の集計値のみ。Master Key・DEK 平文・
+/// 暗号文の長さなど秘密情報に直結するフィールドを含めない。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(in crate::server) struct RunScheduledEnvelopeMigrationOutcome {
+    pub(in crate::server) selected_count: u64,
+    pub(in crate::server) success_count: u64,
+    pub(in crate::server) failure_count: u64,
+    pub(in crate::server) remaining_legacy_rows: i64,
+    pub(in crate::server) batches_executed: u32,
+}
+
+/// scheduler 経路から起動する envelope lazy migration。
+///
+/// CLI 経路（`run`）と内部ループ・retry ロジックを共有しつつ、引数を
+/// scheduler が持つ `AppState` 由来の値（`MasterKeyRing` / supabase /
+/// ledger appender）のみで完結させる。dry-run / format / secret-id は scheduler
+/// 経路ではサポートしない（呼び出し側で必要になれば後続タスクで拡張）。
+pub(in crate::server) async fn run_scheduled_envelope_migration(
+    supabase_client: Arc<SupabaseClient>,
+    ledger_appender: Arc<LedgerAppender>,
+    master_key_ring: Arc<MasterKeyRing>,
+    batch_size: u32,
+    max_batches: u32,
+) -> Result<RunScheduledEnvelopeMigrationOutcome, KeyRotationCliError> {
+    if batch_size == 0 || batch_size > MAX_BATCH_SIZE {
+        return Err(KeyRotationCliError::Config(
+            "scheduler envelope migration batch_size is invalid".to_owned(),
+        ));
+    }
+    if max_batches == 0 {
+        return Err(KeyRotationCliError::Config(
+            "scheduler envelope migration max_batches is invalid".to_owned(),
+        ));
+    }
+
+    let mut totals = RunTotals {
+        dry_run: false,
+        selected_count: 0,
+        success_count: 0,
+        failure_count: 0,
+        remaining_legacy_rows: 0,
+        last_request_id: None,
+    };
+    let mut batches_executed: u32 = 0;
+
+    for _ in 0..max_batches {
+        let batch_rows = supabase_client
+            .call_list_envelope_migration_batch(batch_size, None)
+            .await?;
+        if batch_rows.is_empty() {
+            break;
+        }
+
+        totals.selected_count += u64::try_from(batch_rows.len()).map_err(|_| {
+            KeyRotationCliError::Config("envelope migration batch size is invalid".to_owned())
+        })?;
+        let retry_sources: HashMap<String, EnvelopeMigrationBatchRow> = batch_rows
+            .iter()
+            .cloned()
+            .map(|row| (row.id.clone(), row))
+            .collect();
+        let prepared = prepare_batch(&master_key_ring, batch_rows)?;
+        let outcome =
+            apply_prepared_batch(&supabase_client, &ledger_appender, &prepared, &mut totals)
+                .await?;
+        batches_executed = batches_executed.saturating_add(1);
+
+        retry_nonce_reuse_rows(
+            &supabase_client,
+            &ledger_appender,
+            &master_key_ring,
+            &retry_sources,
+            outcome.retry_secret_version_ids.clone(),
+            &mut totals,
+        )
+        .await?;
+        if outcome.success_count == 0 && outcome.failure_count == 0 {
+            break;
+        }
+    }
+
+    let status = supabase_client.call_envelope_migration_status(None).await?;
+    totals.remaining_legacy_rows = status.total_legacy_rows;
+
+    Ok(RunScheduledEnvelopeMigrationOutcome {
+        selected_count: totals.selected_count,
+        success_count: totals.success_count,
+        failure_count: totals.failure_count,
+        remaining_legacy_rows: totals.remaining_legacy_rows,
+        batches_executed,
+    })
 }

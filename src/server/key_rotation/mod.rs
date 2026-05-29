@@ -7,7 +7,7 @@ use crate::server::supabase::SupabaseClient;
 mod audit_event;
 mod bytea;
 mod command;
-mod envelope_migration;
+pub(in crate::server) mod envelope_migration;
 mod error;
 mod flags;
 mod ledger;

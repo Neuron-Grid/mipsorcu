@@ -549,12 +549,12 @@ fn test_app_state(
     let incident_recorder = Arc::new(IncidentRecorder::new(
         supabase_client.clone(),
         ledger_appender.clone(),
-        DummyNotificationSink::new(),
+        mipsorcu::incident::AnyNotificationSink::Dummy(DummyNotificationSink::new()),
     ));
     let readiness_state = ReadinessState::new();
     let siem_forwarding = Arc::new(SiemForwardingService::new(
         SiemForwarder::new(
-            InMemorySiemSink::new(),
+            mipsorcu::siem::AnySiemSink::InMemory(InMemorySiemSink::new()),
             LocalSiemFallbackBuffer::new(temp_path("siem-buffer")),
         ),
         audit_recorder.clone(),
