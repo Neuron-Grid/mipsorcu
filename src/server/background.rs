@@ -583,5 +583,5 @@ fn local_audit_store_error_kind(error: &LocalAuditStoreError) -> &'static str {
 }
 
 #[cfg(test)]
-#[path = "../../tests_internal/server_background.rs"]
+#[path = "../../tests/unit/server/background/tests.rs"]
 mod tests;

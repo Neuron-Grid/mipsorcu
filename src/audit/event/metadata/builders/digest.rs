@@ -159,65 +159,8 @@ impl MonthlyDigestVerifyMetadata {
 }
 
 #[cfg(test)]
-mod monthly_digest_metadata_tests {
-    use super::*;
-    use crate::audit::{AuditAction, AuditResult};
-    use crate::ledger::MonthlyDigestPeriod;
-    use crate::types::SourceEventAt;
-
-    fn make_period() -> MonthlyDigestPeriod {
-        MonthlyDigestPeriod::parse("2026-05").unwrap()
-    }
-
-    fn make_source_event_at() -> SourceEventAt {
-        SourceEventAt::parse("2026-06-01T00:00:00Z").unwrap()
-    }
-
-    #[test]
-    fn generate_failure_metadata_contains_only_allowed_keys() {
-        let metadata = MonthlyDigestGenerateMetadata::new(
-            &make_period(),
-            "append_failed",
-            make_source_event_at(),
-        )
-        .build()
-        .unwrap();
-        let value = metadata.as_value();
-        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
-        assert_eq!(value["error_code"].as_str(), Some("append_failed"));
-        assert_eq!(
-            value["source_event_at"].as_str(),
-            Some("2026-06-01T00:00:00Z")
-        );
-        assert_eq!(value.as_object().unwrap().len(), 3);
-        metadata
-            .validate_allowlist_for_action(AuditAction::MonthlyDigestGenerate, AuditResult::Failure)
-            .unwrap();
-    }
-
-    #[test]
-    fn verify_failure_metadata_contains_only_allowed_keys() {
-        let metadata = MonthlyDigestVerifyMetadata::new(
-            &make_period(),
-            "signature_invalid",
-            make_source_event_at(),
-        )
-        .build()
-        .unwrap();
-        let value = metadata.as_value();
-        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
-        assert_eq!(value["error_code"].as_str(), Some("signature_invalid"));
-        assert_eq!(
-            value["source_event_at"].as_str(),
-            Some("2026-06-01T00:00:00Z")
-        );
-        assert_eq!(value["verify_result"].as_str(), Some("invalid"));
-        assert_eq!(value.as_object().unwrap().len(), 4);
-        metadata
-            .validate_allowlist_for_action(AuditAction::MonthlyDigestVerify, AuditResult::Failure)
-            .unwrap();
-    }
-}
+#[path = "../../../../../tests/unit/audit/event/metadata/builders/digest/monthly_digest_metadata_tests.rs"]
+mod monthly_digest_metadata_tests;
 
 // ArchiveExportMetadata
 
@@ -292,69 +235,8 @@ impl ArchiveExportMetadata {
 }
 
 #[cfg(test)]
-mod archive_export_metadata_tests {
-    use super::*;
-    use crate::archive::backend::ArchiveObjectKey;
-    use crate::ledger::MonthlyDigestPeriod;
-    use crate::types::SourceEventAt;
-
-    fn make_period() -> MonthlyDigestPeriod {
-        MonthlyDigestPeriod::parse("2026-05").unwrap()
-    }
-
-    fn make_source_event_at() -> SourceEventAt {
-        SourceEventAt::parse("2026-06-01T00:00:00Z").unwrap()
-    }
-
-    fn make_archive_key() -> ArchiveObjectKey {
-        ArchiveObjectKey::for_monthly_digest(&make_period()).unwrap()
-    }
-
-    #[test]
-    fn success_metadata_contains_archive_key() {
-        let key = make_archive_key();
-        let metadata = ArchiveExportMetadata::new(&make_period(), make_source_event_at())
-            .with_archive_key(&key)
-            .build()
-            .expect("build must succeed");
-        let value = metadata.as_value();
-        assert_eq!(value["archive_key"].as_str(), Some(key.as_str()));
-        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
-        assert!(value.get("error_code").is_none());
-    }
-
-    #[test]
-    fn failure_metadata_contains_error_code() {
-        let metadata = ArchiveExportMetadata::new(&make_period(), make_source_event_at())
-            .with_error_code("backend_failed")
-            .build()
-            .expect("build must succeed");
-        let value = metadata.as_value();
-        assert_eq!(value["error_code"].as_str(), Some("backend_failed"));
-        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
-        assert!(value.get("archive_key").is_none());
-    }
-
-    #[test]
-    fn digest_hash_is_included_when_set() {
-        let metadata = ArchiveExportMetadata::new(&make_period(), make_source_event_at())
-            .with_digest_hash("abcd1234")
-            .build()
-            .expect("build must succeed");
-        let value = metadata.as_value();
-        assert_eq!(value["digest_hash"].as_str(), Some("abcd1234"));
-    }
-
-    #[test]
-    fn required_target_year_month_always_present() {
-        let metadata = ArchiveExportMetadata::new(&make_period(), make_source_event_at())
-            .build()
-            .expect("build must succeed");
-        let value = metadata.as_value();
-        assert!(value.get("target_year_month").is_some());
-        assert!(value.get("source_event_at").is_some());
-    }
-}
+#[path = "../../../../../tests/unit/audit/event/metadata/builders/digest/archive_export_metadata_tests.rs"]
+mod archive_export_metadata_tests;
 
 // DigestTimestampingMetadata
 
@@ -430,64 +312,5 @@ impl DigestTimestampingMetadata {
 }
 
 #[cfg(test)]
-mod digest_timestamping_metadata_tests {
-    use super::*;
-    use crate::ledger::MonthlyDigestPeriod;
-    use crate::types::SourceEventAt;
-
-    fn make_period() -> MonthlyDigestPeriod {
-        MonthlyDigestPeriod::parse("2026-05").unwrap()
-    }
-
-    fn make_source_event_at() -> SourceEventAt {
-        SourceEventAt::parse("2026-06-01T00:00:00Z").unwrap()
-    }
-
-    #[test]
-    fn success_metadata_contains_timestamp_token_hash() {
-        let metadata = DigestTimestampingMetadata::new(&make_period(), make_source_event_at())
-            .with_digest_hash(&"a".repeat(64))
-            .with_timestamp_token_hash(&"b".repeat(64))
-            .build()
-            .expect("build must succeed");
-        let value = metadata.as_value();
-        assert_eq!(
-            value["timestamp_token_hash"].as_str(),
-            Some(&*"b".repeat(64))
-        );
-        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
-        assert!(value.get("error_code").is_none());
-    }
-
-    #[test]
-    fn failure_metadata_contains_error_code() {
-        let metadata = DigestTimestampingMetadata::new(&make_period(), make_source_event_at())
-            .with_error_code("backend_failed")
-            .build()
-            .expect("build must succeed");
-        let value = metadata.as_value();
-        assert_eq!(value["error_code"].as_str(), Some("backend_failed"));
-        assert_eq!(value["target_year_month"].as_str(), Some("2026-05"));
-        assert!(value.get("timestamp_token_hash").is_none());
-    }
-
-    #[test]
-    fn required_target_year_month_always_present() {
-        let metadata = DigestTimestampingMetadata::new(&make_period(), make_source_event_at())
-            .build()
-            .expect("build must succeed");
-        let value = metadata.as_value();
-        assert!(value.get("target_year_month").is_some());
-        assert!(value.get("source_event_at").is_some());
-    }
-
-    #[test]
-    fn digest_hash_is_optional_and_set_when_provided() {
-        let metadata = DigestTimestampingMetadata::new(&make_period(), make_source_event_at())
-            .with_digest_hash(&"c".repeat(64))
-            .build()
-            .expect("build must succeed");
-        let value = metadata.as_value();
-        assert_eq!(value["digest_hash"].as_str(), Some(&*"c".repeat(64)));
-    }
-}
+#[path = "../../../../../tests/unit/audit/event/metadata/builders/digest/digest_timestamping_metadata_tests.rs"]
+mod digest_timestamping_metadata_tests;
