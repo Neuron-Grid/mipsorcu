@@ -481,93 +481,100 @@ fn render_json(report: &AuditReportJson) -> Result<String, AuditReportCliError> 
 fn render_markdown(report: &AuditReportJson) -> String {
     let mut output = String::new();
     output.push_str("# mipsorcu audit report\n\n");
+    render_summary_section(&mut output, report);
+    render_verification_failures_section(&mut output, report);
+    render_signature_key_versions_section(&mut output, report);
+    render_monthly_digests_section(&mut output, report);
+    output.push('\n');
+    output
+}
+
+fn render_summary_section(output: &mut String, report: &AuditReportJson) {
     output.push_str("## Summary\n\n");
     push_kv(
-        &mut output,
+        output,
         "Period",
         &format!("{} - {}", report.period_start, report.period_end),
     );
     push_kv(
-        &mut output,
+        output,
         "Sequence range",
         &sequence_range(report.sequence_start, report.sequence_end),
     );
     push_kv(
-        &mut output,
+        output,
         "Ledger entry count",
         &report.ledger_entry_count.to_string(),
     );
     push_kv(
-        &mut output,
+        output,
         "Audit event count",
         &report.audit_event_count.to_string(),
     );
+    push_kv(output, "Secret count", &report.secret_count.to_string());
     push_kv(
-        &mut output,
-        "Secret count",
-        &report.secret_count.to_string(),
-    );
-    push_kv(
-        &mut output,
+        output,
         "Restore test performed",
         yes_no(report.restore_test_status.performed),
     );
     push_kv(
-        &mut output,
+        output,
         "Restore test count",
         &report.restore_test_status.total_count.to_string(),
     );
     push_kv(
-        &mut output,
+        output,
         "Restore test latest result",
         optional_text(report.restore_test_status.latest_result.as_deref()),
     );
     push_kv(
-        &mut output,
+        output,
         "Integrity check performed",
         yes_no(report.integrity_check_status.performed),
     );
     push_kv(
-        &mut output,
+        output,
         "Integrity check count",
         &report.integrity_check_status.total_count.to_string(),
     );
     push_kv(
-        &mut output,
+        output,
         "Integrity check latest result",
         optional_text(report.integrity_check_status.latest_result.as_deref()),
     );
     push_kv(
-        &mut output,
+        output,
         "Hash chain valid",
         yes_no(report.hash_chain_verification.valid),
     );
     push_kv(
-        &mut output,
+        output,
         "Hash chain checked count",
         &report.hash_chain_verification.checked_count.to_string(),
     );
     push_kv(
-        &mut output,
+        output,
         "Hash chain detail",
         optional_text(report.hash_chain_verification.detail.as_deref()),
     );
     push_kv(
-        &mut output,
+        output,
         "Signature verification valid",
         yes_no(report.signature_verification.valid),
     );
     push_kv(
-        &mut output,
+        output,
         "Signature verification checked count",
         &report.signature_verification.checked_count.to_string(),
     );
     push_kv(
-        &mut output,
+        output,
         "Signature verification detail",
         optional_text(report.signature_verification.detail.as_deref()),
     );
+}
 
+fn render_verification_failures_section(output: &mut String, report: &AuditReportJson) {
     output.push_str("\n## Verification failures\n\n");
     if report.verification_failures.is_empty() {
         output.push_str("- none\n");
@@ -585,7 +592,9 @@ fn render_markdown(report: &AuditReportJson) -> String {
             ));
         }
     }
+}
 
+fn render_signature_key_versions_section(output: &mut String, report: &AuditReportJson) {
     output.push_str("\n## Signature key versions\n\n");
     if report.signature_key_versions.is_empty() {
         output.push_str("- none\n");
@@ -597,7 +606,9 @@ fn render_markdown(report: &AuditReportJson) -> String {
             ));
         }
     }
+}
 
+fn render_monthly_digests_section(output: &mut String, report: &AuditReportJson) {
     output.push_str("\n## Monthly digests\n\n");
     if report.monthly_digests.is_empty() {
         output.push_str("- none\n");
@@ -614,9 +625,6 @@ fn render_markdown(report: &AuditReportJson) -> String {
             ));
         }
     }
-
-    output.push('\n');
-    output
 }
 
 fn push_kv(output: &mut String, key: &str, value: &str) {

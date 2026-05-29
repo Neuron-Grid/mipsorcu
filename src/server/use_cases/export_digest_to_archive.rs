@@ -112,66 +112,18 @@ pub async fn export_digest_to_archive<B: ArchiveBackend>(
     }
 
     // ── 3.5. verify_object で外部アーカイブ不一致を検知する ──
-    match backend.verify_object(&key, &package).await {
-        Ok(crate::archive::ArchiveVerifyOutcome::Valid) => {}
-        Ok(crate::archive::ArchiveVerifyOutcome::NotFound) => {
-            let error_code = "archive_export_not_found".to_owned();
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                period = period.as_str(),
-                archive_key = key.as_str(),
-                error_code = %error_code,
-                "archive export verification did not find the stored object"
-            );
-            record_archive_export_failure_audit(
-                audit_recorder,
-                &request_id,
-                period,
-                &error_code,
-                &exported_at,
-            )
-            .await;
-            return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
-        }
-        Ok(crate::archive::ArchiveVerifyOutcome::ContentMismatch) => {
-            let error_code = "archive_export_content_mismatch".to_owned();
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                period = period.as_str(),
-                archive_key = key.as_str(),
-                error_code = %error_code,
-                "archive export verification detected content mismatch without auto-repair"
-            );
-            record_archive_export_failure_audit(
-                audit_recorder,
-                &request_id,
-                period,
-                &error_code,
-                &exported_at,
-            )
-            .await;
-            return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
-        }
-        Err(error) => {
-            let error_code = backend_error_code(&error);
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                period = period.as_str(),
-                archive_key = key.as_str(),
-                error = %error,
-                error_code = %error_code,
-                "archive export verification failed"
-            );
-            record_archive_export_failure_audit(
-                audit_recorder,
-                &request_id,
-                period,
-                &error_code,
-                &exported_at,
-            )
-            .await;
-            return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
-        }
+    if let Err(error_code) =
+        verify_archived_object(backend, &key, &package, &request_id, period).await
+    {
+        record_archive_export_failure_audit(
+            audit_recorder,
+            &request_id,
+            period,
+            &error_code,
+            &exported_at,
+        )
+        .await;
+        return Err(ExportDigestToArchiveError::BackendFailed { code: error_code });
     }
 
     // ── 4. ledger entry を追記 ──
@@ -215,6 +167,55 @@ pub async fn export_digest_to_archive<B: ArchiveBackend>(
                 "archive export ledger append failed (archive was saved)"
             );
             Err(ExportDigestToArchiveError::LedgerAppendFailed { code })
+        }
+    }
+}
+
+/// PUT 済みオブジェクトを `verify_object` で検証し、未検出・内容不一致・検証失敗を
+/// error_code(String) に正規化する。各 outcome のログ出力もここで担う。
+/// `Ok(())` は検証成功（一致）を表す。
+async fn verify_archived_object<B: ArchiveBackend>(
+    backend: &B,
+    key: &ArchiveObjectKey,
+    package: &ArchiveExportPackage,
+    request_id: &RequestId,
+    period: &MonthlyDigestPeriod,
+) -> Result<(), String> {
+    match backend.verify_object(key, package).await {
+        Ok(crate::archive::ArchiveVerifyOutcome::Valid) => Ok(()),
+        Ok(crate::archive::ArchiveVerifyOutcome::NotFound) => {
+            let error_code = "archive_export_not_found".to_owned();
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                period = period.as_str(),
+                archive_key = key.as_str(),
+                error_code = %error_code,
+                "archive export verification did not find the stored object"
+            );
+            Err(error_code)
+        }
+        Ok(crate::archive::ArchiveVerifyOutcome::ContentMismatch) => {
+            let error_code = "archive_export_content_mismatch".to_owned();
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                period = period.as_str(),
+                archive_key = key.as_str(),
+                error_code = %error_code,
+                "archive export verification detected content mismatch without auto-repair"
+            );
+            Err(error_code)
+        }
+        Err(error) => {
+            let error_code = backend_error_code(&error);
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                period = period.as_str(),
+                archive_key = key.as_str(),
+                error = %error,
+                error_code = %error_code,
+                "archive export verification failed"
+            );
+            Err(error_code)
         }
     }
 }

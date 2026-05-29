@@ -330,16 +330,19 @@ impl TryFrom<LedgerVerificationMaterialResponse> for LedgerVerificationMaterialR
 
         let signature_key_version_raw =
             require(response.signature_key_version, "signature_key_version")?;
-        let signature_key_version = LedgerSignatureKeyVersion::new(signature_key_version_raw as u32)
-            .map_err(|_| invalid_field_error("signature_key_version"))?;
+        let signature_key_version =
+            LedgerSignatureKeyVersion::new(signature_key_version_raw as u32)
+                .map_err(|_| invalid_field_error("signature_key_version"))?;
 
         let entry_type = require(response.entry_type, "entry_type")?;
         let source_event_at = require(response.source_event_at, "source_event_at")?;
         let request_id = require(response.request_id, "request_id")?;
         let result = require(response.result, "result")?;
         let payload = require(response.payload, "payload")?;
-        let canonicalization_version =
-            require(response.canonicalization_version, "canonicalization_version")?;
+        let canonicalization_version = require(
+            response.canonicalization_version,
+            "canonicalization_version",
+        )?;
         let hash_algorithm = require(response.hash_algorithm, "hash_algorithm")?;
         let signature_algorithm = require(response.signature_algorithm, "signature_algorithm")?;
 

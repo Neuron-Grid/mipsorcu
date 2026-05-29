@@ -39,7 +39,6 @@ use super::http::{
 use super::keyring::{load_master_key_ring, parse_fixed_length_key_hex, parse_key_version_config};
 use super::ledger_signing::load_ledger_signing_key;
 use super::model::AppConfig;
-use super::siem::SiemExporterConfig;
 use super::operational_checks::{
     parse_integrity_check_interval, parse_integrity_check_startup_delay,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
@@ -50,6 +49,7 @@ use super::scheduler::{
     parse_scheduler_monthly_day, parse_scheduler_monthly_hour_utc, parse_scheduler_poll_interval,
     parse_scheduler_quarterly_hour_utc, parse_scheduler_startup_delay,
 };
+use super::siem::SiemExporterConfig;
 use super::siem::{
     parse_siem_exporter_config, parse_siem_long_failure_threshold, parse_siem_resend_interval,
 };
@@ -288,13 +288,12 @@ where
         dotenv,
         get_process_var,
     ))?;
-    let archive_auto_delete_enabled = parse_audit_fallback_archive_auto_delete_enabled(
-        optional_var(
+    let archive_auto_delete_enabled =
+        parse_audit_fallback_archive_auto_delete_enabled(optional_var(
             ENV_AUDIT_FALLBACK_ARCHIVE_AUTO_DELETE_ENABLED,
             dotenv,
             get_process_var,
-        ),
-    )?;
+        ))?;
     let archive_retention = parse_audit_fallback_archive_retention_days(optional_var(
         ENV_AUDIT_FALLBACK_ARCHIVE_RETENTION_DAYS,
         dotenv,
@@ -452,20 +451,18 @@ where
         dotenv,
         get_process_var,
     ))?;
-    let envelope_migration_batch_size = parse_scheduler_envelope_migration_batch_size(
-        optional_var(
+    let envelope_migration_batch_size =
+        parse_scheduler_envelope_migration_batch_size(optional_var(
             ENV_SCHEDULER_ENVELOPE_MIGRATION_BATCH_SIZE,
             dotenv,
             get_process_var,
-        ),
-    )?;
-    let envelope_migration_max_batches = parse_scheduler_envelope_migration_max_batches(
-        optional_var(
+        ))?;
+    let envelope_migration_max_batches =
+        parse_scheduler_envelope_migration_max_batches(optional_var(
             ENV_SCHEDULER_ENVELOPE_MIGRATION_MAX_BATCHES,
             dotenv,
             get_process_var,
-        ),
-    )?;
+        ))?;
     let local_archive_dir = PathBuf::from(
         optional_var(ENV_SCHEDULER_LOCAL_ARCHIVE_DIR, dotenv, get_process_var)
             .unwrap_or_else(|| DEFAULT_SCHEDULER_LOCAL_ARCHIVE_DIR.to_owned()),

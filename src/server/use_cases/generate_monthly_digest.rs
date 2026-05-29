@@ -137,7 +137,33 @@ pub async fn generate_monthly_digest(
     // 2. 対象月のエントリ範囲を取得
     let range = fetch_ledger_range(supabase_client, &input).await?;
 
-    // 3. canonical form を生成
+    // 3-5. canonical form 生成・hash 計算・Ed25519 署名を行い署名済み digest を組み立てる
+    let signed_digest = build_signed_monthly_digest(ledger_appender, period, &range, &input)?;
+
+    // 6. ledger entry として追記
+    append_digest_ledger_entry(ledger_appender, &signed_digest, &input).await?;
+    record_monthly_digest_success_audit(audit_recorder, &signed_digest, &input).await?;
+
+    tracing::info!(
+        request_id = %input.request_id.as_canonical_string(),
+        period = period.as_str(),
+        start_sequence_no = range.start_sequence_no.get(),
+        end_sequence_no = range.end_sequence_no.get(),
+        entry_count = range.entry_count,
+        digest_hash = %signed_digest.digest_hash.to_hex(),
+        "monthly digest generated and recorded"
+    );
+
+    Ok(signed_digest)
+}
+
+/// canonical form 生成・digest hash 計算・Ed25519 署名を行い、署名済み digest を組み立てる。
+fn build_signed_monthly_digest(
+    ledger_appender: &LedgerAppender,
+    period: &MonthlyDigestPeriod,
+    range: &LedgerRangeForMonth,
+    input: &GenerateMonthlyDigestInput,
+) -> Result<SignedMonthlyDigest, GenerateMonthlyDigestError> {
     let signature_key_version = ledger_appender.signing_key_version();
     let canonical_bytes = build_monthly_digest_canonical_form(
         period,
@@ -161,10 +187,8 @@ pub async fn generate_monthly_digest(
         }
     })?;
 
-    // 4. digest hash を計算
     let digest_hash = DigestHash::from_canonical_bytes(&canonical_bytes);
 
-    // 5. Ed25519 署名
     let sbc_signature = ledger_appender
         .sign_digest_bytes(canonical_bytes.as_bytes())
         .map_err(|error| {
@@ -179,7 +203,7 @@ pub async fn generate_monthly_digest(
             }
         })?;
 
-    let signed_digest = SignedMonthlyDigest {
+    Ok(SignedMonthlyDigest {
         period: period.clone(),
         start_sequence_no: range.start_sequence_no,
         end_sequence_no: range.end_sequence_no,
@@ -191,23 +215,7 @@ pub async fn generate_monthly_digest(
         canonical_bytes,
         digest_hash,
         sbc_signature,
-    };
-
-    // 6. ledger entry として追記
-    append_digest_ledger_entry(ledger_appender, &signed_digest, &input).await?;
-    record_monthly_digest_success_audit(audit_recorder, &signed_digest, &input).await?;
-
-    tracing::info!(
-        request_id = %input.request_id.as_canonical_string(),
-        period = period.as_str(),
-        start_sequence_no = range.start_sequence_no.get(),
-        end_sequence_no = range.end_sequence_no.get(),
-        entry_count = range.entry_count,
-        digest_hash = %signed_digest.digest_hash.to_hex(),
-        "monthly digest generated and recorded"
-    );
-
-    Ok(signed_digest)
+    })
 }
 
 /// 対象月のエントリ範囲を Supabase から取得する。

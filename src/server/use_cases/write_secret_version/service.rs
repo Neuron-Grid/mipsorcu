@@ -41,7 +41,9 @@ pub(in crate::server) async fn create_secret(
         match prepare_new_secret_version_for_request(state, owner_user_id.clone(), command).await {
             Ok(prepared) => prepared,
             Err(error) => {
-                failure.record_and_warn(&error, "prepare_secret_version").await;
+                failure
+                    .record_and_warn(&error, "prepare_secret_version")
+                    .await;
                 return Err(error);
             }
         };
@@ -151,7 +153,9 @@ async fn record_secret_ref_resolution_failure(
             failure.record_and_warn_on_secondary_failure().await;
         }
         ResolveSecretRefError::Api(api_error) => {
-            failure.record_and_warn(api_error, "resolve_secret_ref").await;
+            failure
+                .record_and_warn(api_error, "resolve_secret_ref")
+                .await;
         }
     }
 

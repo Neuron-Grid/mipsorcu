@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use tokio::sync::watch;
@@ -165,6 +166,50 @@ async fn run_server_with_config(config: config::AppConfig) {
         tracing::error!(error = %error, "HTTP client initialization failed");
         std::process::exit(1);
     });
+
+    let (state, deps) = build_app_state(config, http_client).await;
+
+    let (shutdown_sender, _shutdown_receiver) = watch::channel(false);
+    spawn_background_loops(&state, deps, &shutdown_sender);
+
+    serve_app(state, listen_addr, shutdown_sender).await;
+}
+
+/// `build_app_state` がバックグラウンドループ起動側へ受け渡す依存一式。
+///
+/// `AppState` に含まれないハンドル（jwks_cache・http client・fallback store）と、
+/// ループ駆動に必要な設定値のスナップショットをまとめる。
+struct BackgroundDeps {
+    http_client: reqwest::Client,
+    jwks_cache: JwksCache,
+    jwks_url: String,
+    jwks_refresh_interval: Duration,
+    health_readiness_poll_interval: Duration,
+    audit_fallback_store: LocalAuditFallbackStore,
+    audit_resend_interval: Duration,
+    audit_fallback_alert_threshold_bytes: u64,
+    audit_fallback_archive_auto_delete_enabled: bool,
+    audit_fallback_archive_retention: Duration,
+    restore_test_interval: Duration,
+    restore_test_startup_delay: Duration,
+    restore_test_sample_limit: u32,
+    integrity_check_interval: Duration,
+    integrity_check_startup_delay: Duration,
+    siem_resend_interval: Duration,
+    siem_long_failure_threshold: Duration,
+    scheduler_enabled: bool,
+    scheduler: scheduler::SchedulerConfig,
+}
+
+/// 設定からインフラ（暗号鍵・各種クライアント・recorder・forwarder）を構築し、
+/// `AppState` とバックグラウンドループ用の依存をまとめて返す。
+///
+/// 構築中の致命的失敗は既存どおり `std::process::exit(1)` で停止する。
+/// ループの spawn は行わず、`spawn_background_loops` に委ねる。
+async fn build_app_state(
+    config: config::AppConfig,
+    http_client: reqwest::Client,
+) -> (AppState, BackgroundDeps) {
     let jwks = fetch_jwks(&http_client, &config.jwks_url)
         .await
         .unwrap_or_else(|error| {
@@ -182,17 +227,7 @@ async fn run_server_with_config(config: config::AppConfig) {
             tracing::error!(error = %error, "JWT verifier config is invalid");
             std::process::exit(1);
         });
-
     let jwt_verifier = Arc::new(JwtVerifier::with_cache(jwt_config, jwks_cache.clone()));
-
-    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-    tokio::spawn(background::run_jwks_refresh_loop(
-        jwks_cache,
-        http_client.clone(),
-        config.jwks_url.clone(),
-        config.jwks_refresh_interval,
-        shutdown_sender.subscribe(),
-    ));
 
     let siem_buffer = LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone());
     let siem_sink = build_siem_sink(&config, http_client.clone()).unwrap_or_else(|error| {
@@ -204,6 +239,9 @@ async fn run_server_with_config(config: config::AppConfig) {
             tracing::error!(error = %error, "incident notification sink initialization failed");
             std::process::exit(1);
         });
+
+    // jwks refresh loop 用の clone を確保してから supabase client へ move する。
+    let jwks_refresh_http_client = http_client.clone();
     let supabase_client = Arc::new(SupabaseClient::new(
         http_client,
         config.supabase_url,
@@ -211,12 +249,6 @@ async fn run_server_with_config(config: config::AppConfig) {
         config.supabase_publishable_key,
     ));
     let readiness_state = ReadinessState::new();
-    tokio::spawn(background::run_supabase_readiness_poll_loop(
-        readiness_state.clone(),
-        supabase_client.clone(),
-        config.health_readiness_poll_interval,
-        shutdown_sender.subscribe(),
-    ));
 
     let audit_appender = SupabaseAuditAppender::new(supabase_client.clone());
     let fallback_store = LocalAuditFallbackStore::with_rollover_config(
@@ -243,15 +275,40 @@ async fn run_server_with_config(config: config::AppConfig) {
         audit_recorder.clone(),
         readiness_state.clone(),
     ));
-    tokio::spawn(background::run_audit_resend_loop(
-        audit_recorder.clone(),
-        fallback_store,
-        config.audit_resend_interval,
-        config.audit_fallback_alert_threshold_bytes,
-        config.audit_fallback_archive_auto_delete_enabled,
-        config.audit_fallback_archive_retention,
-        shutdown_receiver,
-    ));
+
+    let deps = BackgroundDeps {
+        http_client: jwks_refresh_http_client,
+        jwks_cache,
+        jwks_url: config.jwks_url.clone(),
+        jwks_refresh_interval: config.jwks_refresh_interval,
+        health_readiness_poll_interval: config.health_readiness_poll_interval,
+        audit_fallback_store: fallback_store,
+        audit_resend_interval: config.audit_resend_interval,
+        audit_fallback_alert_threshold_bytes: config.audit_fallback_alert_threshold_bytes,
+        audit_fallback_archive_auto_delete_enabled: config
+            .audit_fallback_archive_auto_delete_enabled,
+        audit_fallback_archive_retention: config.audit_fallback_archive_retention,
+        restore_test_interval: config.restore_test_interval,
+        restore_test_startup_delay: config.restore_test_startup_delay,
+        restore_test_sample_limit: config.restore_test_sample_limit,
+        integrity_check_interval: config.integrity_check_interval,
+        integrity_check_startup_delay: config.integrity_check_startup_delay,
+        siem_resend_interval: config.siem_resend_interval,
+        siem_long_failure_threshold: config.siem_long_failure_threshold,
+        scheduler_enabled: config.scheduler_enabled,
+        scheduler: scheduler::SchedulerConfig {
+            startup_delay: config.scheduler_startup_delay,
+            poll_interval: config.scheduler_poll_interval,
+            monthly_day: config.scheduler_monthly_day,
+            monthly_hour_utc: config.scheduler_monthly_hour_utc,
+            quarterly_hour_utc: config.scheduler_quarterly_hour_utc,
+            daily_hour_utc: config.scheduler_daily_hour_utc,
+            envelope_migration_batch_size: config.scheduler_envelope_migration_batch_size,
+            envelope_migration_max_batches: config.scheduler_envelope_migration_max_batches,
+            restore_test_sample_limit: config.restore_test_sample_limit,
+            local_archive_dir: config.scheduler_local_archive_dir.clone(),
+        },
+    };
 
     let state = AppState {
         master_key_ring: Arc::new(config.master_key_ring),
@@ -264,7 +321,7 @@ async fn run_server_with_config(config: config::AppConfig) {
         audit_recorder,
         ledger_appender,
         incident_recorder,
-        siem_forwarding: siem_forwarding.clone(),
+        siem_forwarding,
         audit_fallback_store: app_fallback_store,
         readiness_state,
         health_readiness_poll_interval: config.health_readiness_poll_interval,
@@ -273,48 +330,97 @@ async fn run_server_with_config(config: config::AppConfig) {
         http_rate_limit_requests: config.http_rate_limit_requests,
         http_rate_limit_window: config.http_rate_limit_window,
     };
-    if !config.scheduler_enabled {
+
+    (state, deps)
+}
+
+/// すべてのバックグラウンドループを spawn する。
+///
+/// shutdown は `shutdown_sender.subscribe()` で各ループへ配信する。
+fn spawn_background_loops(
+    state: &AppState,
+    deps: BackgroundDeps,
+    shutdown_sender: &watch::Sender<bool>,
+) {
+    let BackgroundDeps {
+        http_client,
+        jwks_cache,
+        jwks_url,
+        jwks_refresh_interval,
+        health_readiness_poll_interval,
+        audit_fallback_store,
+        audit_resend_interval,
+        audit_fallback_alert_threshold_bytes,
+        audit_fallback_archive_auto_delete_enabled,
+        audit_fallback_archive_retention,
+        restore_test_interval,
+        restore_test_startup_delay,
+        restore_test_sample_limit,
+        integrity_check_interval,
+        integrity_check_startup_delay,
+        siem_resend_interval,
+        siem_long_failure_threshold,
+        scheduler_enabled,
+        scheduler,
+    } = deps;
+
+    tokio::spawn(background::run_jwks_refresh_loop(
+        jwks_cache,
+        http_client,
+        jwks_url,
+        jwks_refresh_interval,
+        shutdown_sender.subscribe(),
+    ));
+
+    tokio::spawn(background::run_supabase_readiness_poll_loop(
+        state.readiness_state.clone(),
+        state.supabase_client.clone(),
+        health_readiness_poll_interval,
+        shutdown_sender.subscribe(),
+    ));
+
+    tokio::spawn(background::run_audit_resend_loop(
+        state.audit_recorder.clone(),
+        audit_fallback_store,
+        audit_resend_interval,
+        audit_fallback_alert_threshold_bytes,
+        audit_fallback_archive_auto_delete_enabled,
+        audit_fallback_archive_retention,
+        shutdown_sender.subscribe(),
+    ));
+
+    if !scheduler_enabled {
         tokio::spawn(background::run_restore_test_loop(
             state.clone(),
-            config.restore_test_interval,
-            config.restore_test_startup_delay,
-            config.restore_test_sample_limit,
-            shutdown_sender.subscribe(),
-        ));
-    }
-    tokio::spawn(background::run_integrity_check_loop(
-        state.clone(),
-        config.integrity_check_interval,
-        config.integrity_check_startup_delay,
-        shutdown_sender.subscribe(),
-    ));
-    tokio::spawn(background::run_siem_resend_loop(
-        siem_forwarding,
-        state.incident_recorder.clone(),
-        config.siem_resend_interval,
-        config.siem_long_failure_threshold,
-        shutdown_sender.subscribe(),
-    ));
-    if config.scheduler_enabled {
-        tokio::spawn(scheduler::run_scheduler_loop(
-            state.clone(),
-            scheduler::SchedulerConfig {
-                startup_delay: config.scheduler_startup_delay,
-                poll_interval: config.scheduler_poll_interval,
-                monthly_day: config.scheduler_monthly_day,
-                monthly_hour_utc: config.scheduler_monthly_hour_utc,
-                quarterly_hour_utc: config.scheduler_quarterly_hour_utc,
-                daily_hour_utc: config.scheduler_daily_hour_utc,
-                envelope_migration_batch_size: config.scheduler_envelope_migration_batch_size,
-                envelope_migration_max_batches: config.scheduler_envelope_migration_max_batches,
-                restore_test_sample_limit: config.restore_test_sample_limit,
-                local_archive_dir: config.scheduler_local_archive_dir.clone(),
-            },
+            restore_test_interval,
+            restore_test_startup_delay,
+            restore_test_sample_limit,
             shutdown_sender.subscribe(),
         ));
     }
 
-    serve_app(state, listen_addr, shutdown_sender).await;
+    tokio::spawn(background::run_integrity_check_loop(
+        state.clone(),
+        integrity_check_interval,
+        integrity_check_startup_delay,
+        shutdown_sender.subscribe(),
+    ));
+
+    tokio::spawn(background::run_siem_resend_loop(
+        state.siem_forwarding.clone(),
+        state.incident_recorder.clone(),
+        siem_resend_interval,
+        siem_long_failure_threshold,
+        shutdown_sender.subscribe(),
+    ));
+
+    if scheduler_enabled {
+        tokio::spawn(scheduler::run_scheduler_loop(
+            state.clone(),
+            scheduler,
+            shutdown_sender.subscribe(),
+        ));
+    }
 }
 
 fn build_notification_sink(

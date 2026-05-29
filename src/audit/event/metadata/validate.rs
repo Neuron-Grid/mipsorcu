@@ -498,6 +498,19 @@ fn validate_metadata_values(
     result: AuditResult,
     object: &Map<String, Value>,
 ) -> Result<(), AuditEventError> {
+    validate_numeric_metadata_values(result, object)?;
+    validate_id_metadata_values(action, result, object)?;
+    validate_string_metadata_values(result, object)?;
+    validate_timestamp_metadata_values(object)?;
+    validate_integrity_violation_summary_values(action, object)?;
+    Ok(())
+}
+
+/// 数値メタデータ（u64 / 正の u64 / failed_version）の値域を検証する。
+fn validate_numeric_metadata_values(
+    result: AuditResult,
+    object: &Map<String, Value>,
+) -> Result<(), AuditEventError> {
     for key in [
         "checked_secret_count",
         "checked_secret_version_count",
@@ -546,6 +559,15 @@ fn validate_metadata_values(
         }
     }
 
+    Ok(())
+}
+
+/// ID 系メタデータの解析と、action/result に依存する出現可否を検証する。
+fn validate_id_metadata_values(
+    action: AuditAction,
+    result: AuditResult,
+    object: &Map<String, Value>,
+) -> Result<(), AuditEventError> {
     for key in ["secret_version_id", "attempted_secret_id"] {
         if let Some(value) = object.get(key) {
             let text = value
@@ -581,6 +603,14 @@ fn validate_metadata_values(
         });
     }
 
+    Ok(())
+}
+
+/// 文字列・列挙・hex 系メタデータの形式と、result に依存する出現可否を検証する。
+fn validate_string_metadata_values(
+    result: AuditResult,
+    object: &Map<String, Value>,
+) -> Result<(), AuditEventError> {
     if let Some(value) = object.get("error_code") {
         if result != AuditResult::Failure {
             return Err(AuditEventError::InvalidMetadataValue { key: "error_code" });
@@ -638,16 +668,6 @@ fn validate_metadata_values(
         }
     }
 
-    for key in ["created_at", "activated_at", "retired_at"] {
-        if let Some(value) = object.get(key) {
-            let text = value
-                .as_str()
-                .ok_or(AuditEventError::InvalidMetadataValue { key })?;
-            SourceEventAt::parse(text)
-                .map_err(|_| AuditEventError::InvalidMetadataValue { key })?;
-        }
-    }
-
     for key in ["detection_source", "dedupe_key", "notification_sink"] {
         if let Some(value) = object.get(key) {
             validate_non_blank_short_string(key, value, 128)?;
@@ -689,35 +709,12 @@ fn validate_metadata_values(
         }
     }
 
-    if let Some(value) = object.get("target_year_month") {
-        let text = value
-            .as_str()
-            .ok_or(AuditEventError::InvalidMetadataValue {
-                key: "target_year_month",
-            })?;
-        crate::ledger::MonthlyDigestPeriod::parse(text).map_err(|_| {
-            AuditEventError::InvalidMetadataValue {
-                key: "target_year_month",
-            }
-        })?;
-    }
-
     if let Some(value) = object.get("format") {
         let text = value
             .as_str()
             .ok_or(AuditEventError::InvalidMetadataValue { key: "format" })?;
         if text != "json" && text != "markdown" {
             return Err(AuditEventError::InvalidMetadataValue { key: "format" });
-        }
-    }
-
-    for key in ["period_start", "period_end"] {
-        if let Some(value) = object.get(key) {
-            let text = value
-                .as_str()
-                .ok_or(AuditEventError::InvalidMetadataValue { key })?;
-            SourceEventAt::parse(text)
-                .map_err(|_| AuditEventError::InvalidMetadataValue { key })?;
         }
     }
 
@@ -740,6 +737,52 @@ fn validate_metadata_values(
         validate_exact_string("reason", value, "no_current_secret_versions")?;
     }
 
+    Ok(())
+}
+
+/// 時刻・期間系メタデータ（タイムスタンプ / 年月）の形式を検証する。
+fn validate_timestamp_metadata_values(object: &Map<String, Value>) -> Result<(), AuditEventError> {
+    for key in ["created_at", "activated_at", "retired_at"] {
+        if let Some(value) = object.get(key) {
+            let text = value
+                .as_str()
+                .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+            SourceEventAt::parse(text)
+                .map_err(|_| AuditEventError::InvalidMetadataValue { key })?;
+        }
+    }
+
+    if let Some(value) = object.get("target_year_month") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue {
+                key: "target_year_month",
+            })?;
+        crate::ledger::MonthlyDigestPeriod::parse(text).map_err(|_| {
+            AuditEventError::InvalidMetadataValue {
+                key: "target_year_month",
+            }
+        })?;
+    }
+
+    for key in ["period_start", "period_end"] {
+        if let Some(value) = object.get(key) {
+            let text = value
+                .as_str()
+                .ok_or(AuditEventError::InvalidMetadataValue { key })?;
+            SourceEventAt::parse(text)
+                .map_err(|_| AuditEventError::InvalidMetadataValue { key })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// IntegrityCheck の violation_summary 内の各カウンタ値を検証する。
+fn validate_integrity_violation_summary_values(
+    action: AuditAction,
+    object: &Map<String, Value>,
+) -> Result<(), AuditEventError> {
     if action == AuditAction::IntegrityCheck
         && let Some(summary_value) = object.get("violation_summary")
     {
