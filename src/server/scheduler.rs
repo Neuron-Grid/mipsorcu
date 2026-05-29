@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -221,193 +222,242 @@ async fn run_due_jobs(
     runtime_state: &mut SchedulerRuntimeState,
     now: OffsetDateTime,
 ) {
-    if monthly_due(now, config.monthly_day, config.monthly_hour_utc) {
-        let Ok(period) = previous_month_period(now) else {
-            tracing::error!("scheduler failed to compute previous monthly digest period");
-            return;
-        };
-        let key = JobRunKey {
-            job_name: ScheduledJobName::LedgerHashChainFullVerify,
-            period_key: period.as_str().to_owned(),
-        };
-        let hash_period = period.clone();
-        let hash_result = run_once_per_period(
-            runtime_state,
-            key,
-            run_full_ledger_hash_chain_verify_job(
-                state,
-                ScheduledJobName::LedgerHashChainFullVerify,
-                Some(hash_period),
-            ),
-        )
-        .await;
-
-        let key = JobRunKey {
-            job_name: ScheduledJobName::LedgerSignatureFullVerify,
-            period_key: period.as_str().to_owned(),
-        };
-        let signature_period = period.clone();
-        let signature_result = run_once_per_period(
-            runtime_state,
-            key,
-            run_full_ledger_signature_verify_job(
-                state,
-                ScheduledJobName::LedgerSignatureFullVerify,
-                Some(signature_period),
-            ),
-        )
-        .await;
-
-        if hash_result.is_err() || signature_result.is_err() {
-            let digest_period = period.clone();
-            let key = JobRunKey {
-                job_name: ScheduledJobName::MonthlyDigestGenerate,
-                period_key: digest_period.as_str().to_owned(),
-            };
-            let _ = run_once_per_period(
-                runtime_state,
-                key,
-                record_precondition_failure_job(
-                    state,
-                    ScheduledJobName::MonthlyDigestGenerate,
-                    Some(digest_period),
-                    "ledger_verification_precondition_failed",
-                ),
-            )
-            .await;
-
-            let archive_period = period.clone();
-            let key = JobRunKey {
-                job_name: ScheduledJobName::ArchiveExport,
-                period_key: archive_period.as_str().to_owned(),
-            };
-            let _ = run_once_per_period(
-                runtime_state,
-                key,
-                record_precondition_failure_job(
-                    state,
-                    ScheduledJobName::ArchiveExport,
-                    Some(archive_period),
-                    "ledger_verification_precondition_failed",
-                ),
-            )
-            .await;
-
-            return;
-        }
-
-        let key = JobRunKey {
-            job_name: ScheduledJobName::MonthlyDigestGenerate,
-            period_key: period.as_str().to_owned(),
-        };
-        let digest_result = run_once_per_period(
-            runtime_state,
-            key,
-            run_monthly_digest_generate_job(state, period.clone()),
-        )
-        .await;
-
-        let signed_digest = match digest_result {
-            Ok(Some(digest)) => digest,
-            Ok(None) => match fetch_signed_digest(state.supabase_client.as_ref(), &period).await {
-                Ok(digest) => digest,
-                Err(error_code) => {
-                    let key = JobRunKey {
-                        job_name: ScheduledJobName::ArchiveExport,
-                        period_key: period.as_str().to_owned(),
-                    };
-                    let _ = run_once_per_period(
-                        runtime_state,
-                        key,
-                        record_precondition_failure_job(
-                            state,
-                            ScheduledJobName::ArchiveExport,
-                            Some(period),
-                            error_code,
-                        ),
-                    )
-                    .await;
-                    return;
-                }
-            },
-            Err(_) => {
-                let key = JobRunKey {
-                    job_name: ScheduledJobName::ArchiveExport,
-                    period_key: period.as_str().to_owned(),
-                };
-                let _ = run_once_per_period(
-                    runtime_state,
-                    key,
-                    record_precondition_failure_job(
-                        state,
-                        ScheduledJobName::ArchiveExport,
-                        Some(period),
-                        "monthly_digest_generate_failed",
-                    ),
-                )
-                .await;
-                return;
-            }
-        };
-
-        let archive_period = signed_digest.period.clone();
-        let key = JobRunKey {
-            job_name: ScheduledJobName::ArchiveExport,
-            period_key: archive_period.as_str().to_owned(),
-        };
-        let timestamping_digest = signed_digest.clone();
-        let _ = run_once_per_period(
-            runtime_state,
-            key,
-            run_archive_export_job(state, config, signed_digest),
-        )
-        .await;
-
-        let timestamping_period = timestamping_digest.period.clone();
-        let key = JobRunKey {
-            job_name: ScheduledJobName::MonthlyTimestampingObtain,
-            period_key: timestamping_period.as_str().to_owned(),
-        };
-        let _ = run_once_per_period(
-            runtime_state,
-            key,
-            run_monthly_timestamping_obtain_job(state, timestamping_digest),
-        )
-        .await;
+    if monthly_due(now, config.monthly_day, config.monthly_hour_utc)
+        && run_monthly_due_jobs(state, config, runtime_state, now)
+            .await
+            .is_break()
+    {
+        return;
     }
 
     if daily_due(now, config.daily_hour_utc) {
-        let daily_key = daily_period_key(now);
+        run_daily_due_jobs(state, config, runtime_state, now).await;
+    }
+
+    if quarterly_due(now, config.monthly_day, config.quarterly_hour_utc) {
+        run_quarterly_due_jobs(state, config, runtime_state, now).await;
+    }
+}
+
+// 月次パイプライン（連鎖検証 → 署名検証 → ダイジェスト生成 → アーカイブ →
+// タイムスタンプ）を統括する。早期中断は元の `run_due_jobs` 月次ブロックの
+// 早期 `return` を再現するもので、`ControlFlow::Break` は呼び出し側で日次・
+// 四半期ジョブをスキップさせる意味を持つ。末尾到達時のみ `Continue` を返す。
+async fn run_monthly_due_jobs(
+    state: &AppState,
+    config: &SchedulerConfig,
+    runtime_state: &mut SchedulerRuntimeState,
+    now: OffsetDateTime,
+) -> ControlFlow<()> {
+    let Ok(period) = previous_month_period(now) else {
+        tracing::error!("scheduler failed to compute previous monthly digest period");
+        return ControlFlow::Break(());
+    };
+
+    if !run_monthly_ledger_verification(state, runtime_state, &period).await {
+        record_monthly_precondition_failures(
+            state,
+            runtime_state,
+            &period,
+            &[
+                ScheduledJobName::MonthlyDigestGenerate,
+                ScheduledJobName::ArchiveExport,
+            ],
+            "ledger_verification_precondition_failed",
+        )
+        .await;
+        return ControlFlow::Break(());
+    }
+
+    let signed_digest = match resolve_monthly_signed_digest(state, runtime_state, &period).await {
+        Ok(digest) => digest,
+        Err(error_code) => {
+            record_monthly_precondition_failures(
+                state,
+                runtime_state,
+                &period,
+                &[ScheduledJobName::ArchiveExport],
+                error_code,
+            )
+            .await;
+            return ControlFlow::Break(());
+        }
+    };
+
+    run_monthly_archive_export(state, config, runtime_state, signed_digest.clone()).await;
+    run_monthly_timestamping(state, runtime_state, signed_digest).await;
+    ControlFlow::Continue(())
+}
+
+// 台帳のハッシュ連鎖検証と署名検証を両方実行し、いずれも成功したかを返す。
+// 署名検証を短絡させず、常に両方のジョブを実行する。
+async fn run_monthly_ledger_verification(
+    state: &AppState,
+    runtime_state: &mut SchedulerRuntimeState,
+    period: &MonthlyDigestPeriod,
+) -> bool {
+    let key = JobRunKey {
+        job_name: ScheduledJobName::LedgerHashChainFullVerify,
+        period_key: period.as_str().to_owned(),
+    };
+    let hash_result = run_once_per_period(
+        runtime_state,
+        key,
+        run_full_ledger_hash_chain_verify_job(
+            state,
+            ScheduledJobName::LedgerHashChainFullVerify,
+            Some(period.clone()),
+        ),
+    )
+    .await;
+
+    let key = JobRunKey {
+        job_name: ScheduledJobName::LedgerSignatureFullVerify,
+        period_key: period.as_str().to_owned(),
+    };
+    let signature_result = run_once_per_period(
+        runtime_state,
+        key,
+        run_full_ledger_signature_verify_job(
+            state,
+            ScheduledJobName::LedgerSignatureFullVerify,
+            Some(period.clone()),
+        ),
+    )
+    .await;
+
+    hash_result.is_ok() && signature_result.is_ok()
+}
+
+// 月次ダイジェストを取得する。生成ジョブが成功すればその結果を、既に生成済み
+// （`Ok(None)`）であれば Supabase からフォールバック取得する。失敗時は、後続の
+// アーカイブ前提失敗として記録すべき `error_code` を `Err` で返す（記録は呼び出し側）。
+async fn resolve_monthly_signed_digest(
+    state: &AppState,
+    runtime_state: &mut SchedulerRuntimeState,
+    period: &MonthlyDigestPeriod,
+) -> Result<SignedMonthlyDigest, &'static str> {
+    let key = JobRunKey {
+        job_name: ScheduledJobName::MonthlyDigestGenerate,
+        period_key: period.as_str().to_owned(),
+    };
+    let digest_result = run_once_per_period(
+        runtime_state,
+        key,
+        run_monthly_digest_generate_job(state, period.clone()),
+    )
+    .await;
+
+    match digest_result {
+        Ok(Some(digest)) => Ok(digest),
+        Ok(None) => fetch_signed_digest(state.supabase_client.as_ref(), period).await,
+        Err(_) => Err("monthly_digest_generate_failed"),
+    }
+}
+
+// 指定したジョブ群について前提条件の失敗を監査へ記録する。
+// `job_names` に渡した順序で記録する（記録順序は監査上の意味を持つため厳守）。
+async fn record_monthly_precondition_failures(
+    state: &AppState,
+    runtime_state: &mut SchedulerRuntimeState,
+    period: &MonthlyDigestPeriod,
+    job_names: &[ScheduledJobName],
+    error_code: &'static str,
+) {
+    for &job_name in job_names {
         let key = JobRunKey {
-            job_name: ScheduledJobName::DailyEnvelopeLazyMigration,
-            period_key: daily_key,
+            job_name,
+            period_key: period.as_str().to_owned(),
         };
         let _ = run_once_per_period(
             runtime_state,
             key,
-            run_daily_envelope_lazy_migration_job(state, config),
+            record_precondition_failure_job(state, job_name, Some(period.clone()), error_code),
         )
         .await;
     }
+}
 
-    if quarterly_due(now, config.monthly_day, config.quarterly_hour_utc) {
-        let quarter_key = quarter_period_key(now);
-        for job_name in [
-            ScheduledJobName::RestoreTest,
-            ScheduledJobName::SignatureKeyReviewReminder,
-            ScheduledJobName::AuditorPermissionReviewReminder,
-        ] {
-            let key = JobRunKey {
-                job_name,
-                period_key: quarter_key.clone(),
-            };
-            let _ = run_once_per_period(
-                runtime_state,
-                key,
-                run_quarterly_job(state, config, job_name),
-            )
-            .await;
-        }
+// 署名済みダイジェストのアーカイブ書き出しジョブを実行する。
+async fn run_monthly_archive_export(
+    state: &AppState,
+    config: &SchedulerConfig,
+    runtime_state: &mut SchedulerRuntimeState,
+    signed_digest: SignedMonthlyDigest,
+) {
+    let key = JobRunKey {
+        job_name: ScheduledJobName::ArchiveExport,
+        period_key: signed_digest.period.as_str().to_owned(),
+    };
+    let _ = run_once_per_period(
+        runtime_state,
+        key,
+        run_archive_export_job(state, config, signed_digest),
+    )
+    .await;
+}
+
+// 署名済みダイジェストの外部タイムスタンプ取得ジョブを実行する。
+async fn run_monthly_timestamping(
+    state: &AppState,
+    runtime_state: &mut SchedulerRuntimeState,
+    signed_digest: SignedMonthlyDigest,
+) {
+    let key = JobRunKey {
+        job_name: ScheduledJobName::MonthlyTimestampingObtain,
+        period_key: signed_digest.period.as_str().to_owned(),
+    };
+    let _ = run_once_per_period(
+        runtime_state,
+        key,
+        run_monthly_timestamping_obtain_job(state, signed_digest),
+    )
+    .await;
+}
+
+// 日次スケジュールのジョブ（envelope の遅延マイグレーション）を実行する。
+async fn run_daily_due_jobs(
+    state: &AppState,
+    config: &SchedulerConfig,
+    runtime_state: &mut SchedulerRuntimeState,
+    now: OffsetDateTime,
+) {
+    let daily_key = daily_period_key(now);
+    let key = JobRunKey {
+        job_name: ScheduledJobName::DailyEnvelopeLazyMigration,
+        period_key: daily_key,
+    };
+    let _ = run_once_per_period(
+        runtime_state,
+        key,
+        run_daily_envelope_lazy_migration_job(state, config),
+    )
+    .await;
+}
+
+// 四半期スケジュールのジョブ（リストアテスト・各種レビュー督促）を順に実行する。
+async fn run_quarterly_due_jobs(
+    state: &AppState,
+    config: &SchedulerConfig,
+    runtime_state: &mut SchedulerRuntimeState,
+    now: OffsetDateTime,
+) {
+    let quarter_key = quarter_period_key(now);
+    for job_name in [
+        ScheduledJobName::RestoreTest,
+        ScheduledJobName::SignatureKeyReviewReminder,
+        ScheduledJobName::AuditorPermissionReviewReminder,
+    ] {
+        let key = JobRunKey {
+            job_name,
+            period_key: quarter_key.clone(),
+        };
+        let _ = run_once_per_period(
+            runtime_state,
+            key,
+            run_quarterly_job(state, config, job_name),
+        )
+        .await;
     }
 }
 
