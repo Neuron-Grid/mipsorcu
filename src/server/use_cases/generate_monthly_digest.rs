@@ -7,7 +7,8 @@
 //! 4. digest hash を計算
 //! 5. Ed25519 署名
 //! 6. `monthly_digest` ledger entry として `rpc_append_ledger_entry` 経由で記録
-//! 7. 失敗時は `audit_events` に同期記録
+//!    （生成成功の記録は ledger entry そのもの）
+//! 7. 失敗時のみ `audit_events` に同期記録（`monthly_digest_generate` は failure 専用 action）
 //!
 //! 信頼境界ノート: Master Key・Data Key・平文・JWT を使用しない。
 //! サービスロールキーは非秘密メタデータの読み書きにのみ使用する。
@@ -15,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder, AuditResult,
+    AuditAction, AuditEvent, AuditEventParts, AuditRecorder, AuditResult,
     MonthlyDigestGenerateMetadata, RequestId,
 };
 use crate::ledger::{
@@ -53,8 +54,6 @@ pub enum GenerateMonthlyDigestError {
     BuildFailed { code: String },
     /// ledger entry への追記エラー。
     AppendFailed { code: &'static str },
-    /// 成功監査の構築または追記に失敗した。
-    SuccessAuditFailed { code: &'static str },
 }
 
 impl GenerateMonthlyDigestError {
@@ -65,7 +64,6 @@ impl GenerateMonthlyDigestError {
             Self::FetchFailed { code } => code,
             Self::BuildFailed { code } => code.as_str(),
             Self::AppendFailed { code } => code,
-            Self::SuccessAuditFailed { code } => code,
         }
     }
 }
@@ -84,9 +82,6 @@ impl std::fmt::Display for GenerateMonthlyDigestError {
             Self::AppendFailed { code } => {
                 write!(formatter, "monthly digest ledger append failed: {code}")
             }
-            Self::SuccessAuditFailed { code } => {
-                write!(formatter, "monthly digest success audit failed: {code}")
-            }
         }
     }
 }
@@ -103,7 +98,6 @@ impl std::error::Error for GenerateMonthlyDigestError {}
 pub async fn generate_monthly_digest(
     supabase_client: &Arc<SupabaseClient>,
     ledger_appender: &Arc<LedgerAppender>,
-    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     input: GenerateMonthlyDigestInput,
 ) -> Result<SignedMonthlyDigest, GenerateMonthlyDigestError> {
     let period = &input.period;
@@ -140,9 +134,9 @@ pub async fn generate_monthly_digest(
     // 3-5. canonical form 生成・hash 計算・Ed25519 署名を行い署名済み digest を組み立てる
     let signed_digest = build_signed_monthly_digest(ledger_appender, period, &range, &input)?;
 
-    // 6. ledger entry として追記
+    // 6. ledger entry として追記（成功の記録は ledger entry そのもの。
+    //    監査イベントは失敗時のみ記録する: monthly_digest_generate は failure 専用 action）
     append_digest_ledger_entry(ledger_appender, &signed_digest, &input).await?;
-    record_monthly_digest_success_audit(audit_recorder, &signed_digest, &input).await?;
 
     tracing::info!(
         request_id = %input.request_id.as_canonical_string(),
@@ -315,84 +309,6 @@ async fn append_digest_ledger_entry(
         );
         GenerateMonthlyDigestError::AppendFailed {
             code: error.as_error_code(),
-        }
-    })?;
-
-    Ok(())
-}
-
-async fn record_monthly_digest_success_audit(
-    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
-    signed_digest: &SignedMonthlyDigest,
-    input: &GenerateMonthlyDigestInput,
-) -> Result<(), GenerateMonthlyDigestError> {
-    let audit_event_id = AuditEventId::generate().map_err(|error| {
-        tracing::error!(
-            request_id = %input.request_id.as_canonical_string(),
-            period = input.period.as_str(),
-            error = %error,
-            "failed to generate audit event id for monthly_digest_generate success audit"
-        );
-        GenerateMonthlyDigestError::SuccessAuditFailed {
-            code: "monthly_digest_success_audit_event_id_failed",
-        }
-    })?;
-
-    let metadata = MonthlyDigestGenerateMetadata::success(
-        &signed_digest.period,
-        signed_digest.start_sequence_no,
-        signed_digest.end_sequence_no,
-        signed_digest.entry_count,
-        signed_digest.signature_key_version,
-        signed_digest.digest_hash,
-        input.generated_at.clone(),
-    )
-    .build()
-    .map_err(|error| {
-        tracing::error!(
-            request_id = %input.request_id.as_canonical_string(),
-            period = input.period.as_str(),
-            error = %error,
-            "failed to build monthly_digest_generate success audit metadata"
-        );
-        GenerateMonthlyDigestError::SuccessAuditFailed {
-            code: "monthly_digest_success_audit_metadata_failed",
-        }
-    })?;
-
-    let event = AuditEvent::new(AuditEventParts {
-        audit_event_id,
-        request_id: input.request_id.clone(),
-        actor_user_id: None,
-        actor_device_id: None,
-        action: AuditAction::MonthlyDigestGenerate,
-        target_secret_id: None,
-        result: AuditResult::Success,
-        key_version: None,
-        metadata_json: metadata,
-    })
-    .map_err(|error| {
-        tracing::error!(
-            request_id = %input.request_id.as_canonical_string(),
-            period = input.period.as_str(),
-            error = %error,
-            "failed to build monthly_digest_generate success audit event"
-        );
-        GenerateMonthlyDigestError::SuccessAuditFailed {
-            code: "monthly_digest_success_audit_event_failed",
-        }
-    })?;
-
-    audit_recorder.record(&event).await.map_err(|error| {
-        tracing::error!(
-            request_id = %input.request_id.as_canonical_string(),
-            period = input.period.as_str(),
-            error = %error,
-            error_code = "monthly_digest_success_audit_record_failed",
-            "monthly digest success audit primary and fallback recording failed"
-        );
-        GenerateMonthlyDigestError::SuccessAuditFailed {
-            code: "monthly_digest_success_audit_record_failed",
         }
     })?;
 

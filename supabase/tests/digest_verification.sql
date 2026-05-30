@@ -184,6 +184,56 @@ select is(
     'rpc_fetch_monthly_digest_for_verification: 0 rows for a different year_month'
 );
 
+-- ─── 3b. rpc_list_monthly_digests returns non-secret summary rows ─────────────
+
+select is(
+    (select count(*)::int from rpc_list_monthly_digests()),
+    1,
+    'rpc_list_monthly_digests: 1 row after a single digest is recorded'
+);
+
+create temp table digest_list_row as
+    select * from rpc_list_monthly_digests();
+
+select is(
+    (select target_year_month from digest_list_row),
+    '2026-04',
+    'rpc_list_monthly_digests: target_year_month from payload'
+);
+
+select is(
+    (select start_sequence_no from digest_list_row),
+    1::bigint,
+    'rpc_list_monthly_digests: start_sequence_no from payload'
+);
+
+select is(
+    (select end_sequence_no from digest_list_row),
+    2::bigint,
+    'rpc_list_monthly_digests: end_sequence_no from payload'
+);
+
+select is(
+    (select entry_count from digest_list_row),
+    2::bigint,
+    'rpc_list_monthly_digests: entry_count from payload'
+);
+
+select is(
+    (select signature_key_version from digest_list_row),
+    1::integer,
+    'rpc_list_monthly_digests: signature_key_version from ledger column'
+);
+
+select is(
+    (select digest_generated_at from digest_list_row),
+    '2026-04-30T23:59:59Z',
+    'rpc_list_monthly_digests: digest_generated_at is source_event_at'
+);
+
+-- 非秘密のみ: RETURNS TABLE 署名に digest_hash / sbc_signature / entry_hash は
+-- 含まれないため、list は hash・署名を返さない（署名で構造的に保証）。
+
 -- ─── 4. public_key is null when no key is registered for key_version ──────────
 
 -- Insert a second digest with key_version = 99 (not registered)

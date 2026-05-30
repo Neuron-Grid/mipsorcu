@@ -34,7 +34,9 @@ pub use audit_ui_rpc::{
     AuditUiSecretInventoryRow, AuditUiVerificationFailureRow, AuditUiVerificationFailuresParams,
 };
 pub use client::SupabaseClient;
-pub use digest_rpc::{DigestRpcError, LedgerRangeForMonth, classify_digest_rpc_error};
+pub use digest_rpc::{
+    DigestRpcError, LedgerRangeForMonth, MonthlyDigestSummary, classify_digest_rpc_error,
+};
 pub use error::SupabaseRpcError;
 pub use incident_rpc::IncidentRecordOutcome;
 pub use ledger_export_rpc::{

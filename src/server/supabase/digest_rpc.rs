@@ -5,7 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ledger::{LedgerHash, LedgerSequenceNo};
+use crate::ledger::{LedgerHash, LedgerSequenceNo, LedgerSignatureKeyVersion};
+use crate::types::SourceEventAt;
 
 use super::response::{ensure_success, response_contains_marker};
 use super::{SupabaseClient, SupabaseRpcError};
@@ -13,6 +14,25 @@ use super::{SupabaseClient, SupabaseRpcError};
 const DIGEST_INVALID_RPC_INPUT_MARKER: &str = "invalid_rpc_input";
 const DIGEST_DUPLICATE_MARKER: &str = "monthly_digest_already_exists";
 const DIGEST_RPC_PERIOD_FORMAT_MARKER: &str = "invalid_year_month_format";
+
+/// 過去に記録された月次 digest の概要（非秘密メタデータのみ）。
+///
+/// hash・signature・平文といった秘密情報は含まない（`digest list` 表示用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonthlyDigestSummary {
+    /// 対象年月（`"YYYY-MM"`）。
+    pub target_year_month: String,
+    /// 対象月最初のエントリの sequence_no。
+    pub start_sequence_no: LedgerSequenceNo,
+    /// 対象月最後のエントリの sequence_no。
+    pub end_sequence_no: LedgerSequenceNo,
+    /// 対象月のエントリ件数。
+    pub entry_count: u64,
+    /// digest 署名鍵バージョン。
+    pub signature_key_version: LedgerSignatureKeyVersion,
+    /// digest 生成時刻（RFC3339 UTC, 末尾 `Z`）。
+    pub digest_generated_at: SourceEventAt,
+}
 
 /// 指定年月の `ledger_entries` 範囲情報。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +96,27 @@ impl SupabaseClient {
 
         Ok(rows.into_iter().next().is_some_and(|r| r.exists))
     }
+
+    /// 記録済みの月次 digest 一覧を取得する（年月順）。
+    ///
+    /// 非秘密メタデータ（年月・sequence 範囲・件数・署名鍵バージョン・生成時刻）
+    /// のみを返す。digest なしの場合は空ベクタ。
+    pub async fn list_monthly_digests(
+        &self,
+    ) -> Result<Vec<MonthlyDigestSummary>, SupabaseRpcError> {
+        let response = self
+            .post_rpc("rpc_list_monthly_digests", &ListDigestsParams {})
+            .await?;
+        let rows: Vec<MonthlyDigestSummaryResponse> = ensure_success(response)
+            .await?
+            .json()
+            .await
+            .map_err(|error| SupabaseRpcError::InvalidResponse(error.to_string()))?;
+
+        rows.into_iter()
+            .map(MonthlyDigestSummary::try_from)
+            .collect()
+    }
 }
 
 // ---- Request params ----
@@ -89,6 +130,9 @@ struct FetchLedgerRangeParams {
 struct CheckDigestExistsParams {
     p_year_month: String,
 }
+
+#[derive(Serialize)]
+struct ListDigestsParams {}
 
 // ---- Response deserialization ----
 
@@ -156,6 +200,68 @@ impl TryFrom<LedgerRangeResponse> for LedgerRangeForMonth {
 #[serde(deny_unknown_fields)]
 struct DigestExistsResponse {
     exists: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MonthlyDigestSummaryResponse {
+    target_year_month: String,
+    start_sequence_no: i64,
+    end_sequence_no: i64,
+    entry_count: i64,
+    signature_key_version: i32,
+    digest_generated_at: String,
+}
+
+impl TryFrom<MonthlyDigestSummaryResponse> for MonthlyDigestSummary {
+    type Error = SupabaseRpcError;
+
+    fn try_from(response: MonthlyDigestSummaryResponse) -> Result<Self, Self::Error> {
+        let start_sequence_no =
+            LedgerSequenceNo::from_i64(response.start_sequence_no).map_err(|_| {
+                SupabaseRpcError::InvalidResponse(
+                    "digest list RPC returned invalid start_sequence_no".to_owned(),
+                )
+            })?;
+        let end_sequence_no =
+            LedgerSequenceNo::from_i64(response.end_sequence_no).map_err(|_| {
+                SupabaseRpcError::InvalidResponse(
+                    "digest list RPC returned invalid end_sequence_no".to_owned(),
+                )
+            })?;
+        let entry_count = u64::try_from(response.entry_count).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "digest list RPC returned negative entry_count".to_owned(),
+            )
+        })?;
+        let signature_key_version_raw =
+            u32::try_from(response.signature_key_version).map_err(|_| {
+                SupabaseRpcError::InvalidResponse(
+                    "digest list RPC returned invalid signature_key_version".to_owned(),
+                )
+            })?;
+        let signature_key_version = LedgerSignatureKeyVersion::new(signature_key_version_raw)
+            .map_err(|_| {
+                SupabaseRpcError::InvalidResponse(
+                    "digest list RPC returned invalid signature_key_version".to_owned(),
+                )
+            })?;
+        let digest_generated_at =
+            SourceEventAt::parse(&response.digest_generated_at).map_err(|_| {
+                SupabaseRpcError::InvalidResponse(
+                    "digest list RPC returned invalid digest_generated_at".to_owned(),
+                )
+            })?;
+
+        Ok(MonthlyDigestSummary {
+            target_year_month: response.target_year_month,
+            start_sequence_no,
+            end_sequence_no,
+            entry_count,
+            signature_key_version,
+            digest_generated_at,
+        })
+    }
 }
 
 // ---- Error classification ----

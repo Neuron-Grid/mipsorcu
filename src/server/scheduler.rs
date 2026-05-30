@@ -748,7 +748,6 @@ async fn run_monthly_digest_generate_job(
     let signed_digest = match generate_monthly_digest(
         &state.supabase_client,
         &state.ledger_appender,
-        &state.audit_recorder,
         input,
     )
     .await
