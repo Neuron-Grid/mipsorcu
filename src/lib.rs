@@ -30,10 +30,10 @@ pub use alias::{
     prepare_alias_create, prepare_alias_update,
 };
 pub use archive::{
-    ARCHIVE_SCHEMA_VERSION, ArchiveBackend, ArchiveBackendError, ArchiveExportPackage,
-    ArchiveObjectKey, ArchiveVerifyOutcome, InMemoryArchiveBackend, LocalFileArchiveBackend,
-    S3ArchiveBackendConfig, S3ArchiveBackendConfigError, S3ImmutableArchiveBackend,
-    S3ObjectLockMode,
+    ARCHIVE_SCHEMA_VERSION, AnyArchiveBackend, ArchiveBackend, ArchiveBackendError,
+    ArchiveExportPackage, ArchiveObjectKey, ArchiveVerifyOutcome, InMemoryArchiveBackend,
+    LocalFileArchiveBackend, S3ArchiveBackendConfig, S3ArchiveBackendConfigError,
+    S3ImmutableArchiveBackend, S3ObjectLockMode,
 };
 pub use audit::{
     ArchiveExportMetadata, ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent,

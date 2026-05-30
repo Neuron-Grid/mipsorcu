@@ -6,11 +6,13 @@
 //! 信頼境界ノート: `ArchiveExportPackage` は `SignedMonthlyDigest` からのみ
 //! 構築可能。平文・Master Key・Data Key・JWT が型レベルで排除される。
 
+pub mod any;
 pub mod backend;
 pub mod dummy;
 pub mod export;
 pub mod s3;
 
+pub use any::AnyArchiveBackend;
 pub use backend::{ArchiveBackend, ArchiveBackendError, ArchiveObjectKey, ArchiveVerifyOutcome};
 pub use dummy::{InMemoryArchiveBackend, LocalFileArchiveBackend};
 pub use export::{ARCHIVE_SCHEMA_VERSION, ArchiveExportPackage};

@@ -775,7 +775,12 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
         }
         // 月次 digest 検証（成功・失敗両方を記録、allowlist は result 共通）
         AuditAction::MonthlyDigestVerify => {
-            vec!["error_code", "target_year_month", "verify_result", "source_event_at"]
+            vec![
+                "error_code",
+                "target_year_month",
+                "verify_result",
+                "source_event_at",
+            ]
         }
         // archive export（成功・失敗両方を記録、allowlist は result 共通）
         AuditAction::ArchiveExport => {

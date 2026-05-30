@@ -15,8 +15,8 @@ use crate::server::siem_forwarding::SiemForwardingService;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::{
-    audit_report, auditor, background, config, digest, integrity_check, key_rotation, restore_test,
-    router, scheduler, signature_key,
+    archive, audit_report, auditor, background, config, digest, integrity_check, key_rotation,
+    restore_test, router, scheduler, signature_key,
 };
 use crate::siem::{
     AnySiemSink, InMemorySiemSink, LocalSiemFallbackBuffer, OtlpSiemSink, SiemForwarder,
@@ -82,6 +82,18 @@ pub async fn run_entrypoint() {
                 std::process::exit(2);
             }
         }
+        EntrypointCommand::Archive(command_args) => {
+            init_tracing();
+            let config = config::load_config().unwrap_or_else(|error| {
+                tracing::error!(error = %error, "configuration loading failed");
+                std::process::exit(1);
+            });
+
+            if let Err(error) = archive::run_cli(config, command_args).await {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
         EntrypointCommand::AuditReport(command_args) => {
             init_tracing();
             let config = config::load_config().unwrap_or_else(|error| {
@@ -120,6 +132,7 @@ enum EntrypointCommand<'a> {
     IntegrityCheck(&'a [String]),
     Auditor(&'a [String]),
     Digest(&'a [String]),
+    Archive(&'a [String]),
     AuditReport(&'a [String]),
     SignatureKey(&'a [String]),
     Usage,
@@ -135,6 +148,7 @@ fn parse_entrypoint_command(args: &[String]) -> EntrypointCommand<'_> {
             "integrity-check" => EntrypointCommand::IntegrityCheck(command_args),
             "auditor" => EntrypointCommand::Auditor(command_args),
             "digest" => EntrypointCommand::Digest(command_args),
+            "archive" => EntrypointCommand::Archive(command_args),
             "audit-report" => EntrypointCommand::AuditReport(command_args),
             "signature-key" => EntrypointCommand::SignatureKey(command_args),
             _ => EntrypointCommand::Usage,
@@ -575,6 +589,7 @@ fn usage() -> String {
         integrity_check::usage(),
         auditor::usage(),
         digest::usage(),
+        archive::usage(),
         audit_report::usage(),
         signature_key::usage(),
     ]
