@@ -28,6 +28,7 @@ use crate::server::supabase::{
 use crate::server::use_cases::export_digest_to_archive::export_digest_to_archive_with_incident;
 use crate::server::use_cases::generate_monthly_digest::{
     GenerateMonthlyDigestInput, generate_monthly_digest, record_monthly_digest_failure_audit,
+    record_monthly_digest_success_audit,
 };
 use crate::server::use_cases::request_timestamping_for_digest::request_timestamping_for_digest_with_incident;
 use crate::timestamping::InMemoryTimestampingService;
@@ -752,7 +753,12 @@ async fn run_monthly_digest_generate_job(
     )
     .await
     {
-        Ok(digest) => digest,
+        Ok(digest) => {
+            // 新規生成成功を audit_events に同期記録する
+            // （重複時の既存 digest 再取得では記録しない）。
+            record_monthly_digest_success_audit(&state.audit_recorder, &request_id, &digest).await;
+            digest
+        }
         Err(error) => {
             if error.as_error_code() == "monthly_digest_duplicate" {
                 match fetch_signed_digest(state.supabase_client.as_ref(), &period).await {

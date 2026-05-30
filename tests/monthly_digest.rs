@@ -332,6 +332,90 @@ fn generate_duplicate_month_exit_2() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[test]
+fn generate_success_records_success_audit_without_poison() -> Result<(), Box<dyn std::error::Error>>
+{
+    let public_key_hex = configured_public_key_hex()?;
+    let hash_hex = "ab".repeat(32);
+    let range_body = json!([{
+        "start_sequence_no": 1i64,
+        "end_sequence_no": 40i64,
+        "start_entry_hash": format!("\\x{hash_hex}"),
+        "end_entry_hash": format!("\\x{hash_hex}"),
+        "entry_count": 40i64,
+    }])
+    .to_string();
+    let chain_state_body = json!([{
+        "last_sequence_no": 40i64,
+        "last_entry_hash": format!("\\x{hash_hex}"),
+    }])
+    .to_string();
+    let append_body = json!([{
+        "ledger_entry_id": "a0000000-0000-4000-8000-000000000099",
+        "sequence_no": 41i64,
+        "entry_hash": format!("\\x{hash_hex}"),
+        "chain_last_sequence_no": 41i64,
+        "chain_last_entry_hash": format!("\\x{hash_hex}"),
+        "replayed": false,
+    }])
+    .to_string();
+
+    // 1. 署名鍵 status（active・一致）→ 2. 重複チェック exists=false →
+    // 3. 範囲取得 → 4. chain head 取得 → 5. ledger 追記 → 6. 成功 audit
+    let (url, receiver, server) = spawn_scripted_server(vec![
+        (200, active_key_status_body(&public_key_hex)),
+        (200, r#"[{"exists":false}]"#.to_owned()),
+        (200, range_body),
+        (200, chain_state_body),
+        (200, append_body),
+        (200, r#""ok""#.to_owned()),
+    ])?;
+
+    let run = run_digest(
+        &url,
+        "generate-success",
+        &["generate", "--year-month", "2026-05", "--format", "json"],
+    )?;
+    server
+        .join()
+        .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+    assert!(
+        run.output.status.success(),
+        "expected exit 0 for successful generate, stderr={}",
+        String::from_utf8_lossy(&run.output.stderr)
+    );
+
+    // 生成成功は monthly_digest_generate/success として rpc_append_audit_event に送られる。
+    let requests: Vec<CapturedRequest> = receiver.try_iter().collect();
+    let audit_request = requests
+        .iter()
+        .find(|request| request.path.contains("rpc_append_audit_event"))
+        .expect("rpc_append_audit_event should be called on generate success");
+    let body = audit_request
+        .body
+        .as_ref()
+        .expect("audit request should carry a JSON body");
+    assert_eq!(body["p_action"], "monthly_digest_generate");
+    assert_eq!(body["p_result"], "success");
+    assert_eq!(body["p_metadata_json"]["target_year_month"], "2026-05");
+
+    // 成功時は audit fallback の poison entry が書かれないこと。
+    let fallback_path = run.temp_dir.join("audit-fallback-current.jsonl");
+    let fallback_empty = match fs::read_to_string(&fallback_path) {
+        Ok(contents) => contents.trim().is_empty(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+    assert!(
+        fallback_empty,
+        "no audit fallback poison entry should be written on generate success"
+    );
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
 // ─── HTTP mock server helpers ─────────────────────────────────────────────────
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest> {

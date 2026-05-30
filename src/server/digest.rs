@@ -21,7 +21,7 @@ use crate::server::config::AppConfig;
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::use_cases::generate_monthly_digest::{
     GenerateMonthlyDigestError, GenerateMonthlyDigestInput, generate_monthly_digest,
-    record_monthly_digest_failure_audit,
+    record_monthly_digest_failure_audit, record_monthly_digest_success_audit,
 };
 use crate::server::use_cases::verify_monthly_digest::{
     VerifyMonthlyDigestError, VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit,
@@ -200,15 +200,20 @@ async fn run_generate_command(
     };
 
     match generate_monthly_digest(&supabase_client, &ledger_appender, input).await {
-        Ok(signed_digest) => Ok(DigestGenerateOutput {
-            period: signed_digest.period.as_str().to_owned(),
-            start_sequence_no: signed_digest.start_sequence_no.get(),
-            end_sequence_no: signed_digest.end_sequence_no.get(),
-            entry_count: signed_digest.entry_count,
-            digest_hash: signed_digest.digest_hash.to_hex(),
-            signature_key_version: signed_digest.signature_key_version.get(),
-            digest_generated_at: signed_digest.digest_generated_at.as_str().to_owned(),
-        }),
+        Ok(signed_digest) => {
+            // 生成成功を audit_events に同期記録する
+            record_monthly_digest_success_audit(&audit_recorder, &request_id, &signed_digest).await;
+
+            Ok(DigestGenerateOutput {
+                period: signed_digest.period.as_str().to_owned(),
+                start_sequence_no: signed_digest.start_sequence_no.get(),
+                end_sequence_no: signed_digest.end_sequence_no.get(),
+                entry_count: signed_digest.entry_count,
+                digest_hash: signed_digest.digest_hash.to_hex(),
+                signature_key_version: signed_digest.signature_key_version.get(),
+                digest_generated_at: signed_digest.digest_generated_at.as_str().to_owned(),
+            })
+        }
         Err(error) => {
             // 生成失敗を audit_events に同期記録する
             record_monthly_digest_failure_audit(

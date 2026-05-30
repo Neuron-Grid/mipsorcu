@@ -316,9 +316,12 @@ select is(
     'monthly_digest_verify with only error_code (partial allowlist) returns false'
 );
 
--- ─── 7. rpc_append_audit_event now accepts monthly_digest_generate/verify ─────
+-- ─── 7. rpc_append_audit_event accepts monthly_digest_generate/verify success+failure ─
 
--- monthly_digest_generate (T06 bug fix: was previously rejected)
+-- schema 違反の拒否を検証するため strict mode を有効化する（Phase 1 既定は warning）。
+set local mipsorcu.audit_metadata_allowlist_mode = 'strict';
+
+-- monthly_digest_generate failure
 select is(
     test_helpers.try_append_audit_event(
         'b0000000-0000-4000-8000-000000000001',
@@ -332,7 +335,7 @@ select is(
         '{"error_code":"monthly_digest_already_exists","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
     ),
     'ok',
-    'rpc_append_audit_event accepts monthly_digest_generate failure (T06 bug fixed)'
+    'rpc_append_audit_event accepts monthly_digest_generate failure'
 );
 
 -- monthly_digest_verify failure
@@ -346,13 +349,13 @@ select is(
         null,
         'failure',
         null,
-        '{"error_code":"monthly_digest_not_found","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
+        '{"error_code":"monthly_digest_not_found","verify_result":"invalid","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
     ),
     'ok',
     'rpc_append_audit_event accepts monthly_digest_verify failure'
 );
 
--- monthly_digest_verify success must be rejected (failure-only action)
+-- monthly_digest_verify success (Section 1360: success+failure 化)
 select is(
     test_helpers.try_append_audit_event(
         'b0000000-0000-4000-8000-000000000003',
@@ -363,13 +366,13 @@ select is(
         null,
         'success',
         null,
-        '{"error_code":"x","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
+        '{"verify_result":"valid","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
     ),
-    'invalid_rpc_input',
-    'rpc_append_audit_event rejects monthly_digest_verify success (failure-only)'
+    'ok',
+    'rpc_append_audit_event accepts monthly_digest_verify success (Section 1360)'
 );
 
--- monthly_digest_generate success must be rejected (failure-only action)
+-- monthly_digest_generate success with full digest metadata (Section 1360)
 select is(
     test_helpers.try_append_audit_event(
         'b0000000-0000-4000-8000-000000000004',
@@ -380,10 +383,52 @@ select is(
         null,
         'success',
         null,
-        '{"error_code":"x","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
+        jsonb_build_object(
+            'target_year_month',     '2026-04',
+            'start_sequence_no',     1,
+            'end_sequence_no',       2,
+            'entry_count',           2,
+            'signature_key_version', 1,
+            'digest_hash',           repeat('ab', 32),
+            'source_event_at',       '2026-04-30T23:59:59Z'
+        )
+    ),
+    'ok',
+    'rpc_append_audit_event accepts monthly_digest_generate success with digest metadata (Section 1360)'
+);
+
+-- monthly_digest_generate success missing required digest metadata is rejected
+select is(
+    test_helpers.try_append_audit_event(
+        'b0000000-0000-4000-8000-000000000005',
+        'c0000000-0000-4000-8000-000000000005',
+        null,
+        null,
+        'monthly_digest_generate',
+        null,
+        'success',
+        null,
+        '{"target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
     ),
     'invalid_rpc_input',
-    'rpc_append_audit_event rejects monthly_digest_generate success (failure-only)'
+    'rpc_append_audit_event rejects monthly_digest_generate success missing digest metadata'
+);
+
+-- error_code は failure 専用: success metadata に含めると拒否される
+select is(
+    test_helpers.try_append_audit_event(
+        'b0000000-0000-4000-8000-000000000006',
+        'c0000000-0000-4000-8000-000000000006',
+        null,
+        null,
+        'monthly_digest_verify',
+        null,
+        'success',
+        null,
+        '{"verify_result":"valid","error_code":"x","target_year_month":"2026-04","source_event_at":"2026-04-30T23:59:59Z"}'::jsonb
+    ),
+    'invalid_rpc_input',
+    'rpc_append_audit_event rejects monthly_digest_verify success with error_code'
 );
 
 select * from finish();

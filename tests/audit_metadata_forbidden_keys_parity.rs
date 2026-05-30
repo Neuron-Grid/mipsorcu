@@ -9,7 +9,7 @@ use mipsorcu::{
 const CURRENT_FORBIDDEN_KEY_MIGRATION_PATH: &str =
     "supabase/migrations/1250_security_forbidden_key_parity.sql";
 const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
-    "supabase/migrations/1330_envelope_lazy_migration_rpcs.sql";
+    "supabase/migrations/1360_record_monthly_digest_success_audit.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -760,13 +760,22 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "source_event_at",
             ]
         }
-        // 月次 digest 生成失敗時の監査記録
+        // 月次 digest 生成（成功・失敗両方を記録、allowlist は result 共通の union）
         AuditAction::MonthlyDigestGenerate => {
-            vec!["error_code", "target_year_month", "source_event_at"]
+            vec![
+                "digest_hash",
+                "end_sequence_no",
+                "entry_count",
+                "error_code",
+                "signature_key_version",
+                "start_sequence_no",
+                "target_year_month",
+                "source_event_at",
+            ]
         }
-        // 月次 digest 検証失敗時の監査記録
+        // 月次 digest 検証（成功・失敗両方を記録、allowlist は result 共通）
         AuditAction::MonthlyDigestVerify => {
-            vec!["error_code", "target_year_month", "source_event_at"]
+            vec!["error_code", "target_year_month", "verify_result", "source_event_at"]
         }
         // archive export（成功・失敗両方を記録、allowlist は result 共通）
         AuditAction::ArchiveExport => {

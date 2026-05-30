@@ -7,8 +7,9 @@
 //! 4. digest hash を計算
 //! 5. Ed25519 署名
 //! 6. `monthly_digest` ledger entry として `rpc_append_ledger_entry` 経由で記録
-//!    （生成成功の記録は ledger entry そのもの）
-//! 7. 失敗時のみ `audit_events` に同期記録（`monthly_digest_generate` は failure 専用 action）
+//! 7. 成功・失敗どちらも `audit_events` に同期記録する（`monthly_digest_generate` は
+//!    success+failure 両方を受け付ける action）。成功記録の呼び出しは use case 呼び出し側
+//!    （CLI / scheduler）が `record_monthly_digest_success_audit` で行う。
 //!
 //! 信頼境界ノート: Master Key・Data Key・平文・JWT を使用しない。
 //! サービスロールキーは非秘密メタデータの読み書きにのみ使用する。
@@ -134,8 +135,8 @@ pub async fn generate_monthly_digest(
     // 3-5. canonical form 生成・hash 計算・Ed25519 署名を行い署名済み digest を組み立てる
     let signed_digest = build_signed_monthly_digest(ledger_appender, period, &range, &input)?;
 
-    // 6. ledger entry として追記（成功の記録は ledger entry そのもの。
-    //    監査イベントは失敗時のみ記録する: monthly_digest_generate は failure 専用 action）
+    // 6. ledger entry として追記。成功 audit の記録は呼び出し側
+    //    （record_monthly_digest_success_audit）が行う。
     append_digest_ledger_entry(ledger_appender, &signed_digest, &input).await?;
 
     tracing::info!(
@@ -313,6 +314,91 @@ async fn append_digest_ledger_entry(
     })?;
 
     Ok(())
+}
+
+/// 月次 digest 生成成功を `audit_events` に同期記録するヘルパー。
+///
+/// 成功は `monthly_digest` ledger entry に加えて `audit_events` にも記録する
+/// （「成功・失敗に関係なく全操作を記録する」方針。`monthly_digest_generate` は
+/// success+failure 両方を受け付ける action）。
+/// 監査記録自体の失敗はログに記録するが、生成成功そのものは覆さない。
+pub async fn record_monthly_digest_success_audit(
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
+    request_id: &RequestId,
+    signed_digest: &SignedMonthlyDigest,
+) {
+    let audit_event_id = match crate::audit::AuditEventId::generate() {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "failed to generate audit event id for monthly_digest_generate success audit"
+            );
+            return;
+        }
+    };
+
+    let metadata = match MonthlyDigestGenerateMetadata::success(
+        &signed_digest.period,
+        signed_digest.start_sequence_no,
+        signed_digest.end_sequence_no,
+        signed_digest.entry_count,
+        signed_digest.signature_key_version,
+        signed_digest.digest_hash,
+        signed_digest.digest_generated_at.clone(),
+    )
+    .build()
+    {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "failed to build audit metadata for monthly_digest_generate success audit"
+            );
+            return;
+        }
+    };
+
+    let event = match AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: request_id.clone(),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::MonthlyDigestGenerate,
+        target_secret_id: None,
+        result: AuditResult::Success,
+        key_version: None,
+        metadata_json: metadata,
+    }) {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "failed to build audit event for monthly_digest_generate success audit"
+            );
+            return;
+        }
+    };
+
+    match audit_recorder.record(&event).await {
+        Ok(outcome) => {
+            tracing::info!(
+                request_id = %request_id.as_canonical_string(),
+                period = signed_digest.period.as_str(),
+                audit_record_outcome = ?outcome,
+                "monthly digest success audit recorded"
+            );
+        }
+        Err(record_error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                period = signed_digest.period.as_str(),
+                error = %record_error,
+                error_code = "monthly_digest_success_audit_record_failed",
+                "monthly digest success audit primary and fallback recording failed"
+            );
+        }
+    }
 }
 
 /// 月次 digest 生成失敗を `audit_events` に同期記録するヘルパー。
