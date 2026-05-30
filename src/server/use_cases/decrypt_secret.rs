@@ -67,27 +67,15 @@ pub(in crate::server) async fn decrypt_secret(
     {
         Ok(row) => row,
         Err(FetchCurrentSecretVersionError::Upstream(rpc_error)) => {
-            failure.log_upstream_failure(&rpc_error, "fetch_current_secret_version");
-            if let Err(audit_err) = failure.record().await {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure
+                .record_upstream_and_warn(&rpc_error, "fetch_current_secret_version")
+                .await;
             return Err(ApiError::from(rpc_error));
         }
         Err(FetchCurrentSecretVersionError::Api(api_error)) => {
-            if let Err(audit_err) = failure
-                .log_and_record(&api_error, "fetch_current_secret_version")
-                .await
-            {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure
+                .record_and_warn(&api_error, "fetch_current_secret_version")
+                .await;
             return Err(api_error);
         }
     };
@@ -101,16 +89,9 @@ pub(in crate::server) async fn decrypt_secret(
     let plaintext = match decrypt_prepared_input(state, input).await {
         Ok(plaintext) => plaintext,
         Err(error) => {
-            if let Err(audit_err) = failure
-                .log_and_record(&error, "decrypt_current_secret_version")
-                .await
-            {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure
+                .record_and_warn(&error, "decrypt_current_secret_version")
+                .await;
             return Err(error);
         }
     };
@@ -162,23 +143,12 @@ async fn record_secret_ref_resolution_failure(
     match error {
         ResolveSecretRefError::Upstream(rpc_error) => {
             failure.log_upstream_failure_without_error_value(rpc_error, "resolve_secret_ref");
-            if let Err(audit_err) = failure.record().await {
-                tracing::error!(
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure.record_and_warn_on_secondary_failure().await;
         }
         ResolveSecretRefError::Api(api_error) => {
-            if let Err(audit_err) = failure
-                .log_and_record(api_error, "resolve_secret_ref")
-                .await
-            {
-                tracing::error!(
-                    error = %audit_err,
-                    "failure audit recording also failed"
-                );
-            }
+            failure
+                .record_and_warn(api_error, "resolve_secret_ref")
+                .await;
         }
     }
 }

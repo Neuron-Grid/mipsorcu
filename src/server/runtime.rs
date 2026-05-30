@@ -10,6 +10,8 @@ use crate::auth::{JwksCache, JwtVerifier, JwtVerifierConfig, fetch_jwks};
 use crate::incident::{
     AnyNotificationSink, DummyNotificationSink, IncidentRecorder, WebhookNotificationSink,
 };
+use crate::server::ledger_appender::LedgerAppender;
+use crate::server::siem_forwarding::SiemForwardingService;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::{
@@ -210,26 +212,10 @@ async fn build_app_state(
     config: config::AppConfig,
     http_client: reqwest::Client,
 ) -> (AppState, BackgroundDeps) {
-    let jwks = fetch_jwks(&http_client, &config.jwks_url)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::error!(
-                jwks_url = %config.jwks_url,
-                error_kind = background::jwks_fetch_error_kind(&error),
-                "configuration JWKS loading failed"
-            );
-            std::process::exit(1);
-        });
-    let jwks_cache = JwksCache::new(jwks);
+    // ── 1. JWT 検証基盤（JWKS 取得・キャッシュ・verifier 構築） ──
+    let (jwks_cache, jwt_verifier) = init_jwt_auth(&http_client, &config).await;
 
-    let jwt_config = JwtVerifierConfig::new(&config.jwt_issuer, &config.jwt_audience)
-        .unwrap_or_else(|error| {
-            tracing::error!(error = %error, "JWT verifier config is invalid");
-            std::process::exit(1);
-        });
-    let jwt_verifier = Arc::new(JwtVerifier::with_cache(jwt_config, jwks_cache.clone()));
-
-    let siem_buffer = LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone());
+    // ── 2. 外部送信 sink（SIEM exporter / incident 通知） ──
     let siem_sink = build_siem_sink(&config, http_client.clone()).unwrap_or_else(|error| {
         tracing::error!(error = %error, "SIEM exporter initialization failed");
         std::process::exit(1);
@@ -240,42 +226,21 @@ async fn build_app_state(
             std::process::exit(1);
         });
 
-    // jwks refresh loop 用の clone を確保してから supabase client へ move する。
+    // ── 3. Supabase クライアント（jwks refresh 用に http client を複製してから構築） ──
     let jwks_refresh_http_client = http_client.clone();
-    let supabase_client = Arc::new(SupabaseClient::new(
-        http_client,
-        config.supabase_url,
-        config.supabase_service_role_key,
-        config.supabase_publishable_key,
-    ));
+    let supabase_client = build_supabase_client(http_client, &config);
     let readiness_state = ReadinessState::new();
 
-    let audit_appender = SupabaseAuditAppender::new(supabase_client.clone());
-    let fallback_store = LocalAuditFallbackStore::with_rollover_config(
-        &config.audit_fallback_path,
-        &config.audit_fallback_archive_dir,
-        config.audit_fallback_rotate_size_bytes,
-    );
+    // ── 4. 監査 / ledger / incident / SIEM 転送サービスを構築 ──
+    let (audit_recorder, fallback_store) = build_audit_recorder(&supabase_client, &config);
     let app_fallback_store = fallback_store.clone();
-    let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store.clone()));
-    let ledger_signing_key = config.ledger_signing_key.clone();
-    ensure_active_ledger_signing_public_key_at_startup(&supabase_client, &ledger_signing_key).await;
-    let ledger_appender = Arc::new(crate::server::ledger_appender::LedgerAppender::new(
-        supabase_client.clone(),
-        ledger_signing_key,
-    ));
-    let incident_recorder = Arc::new(IncidentRecorder::new(
-        supabase_client.clone(),
-        ledger_appender.clone(),
-        notification_sink,
-    ));
-    let siem_forwarder = SiemForwarder::new(siem_sink, siem_buffer);
-    let siem_forwarding = Arc::new(crate::server::siem_forwarding::SiemForwardingService::new(
-        siem_forwarder,
-        audit_recorder.clone(),
-        readiness_state.clone(),
-    ));
+    let ledger_appender = build_ledger_appender(&supabase_client, &config).await;
+    let incident_recorder =
+        build_incident_recorder(&supabase_client, &ledger_appender, notification_sink);
+    let siem_forwarding =
+        build_siem_forwarding(siem_sink, &config, &audit_recorder, &readiness_state);
 
+    // ── 5. バックグラウンド依存と AppState を組み立てる ──
     let deps = BackgroundDeps {
         http_client: jwks_refresh_http_client,
         jwks_cache,
@@ -332,6 +297,116 @@ async fn build_app_state(
     };
 
     (state, deps)
+}
+
+/// JWKS を取得してキャッシュし、JWT verifier を構築する。
+///
+/// JWKS 取得失敗・verifier 設定不正はいずれも `std::process::exit(1)` で停止する。
+/// 返り値の `JwksCache` は refresh ループへ渡すため verifier とは別に返す。
+async fn init_jwt_auth(
+    http_client: &reqwest::Client,
+    config: &config::AppConfig,
+) -> (JwksCache, Arc<JwtVerifier>) {
+    let jwks = fetch_jwks(http_client, &config.jwks_url)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(
+                jwks_url = %config.jwks_url,
+                error_kind = background::jwks_fetch_error_kind(&error),
+                "configuration JWKS loading failed"
+            );
+            std::process::exit(1);
+        });
+    let jwks_cache = JwksCache::new(jwks);
+
+    let jwt_config = JwtVerifierConfig::new(&config.jwt_issuer, &config.jwt_audience)
+        .unwrap_or_else(|error| {
+            tracing::error!(error = %error, "JWT verifier config is invalid");
+            std::process::exit(1);
+        });
+    let jwt_verifier = Arc::new(JwtVerifier::with_cache(jwt_config, jwks_cache.clone()));
+
+    (jwks_cache, jwt_verifier)
+}
+
+/// Supabase クライアントを構築する。
+///
+/// URL・キーは `config` の値を複製して渡す（`config` は後段の AppState 構築でも
+/// 個別フィールドを参照するため、ここでは move せず保持する）。
+fn build_supabase_client(
+    http_client: reqwest::Client,
+    config: &config::AppConfig,
+) -> Arc<SupabaseClient> {
+    Arc::new(SupabaseClient::new(
+        http_client,
+        config.supabase_url.clone(),
+        config.supabase_service_role_key.clone(),
+        config.supabase_publishable_key.clone(),
+    ))
+}
+
+/// 監査 recorder とそのローカルフォールバックストアを構築する。
+///
+/// `LocalAuditFallbackStore` は AppState とバックグラウンド依存の双方で使うため、
+/// recorder と併せて返す。
+fn build_audit_recorder(
+    supabase_client: &Arc<SupabaseClient>,
+    config: &config::AppConfig,
+) -> (
+    Arc<AuditRecorder<SupabaseAuditAppender>>,
+    LocalAuditFallbackStore,
+) {
+    let audit_appender = SupabaseAuditAppender::new(supabase_client.clone());
+    let fallback_store = LocalAuditFallbackStore::with_rollover_config(
+        &config.audit_fallback_path,
+        &config.audit_fallback_archive_dir,
+        config.audit_fallback_rotate_size_bytes,
+    );
+    let audit_recorder = Arc::new(AuditRecorder::new(audit_appender, fallback_store.clone()));
+
+    (audit_recorder, fallback_store)
+}
+
+/// ledger 署名鍵の active 公開鍵を起動時に検証し、ledger appender を構築する。
+async fn build_ledger_appender(
+    supabase_client: &Arc<SupabaseClient>,
+    config: &config::AppConfig,
+) -> Arc<LedgerAppender> {
+    let ledger_signing_key = config.ledger_signing_key.clone();
+    ensure_active_ledger_signing_public_key_at_startup(supabase_client, &ledger_signing_key).await;
+    Arc::new(LedgerAppender::new(
+        supabase_client.clone(),
+        ledger_signing_key,
+    ))
+}
+
+/// incident recorder を構築する。
+fn build_incident_recorder(
+    supabase_client: &Arc<SupabaseClient>,
+    ledger_appender: &Arc<LedgerAppender>,
+    notification_sink: AnyNotificationSink,
+) -> Arc<IncidentRecorder<AnyNotificationSink>> {
+    Arc::new(IncidentRecorder::new(
+        supabase_client.clone(),
+        ledger_appender.clone(),
+        notification_sink,
+    ))
+}
+
+/// SIEM 転送サービス（forwarder + ローカルバッファ）を構築する。
+fn build_siem_forwarding(
+    siem_sink: AnySiemSink,
+    config: &config::AppConfig,
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
+    readiness_state: &ReadinessState,
+) -> Arc<SiemForwardingService<AnySiemSink>> {
+    let siem_buffer = LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone());
+    let siem_forwarder = SiemForwarder::new(siem_sink, siem_buffer);
+    Arc::new(SiemForwardingService::new(
+        siem_forwarder,
+        audit_recorder.clone(),
+        readiness_state.clone(),
+    ))
 }
 
 /// すべてのバックグラウンドループを spawn する。

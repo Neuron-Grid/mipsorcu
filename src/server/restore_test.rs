@@ -38,13 +38,14 @@ pub async fn run_restore_test_once(
         }
     };
 
+    // ── 1. 復号対象サンプルを取得（空 / 取得失敗はここで確定する） ──
     let sample_rows = match state
         .supabase_client
         .call_sample_restore_test(sample_limit)
         .await
     {
         Ok(rows) if rows.is_empty() => {
-            if let Err(audit_err) = audit_reporter::record_restore_test_audit(
+            if let Some(outcome) = record_restore_test_audit_or_failure(
                 state,
                 &request_id,
                 RestoreTestAudit {
@@ -64,14 +65,7 @@ pub async fn run_restore_test_once(
             )
             .await
             {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "restore test audit recording failed"
-                );
-                return RestoreTestOutcome::Failure {
-                    error_code: "restore_test_audit_record_failed",
-                };
+                return outcome;
             }
             tracing::info!(
                 request_id = %request_id.as_canonical_string(),
@@ -83,7 +77,7 @@ pub async fn run_restore_test_once(
         }
         Ok(rows) => rows,
         Err(_error) => {
-            if let Err(audit_err) = audit_reporter::record_restore_test_audit(
+            if let Some(outcome) = record_restore_test_audit_or_failure(
                 state,
                 &request_id,
                 RestoreTestAudit {
@@ -103,14 +97,7 @@ pub async fn run_restore_test_once(
             )
             .await
             {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "restore test audit recording failed"
-                );
-                return RestoreTestOutcome::Failure {
-                    error_code: "restore_test_audit_record_failed",
-                };
+                return outcome;
             }
             tracing::error!(
                 request_id = %request_id.as_canonical_string(),
@@ -128,124 +115,24 @@ pub async fn run_restore_test_once(
 
     let sample_count = sample_rows.len() as u64;
 
+    // ── 2. 各サンプルを検証・復号（最初の失敗で確定する） ──
     for sample_row in sample_rows {
-        let failure_context = restore_test_failure_context_from_raw(&sample_row);
-        let prepared = match read_model::parse_restore_test_sample(sample_row) {
-            Ok(prepared) => prepared,
-            Err(_) => {
-                let log_target_secret_id = failure_context
-                    .target_secret_id
-                    .as_ref()
-                    .map(SecretId::as_canonical_string);
-                let log_key_version = failure_context.key_version.map(KeyVersion::get);
-                if let Err(audit_err) = audit_reporter::record_restore_test_audit(
-                    state,
-                    &request_id,
-                    RestoreTestAudit {
-                        result: AuditResult::Failure,
-                        target_secret_id: failure_context.target_secret_id,
-                        key_version: failure_context.key_version,
-                        metadata: restore_test_metadata_with_duration(
-                            sample_count,
-                            Some("row_validation_failed"),
-                            failure_context.failed_version,
-                            None,
-                            trigger,
-                            elapsed_ms(started_at),
-                        ),
-                        error_code: Some("row_validation_failed"),
-                    },
-                )
-                .await
-                {
-                    tracing::error!(
-                        request_id = %request_id.as_canonical_string(),
-                        error = %audit_err,
-                        "restore test audit recording failed"
-                    );
-                    return RestoreTestOutcome::Failure {
-                        error_code: "restore_test_audit_record_failed",
-                    };
-                }
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    target_secret_id = log_target_secret_id.as_deref(),
-                    key_version = log_key_version,
-                    failed_version = failure_context.failed_version,
-                    action = "restore_test",
-                    result = "failure",
-                    error_code = "row_validation_failed",
-                    sample_count = sample_count,
-                    "restore test row validation failed"
-                );
-                return RestoreTestOutcome::Failure {
-                    error_code: "row_validation_failed",
-                };
-            }
-        };
-
-        let failure_context = RestoreTestFailureContext::from_prepared(&prepared);
-        let input = build_restore_test_decrypt_input_from_prepared(prepared);
-        let master_key_ring = state.master_key_ring.clone();
-        let decrypt_result = tokio::task::spawn_blocking(move || {
-            decrypt_current_secret_version_with_keyring(&master_key_ring, input)
-        })
+        if let Err(outcome) = process_restore_test_sample(
+            state,
+            &request_id,
+            sample_row,
+            sample_count,
+            trigger,
+            started_at,
+        )
         .await
-        .map_err(|error| ApiError::InternalError(error.to_string()))
-        .and_then(|result| result.map_err(ApiError::from));
-
-        if decrypt_result.is_err() {
-            if let Err(audit_err) = audit_reporter::record_restore_test_audit(
-                state,
-                &request_id,
-                RestoreTestAudit {
-                    result: AuditResult::Failure,
-                    target_secret_id: failure_context.target_secret_id.clone(),
-                    key_version: failure_context.key_version,
-                    metadata: restore_test_metadata_with_duration(
-                        sample_count,
-                        Some("decrypt_failed"),
-                        failure_context.failed_version,
-                        None,
-                        trigger,
-                        elapsed_ms(started_at),
-                    ),
-                    error_code: Some("decrypt_failed"),
-                },
-            )
-            .await
-            {
-                tracing::error!(
-                    request_id = %request_id.as_canonical_string(),
-                    error = %audit_err,
-                    "restore test audit recording failed"
-                );
-                return RestoreTestOutcome::Failure {
-                    error_code: "restore_test_audit_record_failed",
-                };
-            }
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                target_secret_id = failure_context
-                    .target_secret_id
-                    .as_ref()
-                    .map(SecretId::as_canonical_string)
-                    .as_deref(),
-                key_version = failure_context.key_version.map(KeyVersion::get),
-                failed_version = failure_context.failed_version,
-                action = "restore_test",
-                result = "failure",
-                error_code = "decrypt_failed",
-                sample_count = sample_count,
-                "restore test decrypt failed"
-            );
-            return RestoreTestOutcome::Failure {
-                error_code: "decrypt_failed",
-            };
+        {
+            return outcome;
         }
     }
 
-    if let Err(audit_err) = audit_reporter::record_restore_test_audit(
+    // ── 3. 全件成功を記録する ──
+    if let Some(outcome) = record_restore_test_audit_or_failure(
         state,
         &request_id,
         RestoreTestAudit {
@@ -265,14 +152,7 @@ pub async fn run_restore_test_once(
     )
     .await
     {
-        tracing::error!(
-            request_id = %request_id.as_canonical_string(),
-            error = %audit_err,
-            "restore test audit recording failed"
-        );
-        return RestoreTestOutcome::Failure {
-            error_code: "restore_test_audit_record_failed",
-        };
+        return outcome;
     }
     tracing::info!(
         request_id = %request_id.as_canonical_string(),
@@ -281,6 +161,147 @@ pub async fn run_restore_test_once(
         sample_count = sample_count,
     );
     RestoreTestOutcome::Success
+}
+
+/// restore test サンプル1件を検証・復号する。
+///
+/// 正常に復号できた場合は `Ok(())`、行検証・復号・監査記録のいずれかが失敗した
+/// 場合は呼び出し側が返すべき `RestoreTestOutcome` を `Err` で返す。
+async fn process_restore_test_sample(
+    state: &AppState,
+    request_id: &RequestId,
+    sample_row: RestoreTestSampleRow,
+    sample_count: u64,
+    trigger: AuditTrigger,
+    started_at: Instant,
+) -> Result<(), RestoreTestOutcome> {
+    let failure_context = restore_test_failure_context_from_raw(&sample_row);
+    let prepared = match read_model::parse_restore_test_sample(sample_row) {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            let log_target_secret_id = failure_context
+                .target_secret_id
+                .as_ref()
+                .map(SecretId::as_canonical_string);
+            let log_key_version = failure_context.key_version.map(KeyVersion::get);
+            if let Some(outcome) = record_restore_test_audit_or_failure(
+                state,
+                request_id,
+                RestoreTestAudit {
+                    result: AuditResult::Failure,
+                    target_secret_id: failure_context.target_secret_id,
+                    key_version: failure_context.key_version,
+                    metadata: restore_test_metadata_with_duration(
+                        sample_count,
+                        Some("row_validation_failed"),
+                        failure_context.failed_version,
+                        None,
+                        trigger,
+                        elapsed_ms(started_at),
+                    ),
+                    error_code: Some("row_validation_failed"),
+                },
+            )
+            .await
+            {
+                return Err(outcome);
+            }
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                target_secret_id = log_target_secret_id.as_deref(),
+                key_version = log_key_version,
+                failed_version = failure_context.failed_version,
+                action = "restore_test",
+                result = "failure",
+                error_code = "row_validation_failed",
+                sample_count = sample_count,
+                "restore test row validation failed"
+            );
+            return Err(RestoreTestOutcome::Failure {
+                error_code: "row_validation_failed",
+            });
+        }
+    };
+
+    let failure_context = RestoreTestFailureContext::from_prepared(&prepared);
+    let input = build_restore_test_decrypt_input_from_prepared(prepared);
+    let master_key_ring = state.master_key_ring.clone();
+    let decrypt_result = tokio::task::spawn_blocking(move || {
+        decrypt_current_secret_version_with_keyring(&master_key_ring, input)
+    })
+    .await
+    .map_err(|error| ApiError::InternalError(error.to_string()))
+    .and_then(|result| result.map_err(ApiError::from));
+
+    if decrypt_result.is_err() {
+        if let Some(outcome) = record_restore_test_audit_or_failure(
+            state,
+            request_id,
+            RestoreTestAudit {
+                result: AuditResult::Failure,
+                target_secret_id: failure_context.target_secret_id.clone(),
+                key_version: failure_context.key_version,
+                metadata: restore_test_metadata_with_duration(
+                    sample_count,
+                    Some("decrypt_failed"),
+                    failure_context.failed_version,
+                    None,
+                    trigger,
+                    elapsed_ms(started_at),
+                ),
+                error_code: Some("decrypt_failed"),
+            },
+        )
+        .await
+        {
+            return Err(outcome);
+        }
+        tracing::error!(
+            request_id = %request_id.as_canonical_string(),
+            target_secret_id = failure_context
+                .target_secret_id
+                .as_ref()
+                .map(SecretId::as_canonical_string)
+                .as_deref(),
+            key_version = failure_context.key_version.map(KeyVersion::get),
+            failed_version = failure_context.failed_version,
+            action = "restore_test",
+            result = "failure",
+            error_code = "decrypt_failed",
+            sample_count = sample_count,
+            "restore test decrypt failed"
+        );
+        return Err(RestoreTestOutcome::Failure {
+            error_code: "decrypt_failed",
+        });
+    }
+
+    Ok(())
+}
+
+/// restore test の監査イベントを記録し、記録自体が失敗した場合のみ呼び出し側が
+/// 返すべき `Failure { restore_test_audit_record_failed }` を返す。
+///
+/// 記録に成功した場合は `None` を返し、呼び出し側が結果別ログと outcome 返却を行う。
+async fn record_restore_test_audit_or_failure(
+    state: &AppState,
+    request_id: &RequestId,
+    audit: RestoreTestAudit,
+) -> Option<RestoreTestOutcome> {
+    if let Err(audit_err) =
+        audit_reporter::record_restore_test_audit(state, request_id, audit).await
+    {
+        tracing::error!(
+            request_id = %request_id.as_canonical_string(),
+            error = %audit_err,
+            "restore test audit recording failed"
+        );
+        return Some(RestoreTestOutcome::Failure {
+            error_code: "restore_test_audit_record_failed",
+        });
+    }
+
+    None
 }
 
 fn restore_test_metadata_with_duration(

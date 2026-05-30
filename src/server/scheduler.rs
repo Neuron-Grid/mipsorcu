@@ -8,8 +8,7 @@ use tokio::sync::watch;
 
 use crate::archive::LocalFileArchiveBackend;
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult, AuditTrigger, RequestId,
-    SchedulerJobMetadata,
+    AuditEvent, AuditEventId, AuditResult, AuditTrigger, RequestId, SchedulerJobMetadata,
 };
 use crate::incident::{
     IncidentRecordInput, IncidentType, dedupe_key, ledger_payload_contains_forbidden_key,
@@ -1212,44 +1211,26 @@ async fn record_scheduler_job_result(
         source_event_at.clone(),
     )
     .with_duration_ms(duration_ms);
-    if let Some(error_code) = error_code {
-        metadata_builder = metadata_builder.with_error_code(error_code);
+    if let Some(code) = error_code {
+        metadata_builder = metadata_builder.with_error_code(code);
     }
-    if let Some(period) = &period {
-        metadata_builder = metadata_builder.with_target_year_month(period.as_str());
+    if let Some(ref p) = period {
+        metadata_builder = metadata_builder.with_target_year_month(p.as_str());
     }
-    let metadata = match metadata_builder.build() {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            tracing::error!(error = %error, job_name = job_name.as_str(), "scheduler audit metadata build failed");
-            return Err("scheduler_audit_metadata_failed");
-        }
-    };
-
-    let audit_event_id = match AuditEventId::generate() {
-        Ok(audit_event_id) => audit_event_id,
-        Err(error) => {
-            tracing::error!(error = %error, job_name = job_name.as_str(), "scheduler audit event id generation failed");
-            return Err("scheduler_audit_event_id_failed");
-        }
-    };
-    let event = match AuditEvent::new(AuditEventParts {
-        audit_event_id,
-        request_id: request_id.clone(),
-        actor_user_id: None,
-        actor_device_id: None,
-        action: AuditAction::SchedulerJob,
-        target_secret_id: None,
+    let metadata = metadata_builder
+        .build()
+        .map_err(|_| "scheduler_metadata_build_failed")?;
+    let event = AuditEvent::build_with_current_source_event_at(
+        request_id.clone(),
+        None,
+        None,
+        crate::audit::AuditAction::SchedulerJob,
+        None,
         result,
-        key_version: None,
-        metadata_json: metadata,
-    }) {
-        Ok(event) => event,
-        Err(error) => {
-            tracing::error!(error = %error, job_name = job_name.as_str(), "scheduler audit event build failed");
-            return Err("scheduler_audit_event_failed");
-        }
-    };
+        None,
+        metadata,
+    )
+    .map_err(|_| "scheduler_audit_event_build_failed")?;
 
     if let Err(error) = state.audit_recorder.record(&event).await {
         tracing::error!(

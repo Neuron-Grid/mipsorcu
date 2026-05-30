@@ -114,7 +114,15 @@ pub fn usage() -> String {
     .join("\n")
 }
 
-pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), AuditReportCliError> {
+/// audit-report CLI 引数の解析・検証結果（生成に必要な確定値）。
+struct ParsedAuditReportArgs {
+    period_start: SourceEventAt,
+    period_end: SourceEventAt,
+    format: AuditReportFormat,
+}
+
+/// audit-report CLI 引数を解析・検証し、期間と出力形式の確定値を返す。
+fn parse_audit_report_args(args: &[String]) -> Result<ParsedAuditReportArgs, AuditReportCliError> {
     let mut subcommand: Option<&String> = None;
     let mut period_start: Option<String> = None;
     let mut period_end: Option<String> = None;
@@ -180,6 +188,20 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), AuditRepo
             "--from must be earlier than --to".to_owned(),
         ));
     }
+
+    Ok(ParsedAuditReportArgs {
+        period_start,
+        period_end,
+        format,
+    })
+}
+
+pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), AuditReportCliError> {
+    let ParsedAuditReportArgs {
+        period_start,
+        period_end,
+        format,
+    } = parse_audit_report_args(args)?;
 
     let http_client = crate::server::config::build_outbound_http_client(&config)
         .map_err(|error| AuditReportCliError::Config(error.to_string()))?;

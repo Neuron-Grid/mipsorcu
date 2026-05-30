@@ -15,6 +15,40 @@ pub struct RestoreTestAudit {
     pub error_code: Option<&'static str>,
 }
 
+/// restore test の監査イベントを構築する。構築失敗時はログ出力して `Err` を返す。
+///
+/// 記録経路（ledger / fallback）から「イベント構築」の責務を分離する。他の
+/// audit_reporter（decrypt_success 等）の `build_*_event` と同じ役割を担う。
+fn build_restore_test_event(
+    request_id: &RequestId,
+    result: AuditResult,
+    target_secret_id: Option<SecretId>,
+    key_version: Option<KeyVersion>,
+    metadata: AuditMetadata,
+) -> Result<AuditEvent, AuditRecordError> {
+    AuditEvent::build_with_current_source_event_at(
+        request_id.clone(),
+        None,
+        None,
+        AuditAction::RestoreTest,
+        target_secret_id,
+        result,
+        key_version,
+        metadata,
+    )
+    .map_err(|error| {
+        tracing::error!(
+            request_id = %request_id.as_canonical_string(),
+            error = %error,
+            action = "restore_test",
+            result = "failure",
+            error_code = "audit_event_build_failed",
+            "restore test audit setup failed"
+        );
+        AuditRecordError::EventConstructionFailed(error)
+    })
+}
+
 pub async fn record_restore_test_audit(
     state: &AppState,
     request_id: &RequestId,
@@ -27,29 +61,8 @@ pub async fn record_restore_test_audit(
         metadata,
         error_code,
     } = audit;
-    let event = match AuditEvent::build_with_current_source_event_at(
-        request_id.clone(),
-        None,
-        None,
-        AuditAction::RestoreTest,
-        target_secret_id,
-        result,
-        key_version,
-        metadata,
-    ) {
-        Ok(event) => event,
-        Err(error) => {
-            tracing::error!(
-                request_id = %request_id.as_canonical_string(),
-                error = %error,
-                action = "restore_test",
-                result = "failure",
-                error_code = "audit_event_build_failed",
-                "restore test audit setup failed"
-            );
-            return Err(AuditRecordError::EventConstructionFailed(error));
-        }
-    };
+    let event =
+        build_restore_test_event(request_id, result, target_secret_id, key_version, metadata)?;
 
     if event.result() == AuditResult::Success {
         let ledger_draft = build_restore_test_ledger_draft(&event).map_err(|error| {

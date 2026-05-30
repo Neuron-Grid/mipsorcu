@@ -1,3 +1,4 @@
+mod allowlists;
 mod builders;
 mod validate;
 
