@@ -8,7 +8,8 @@ use tokio::sync::watch;
 
 use crate::archive::LocalFileArchiveBackend;
 use crate::audit::{
-    AuditEvent, AuditEventId, AuditResult, AuditTrigger, RequestId, SchedulerJobMetadata,
+    AuditEvent, AuditEventId, AuditMetadata, AuditResult, AuditTrigger, RequestId,
+    SchedulerJobMetadata,
 };
 use crate::incident::{
     IncidentRecordInput, IncidentType, dedupe_key, ledger_payload_contains_forbidden_key,
@@ -1021,14 +1022,30 @@ fn verify_hash_chain_rows(
     chain_head: LedgerChainHead,
     rows: Vec<LedgerVerificationMaterialRow>,
 ) -> Result<LedgerVerificationSummary, &'static str> {
+    let entries = match restore_entries_checking_forbidden_keys(&rows)? {
+        RestoreResult::Restored(entries) => entries,
+        RestoreResult::ForbiddenKey(summary) => return Ok(summary),
+    };
+    verify_chain_links(&entries, chain_head)
+}
+
+/// export 行を署名済みエントリへ復元する。禁止キー検出時は失敗サマリを返す。
+enum RestoreResult {
+    Restored(Vec<SignedLedgerEntry>),
+    ForbiddenKey(LedgerVerificationSummary),
+}
+
+fn restore_entries_checking_forbidden_keys(
+    rows: &[LedgerVerificationMaterialRow],
+) -> Result<RestoreResult, &'static str> {
     let mut entries: Vec<SignedLedgerEntry> = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in rows {
         if ledger_payload_contains_forbidden_key(&row.payload) {
-            return Ok(LedgerVerificationSummary {
+            return Ok(RestoreResult::ForbiddenKey(LedgerVerificationSummary {
                 valid: false,
                 checked_count: entry_count(entries.len()),
                 error_code: Some("ledger_payload_forbidden_key"),
-            });
+            }));
         }
 
         let entry = row
@@ -1037,9 +1054,17 @@ fn verify_hash_chain_rows(
         entries.push(entry);
     }
 
+    Ok(RestoreResult::Restored(entries))
+}
+
+/// 復元済みエントリのハッシュ連鎖（順序・前ハッシュ・自己ハッシュ・チェーンヘッド）を検証する。
+fn verify_chain_links(
+    entries: &[SignedLedgerEntry],
+    chain_head: LedgerChainHead,
+) -> Result<LedgerVerificationSummary, &'static str> {
     let mut previous_sequence_no = LedgerChainHead::genesis().last_sequence_no();
     let mut previous_hash = LedgerChainHead::genesis().last_entry_hash();
-    for entry in &entries {
+    for entry in entries {
         let expected_sequence_no = previous_sequence_no
             .checked_add(1)
             .ok_or("ledger_sequence_overflow")?;
@@ -1205,21 +1230,13 @@ async fn record_scheduler_job_result(
         }
     };
 
-    let mut metadata_builder = SchedulerJobMetadata::new(
-        job_name.as_str(),
-        AuditTrigger::Background,
+    let metadata = build_scheduler_job_metadata(
+        job_name,
         source_event_at.clone(),
-    )
-    .with_duration_ms(duration_ms);
-    if let Some(code) = error_code {
-        metadata_builder = metadata_builder.with_error_code(code);
-    }
-    if let Some(ref p) = period {
-        metadata_builder = metadata_builder.with_target_year_month(p.as_str());
-    }
-    let metadata = metadata_builder
-        .build()
-        .map_err(|_| "scheduler_metadata_build_failed")?;
+        duration_ms,
+        error_code,
+        period.as_ref(),
+    )?;
     let event = AuditEvent::build_with_current_source_event_at(
         request_id.clone(),
         None,
@@ -1265,6 +1282,28 @@ async fn record_scheduler_job_result(
     })?;
 
     Ok(())
+}
+
+/// scheduler ジョブ結果の監査メタデータを組み立てる（純粋なビルダ呼び出し）。
+fn build_scheduler_job_metadata(
+    job_name: ScheduledJobName,
+    source_event_at: SourceEventAt,
+    duration_ms: u64,
+    error_code: Option<&'static str>,
+    period: Option<&MonthlyDigestPeriod>,
+) -> Result<AuditMetadata, &'static str> {
+    let mut metadata_builder =
+        SchedulerJobMetadata::new(job_name.as_str(), AuditTrigger::Background, source_event_at)
+            .with_duration_ms(duration_ms);
+    if let Some(code) = error_code {
+        metadata_builder = metadata_builder.with_error_code(code);
+    }
+    if let Some(p) = period {
+        metadata_builder = metadata_builder.with_target_year_month(p.as_str());
+    }
+    metadata_builder
+        .build()
+        .map_err(|_| "scheduler_metadata_build_failed")
 }
 
 struct SchedulerLedgerEntryRecord<'a> {

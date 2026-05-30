@@ -17,7 +17,8 @@ use crate::ledger::{
 };
 use crate::server::config::AppConfig;
 use crate::server::supabase::{
-    AuditReportSummary, SupabaseAuditAppender, SupabaseClient, VerificationFailureReportItem,
+    AuditReportSummary, LedgerVerificationMaterialRow, SupabaseAuditAppender, SupabaseClient,
+    VerificationFailureReportItem,
 };
 use crate::types::SourceEventAt;
 
@@ -354,9 +355,33 @@ async fn verify_signatures_for_summary(
         });
     }
 
+    let (entries, verification_keys) = match restore_entries_and_keys_for_summary(&rows, summary) {
+        RestoreOutcome::Restored {
+            entries,
+            verification_keys,
+        } => (entries, verification_keys),
+        RestoreOutcome::Failed(summary_result) => return Ok(summary_result),
+    };
+
+    build_signature_summary_from_chain(&entries, &verification_keys, summary, sequence_start)
+}
+
+/// export 行から署名済みエントリと検証鍵を復元する。途中の復元失敗は失敗サマリとして返す。
+enum RestoreOutcome {
+    Restored {
+        entries: Vec<SignedLedgerEntry>,
+        verification_keys: Vec<LedgerVerifyingKey>,
+    },
+    Failed(SignatureVerificationSummary),
+}
+
+fn restore_entries_and_keys_for_summary(
+    rows: &[LedgerVerificationMaterialRow],
+    summary: &mut AuditReportSummary,
+) -> RestoreOutcome {
     let mut entries = Vec::with_capacity(rows.len());
     let mut verification_keys: Vec<LedgerVerifyingKey> = Vec::new();
-    for row in &rows {
+    for row in rows {
         let entry = match row.try_restore_signed_ledger_entry() {
             Ok(entry) => entry,
             Err(error) => {
@@ -367,7 +392,7 @@ async fn verify_signatures_for_summary(
                     row.source_event_at.clone(),
                     Some(sequence_no),
                 ));
-                return Ok(SignatureVerificationSummary {
+                return RestoreOutcome::Failed(SignatureVerificationSummary {
                     checked_count: entries.len() as u64,
                     detail: Some(format!("{code} at sequence {sequence_no}")),
                     valid: false,
@@ -386,7 +411,7 @@ async fn verify_signatures_for_summary(
                     row.source_event_at.clone(),
                     Some(sequence_no),
                 ));
-                return Ok(SignatureVerificationSummary {
+                return RestoreOutcome::Failed(SignatureVerificationSummary {
                     checked_count: entries.len() as u64,
                     detail: Some(format!("{code} at sequence {sequence_no}")),
                     valid: false,
@@ -402,8 +427,21 @@ async fn verify_signatures_for_summary(
         }
     }
 
-    let initial_head = initial_head_for_report_range(sequence_start, &entries)?;
-    match verify_ledger_chain(&entries, initial_head, &verification_keys) {
+    RestoreOutcome::Restored {
+        entries,
+        verification_keys,
+    }
+}
+
+/// 復元済みエントリと検証鍵で署名チェーン検証を実行し、署名サマリを組み立てる。
+fn build_signature_summary_from_chain(
+    entries: &[SignedLedgerEntry],
+    verification_keys: &[LedgerVerifyingKey],
+    summary: &mut AuditReportSummary,
+    sequence_start: u64,
+) -> Result<SignatureVerificationSummary, AuditReportCliError> {
+    let initial_head = initial_head_for_report_range(sequence_start, entries)?;
+    match verify_ledger_chain(entries, initial_head, verification_keys) {
         Ok(_) => Ok(SignatureVerificationSummary {
             checked_count: entries.len() as u64,
             detail: None,

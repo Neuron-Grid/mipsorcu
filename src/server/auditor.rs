@@ -7,7 +7,9 @@ use crate::ledger::{
     LedgerChainHead, LedgerError, LedgerSequenceNo, LedgerVerifyingKey, verify_ledger_chain,
 };
 use crate::server::config::AppConfig;
-use crate::server::supabase::{SupabaseClient, classify_export_ledger_error};
+use crate::server::supabase::{
+    LedgerVerificationMaterialRow, SupabaseClient, classify_export_ledger_error,
+};
 
 #[derive(Debug)]
 pub enum AuditorCliError {
@@ -54,6 +56,31 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), AuditorCl
         return Ok(());
     }
 
+    let AuditorVerifyArgs {
+        from_sequence,
+        to_sequence,
+    } = parse_auditor_verify_args(args)?;
+
+    let output = run_verify_command(&config, from_sequence, to_sequence).await?;
+    let json_output = serde_json::to_string_pretty(&output)
+        .map_err(|error| AuditorCliError::Serialization(error.to_string()))?;
+    println!("{json_output}");
+
+    if output.valid {
+        Ok(())
+    } else {
+        Err(AuditorCliError::Ledger(
+            "chain verification failed".to_owned(),
+        ))
+    }
+}
+
+struct AuditorVerifyArgs {
+    from_sequence: u64,
+    to_sequence: u64,
+}
+
+fn parse_auditor_verify_args(args: &[String]) -> Result<AuditorVerifyArgs, AuditorCliError> {
     let mut subcommand: Option<&String> = None;
     let mut from_sequence: Option<u64> = None;
     let mut to_sequence: Option<u64> = None;
@@ -128,18 +155,10 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), AuditorCl
         _ => return Err(AuditorCliError::Usage(usage())),
     }
 
-    let output = run_verify_command(&config, from_sequence, to_sequence).await?;
-    let json_output = serde_json::to_string_pretty(&output)
-        .map_err(|error| AuditorCliError::Serialization(error.to_string()))?;
-    println!("{json_output}");
-
-    if output.valid {
-        Ok(())
-    } else {
-        Err(AuditorCliError::Ledger(
-            "chain verification failed".to_owned(),
-        ))
-    }
+    Ok(AuditorVerifyArgs {
+        from_sequence,
+        to_sequence,
+    })
 }
 
 fn is_help_args(args: &[String]) -> bool {
@@ -195,18 +214,37 @@ async fn run_verify_command(
             AuditorCliError::SupabaseRpc(format!("{}: {}", classification.as_error_code(), error))
         })?;
 
-    // Restore signed ledger entries
+    let entries = restore_signed_entries(&rows)?;
+    let verification_keys = restore_dedup_verifying_keys(&rows)?;
+
+    Ok(build_verify_output(
+        entries,
+        verification_keys,
+        from_sequence,
+        to_sequence,
+    ))
+}
+
+/// export 行から署名済み台帳エントリを復元する。
+fn restore_signed_entries(
+    rows: &[LedgerVerificationMaterialRow],
+) -> Result<Vec<crate::ledger::SignedLedgerEntry>, AuditorCliError> {
     let mut entries = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in rows {
         let entry = row
             .try_restore_signed_ledger_entry()
             .map_err(|error| AuditorCliError::ExportFailure(error.to_string()))?;
         entries.push(entry);
     }
+    Ok(entries)
+}
 
-    // Restore verifying keys (deduplicate by key_version)
+/// export 行から検証鍵を復元する（key_version で重複排除）。
+fn restore_dedup_verifying_keys(
+    rows: &[LedgerVerificationMaterialRow],
+) -> Result<Vec<LedgerVerifyingKey>, AuditorCliError> {
     let mut verification_keys: Vec<LedgerVerifyingKey> = Vec::new();
-    for row in &rows {
+    for row in rows {
         if let Some(key) = row
             .try_restore_verifying_key()
             .map_err(|error| AuditorCliError::ExportFailure(error.to_string()))?
@@ -217,15 +255,24 @@ async fn run_verify_command(
             verification_keys.push(key);
         }
     }
+    Ok(verification_keys)
+}
 
+/// 復元済みエントリと検証鍵から検証を実行し、出力を組み立てる。
+fn build_verify_output(
+    entries: Vec<crate::ledger::SignedLedgerEntry>,
+    verification_keys: Vec<LedgerVerifyingKey>,
+    from_sequence: u64,
+    to_sequence: u64,
+) -> AuditorVerifyOutput {
     if entries.is_empty() {
-        return Ok(AuditorVerifyOutput {
+        return AuditorVerifyOutput {
             valid: true,
             checked_count: 0,
             first_sequence_no: from_sequence,
             last_sequence_no: to_sequence,
             first_error: None,
-        });
+        };
     }
 
     let first_seq = entries
@@ -240,16 +287,16 @@ async fn run_verify_command(
     let initial_head = LedgerChainHead::genesis();
 
     match verify_ledger_chain(&entries, initial_head, &verification_keys) {
-        Ok(_) => Ok(AuditorVerifyOutput {
+        Ok(_) => AuditorVerifyOutput {
             valid: true,
             checked_count: entries.len() as u64,
             first_sequence_no: first_seq,
             last_sequence_no: last_seq,
             first_error: None,
-        }),
+        },
         Err(error) => {
             let (code, seq_no) = map_error_to_code_and_sequence(&error, &entries);
-            Ok(AuditorVerifyOutput {
+            AuditorVerifyOutput {
                 valid: false,
                 checked_count: entries.len() as u64,
                 first_sequence_no: first_seq,
@@ -258,7 +305,7 @@ async fn run_verify_command(
                     code,
                     sequence_no: seq_no,
                 }),
-            })
+            }
         }
     }
 }

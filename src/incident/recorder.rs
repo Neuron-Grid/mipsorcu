@@ -126,45 +126,33 @@ impl<S: NotificationSink> IncidentRecorder<S> {
             self.notification_sink.sink_name(),
             &source_event_at,
         )?;
-        let event = AuditEvent::new(AuditEventParts {
-            audit_event_id: audit_event_id.clone(),
-            request_id: request_id.clone(),
-            actor_user_id: None,
-            actor_device_id: None,
-            action: AuditAction::IncidentDetected,
-            target_secret_id: None,
-            result: AuditResult::Failure,
-            key_version: None,
-            metadata_json: metadata,
-        })
-        .map_err(IncidentRecordError::InvalidMetadata)?;
+        let event =
+            build_incident_audit_event(audit_event_id.clone(), request_id.clone(), metadata)?;
 
-        let payload = build_incident_ledger_payload(
+        let draft = build_incident_ledger_draft(
             &input,
+            audit_event_id.clone(),
+            source_event_at,
+            request_id,
             notification_result,
             self.notification_sink.sink_name(),
         )?;
-        let draft = LedgerAppendDraft::new(LedgerAppendDraftParts {
-            ledger_entry_id: LedgerEntryId::generate()
-                .map_err(|_| IncidentRecordError::IdGenerationFailed)?,
-            entry_type: LedgerEntryType::IncidentDetected,
-            source_event_at,
-            request_id,
-            source_event_id: Some(audit_event_id.clone()),
-            target_secret_id: None,
-            target_secret_version_id: None,
-            actor_user_id: None,
-            actor_device_id: None,
-            result: LedgerResult::Failure,
-            error_code: Some(input.error_code.clone()),
-            payload,
-        })
-        .map_err(IncidentRecordError::InvalidLedgerDraft)?;
 
+        self.record_incident_with_retry(&input, &event, &draft, notification_result)
+            .await
+    }
+
+    async fn record_incident_with_retry(
+        &self,
+        input: &IncidentRecordInput,
+        event: &AuditEvent,
+        draft: &LedgerAppendDraft,
+        notification_result: NotificationResult,
+    ) -> Result<IncidentRecordResult, IncidentRecordError> {
         for retry_index in 0..=MAX_RECORD_RETRIES {
             let signed_entries = self
                 .ledger_appender
-                .sign_entries(std::slice::from_ref(&draft))
+                .sign_entries(std::slice::from_ref(draft))
                 .await
                 .map_err(IncidentRecordError::LedgerSignFailed)?;
             let Some(signed_entry) = signed_entries.into_iter().next() else {
@@ -177,7 +165,7 @@ impl<S: NotificationSink> IncidentRecorder<S> {
 
             match self
                 .supabase_client
-                .record_incident(&input, &event, &signed_entry, notification_result)
+                .record_incident(input, event, &signed_entry, notification_result)
                 .await
             {
                 Ok(outcome) => {
@@ -203,6 +191,52 @@ impl<S: NotificationSink> IncidentRecorder<S> {
             SupabaseRpcError::InvalidResponse("incident retry exhausted".to_owned()),
         ))
     }
+}
+
+fn build_incident_audit_event(
+    audit_event_id: AuditEventId,
+    request_id: RequestId,
+    metadata: AuditMetadata,
+) -> Result<AuditEvent, IncidentRecordError> {
+    AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id,
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::IncidentDetected,
+        target_secret_id: None,
+        result: AuditResult::Failure,
+        key_version: None,
+        metadata_json: metadata,
+    })
+    .map_err(IncidentRecordError::InvalidMetadata)
+}
+
+fn build_incident_ledger_draft(
+    input: &IncidentRecordInput,
+    audit_event_id: AuditEventId,
+    source_event_at: SourceEventAt,
+    request_id: RequestId,
+    notification_result: NotificationResult,
+    notification_sink: &str,
+) -> Result<LedgerAppendDraft, IncidentRecordError> {
+    let payload = build_incident_ledger_payload(input, notification_result, notification_sink)?;
+    LedgerAppendDraft::new(LedgerAppendDraftParts {
+        ledger_entry_id: LedgerEntryId::generate()
+            .map_err(|_| IncidentRecordError::IdGenerationFailed)?,
+        entry_type: LedgerEntryType::IncidentDetected,
+        source_event_at,
+        request_id,
+        source_event_id: Some(audit_event_id),
+        target_secret_id: None,
+        target_secret_version_id: None,
+        actor_user_id: None,
+        actor_device_id: None,
+        result: LedgerResult::Failure,
+        error_code: Some(input.error_code.clone()),
+        payload,
+    })
+    .map_err(IncidentRecordError::InvalidLedgerDraft)
 }
 
 async fn deliver_notification<S: NotificationSink>(
