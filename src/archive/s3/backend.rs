@@ -17,6 +17,7 @@ use crate::archive::backend::{
     ArchiveBackend, ArchiveBackendError, ArchiveObjectKey, ArchiveVerifyOutcome,
 };
 use crate::archive::export::ArchiveExportPackage;
+use crate::archive::opaque::ArchiveOpaqueObject;
 
 use super::client::{HeadOutcome, PutOutcome, S3HttpClient};
 use super::config::S3ArchiveBackendConfig;
@@ -213,6 +214,24 @@ impl ArchiveBackend for S3ImmutableArchiveBackend {
         }
 
         Ok(keys)
+    }
+
+    async fn put_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+        object: &ArchiveOpaqueObject,
+    ) -> Result<(), ArchiveBackendError> {
+        // digest と同じ Object Lock / overwrite 拒否 / 指数 backoff 経路を再利用する。
+        self.put_object_bytes(key, object.as_bytes().to_vec()).await
+    }
+
+    async fn get_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+    ) -> Result<Option<Vec<u8>>, ArchiveBackendError> {
+        self.get_object_bytes_with_retry(key)
+            .await
+            .map_err(ArchiveBackendError::from)
     }
 }
 

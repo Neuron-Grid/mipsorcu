@@ -10,12 +10,14 @@ pub mod any;
 pub mod backend;
 pub mod dummy;
 pub mod export;
+pub mod opaque;
 pub mod s3;
 
 pub use any::AnyArchiveBackend;
 pub use backend::{ArchiveBackend, ArchiveBackendError, ArchiveObjectKey, ArchiveVerifyOutcome};
 pub use dummy::{InMemoryArchiveBackend, LocalFileArchiveBackend};
 pub use export::{ARCHIVE_SCHEMA_VERSION, ArchiveExportPackage};
+pub use opaque::ArchiveOpaqueObject;
 pub use s3::{
     S3ArchiveBackendConfig, S3ArchiveBackendConfigError, S3ImmutableArchiveBackend,
     S3ObjectLockMode,

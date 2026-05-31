@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use super::backend::{ArchiveBackend, ArchiveBackendError, ArchiveObjectKey, ArchiveVerifyOutcome};
 use super::export::ArchiveExportPackage;
+use super::opaque::ArchiveOpaqueObject;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InMemoryArchiveBackend
@@ -97,6 +98,34 @@ impl ArchiveBackend for InMemoryArchiveBackend {
             .keys()
             .map(|k| ArchiveObjectKey::new(k.clone()))
             .collect::<Result<Vec<_>, _>>()
+    }
+
+    async fn put_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+        object: &ArchiveOpaqueObject,
+    ) -> Result<(), ArchiveBackendError> {
+        let mut guard = self
+            .store
+            .lock()
+            .map_err(|_| ArchiveBackendError::BackendFailed {
+                code: "mutex_poisoned".into(),
+            })?;
+        guard.insert(key.as_str().to_owned(), object.as_bytes().to_vec());
+        Ok(())
+    }
+
+    async fn get_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+    ) -> Result<Option<Vec<u8>>, ArchiveBackendError> {
+        let guard = self
+            .store
+            .lock()
+            .map_err(|_| ArchiveBackendError::BackendFailed {
+                code: "mutex_poisoned".into(),
+            })?;
+        Ok(guard.get(key.as_str()).cloned())
     }
 }
 
@@ -190,6 +219,37 @@ impl ArchiveBackend for LocalFileArchiveBackend {
                 })?);
             }
             Ok(result)
+        })
+        .await
+        .map_err(|_| join_failed_archive_error())?
+    }
+
+    async fn put_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+        object: &ArchiveOpaqueObject,
+    ) -> Result<(), ArchiveBackendError> {
+        let bytes = object.as_bytes().to_vec();
+        let path = self.resolve_path(key)?;
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(ArchiveBackendError::IoError)?;
+            }
+            std::fs::write(&path, &bytes).map_err(ArchiveBackendError::IoError)
+        })
+        .await
+        .map_err(|_| join_failed_archive_error())?
+    }
+
+    async fn get_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+    ) -> Result<Option<Vec<u8>>, ArchiveBackendError> {
+        let path = self.resolve_path(key)?;
+        tokio::task::spawn_blocking(move || match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ArchiveBackendError::IoError(error)),
         })
         .await
         .map_err(|_| join_failed_archive_error())?

@@ -12,6 +12,7 @@
 use super::backend::{ArchiveBackend, ArchiveBackendError, ArchiveObjectKey, ArchiveVerifyOutcome};
 use super::dummy::LocalFileArchiveBackend;
 use super::export::ArchiveExportPackage;
+use super::opaque::ArchiveOpaqueObject;
 use super::s3::S3ImmutableArchiveBackend;
 
 /// 実行時に選択された archive backend。
@@ -62,6 +63,27 @@ impl ArchiveBackend for AnyArchiveBackend {
         match self {
             Self::LocalFile(backend) => backend.list_objects().await,
             Self::S3(backend) => backend.list_objects().await,
+        }
+    }
+
+    async fn put_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+        object: &ArchiveOpaqueObject,
+    ) -> Result<(), ArchiveBackendError> {
+        match self {
+            Self::LocalFile(backend) => backend.put_opaque_object(key, object).await,
+            Self::S3(backend) => backend.put_opaque_object(key, object).await,
+        }
+    }
+
+    async fn get_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+    ) -> Result<Option<Vec<u8>>, ArchiveBackendError> {
+        match self {
+            Self::LocalFile(backend) => backend.get_opaque_object(key).await,
+            Self::S3(backend) => backend.get_opaque_object(key).await,
         }
     }
 }

@@ -7,6 +7,7 @@
 use std::fmt;
 
 use super::export::ArchiveExportPackage;
+use super::opaque::ArchiveOpaqueObject;
 
 /// 外部アーカイブ内のオブジェクトを識別するキー。
 ///
@@ -36,6 +37,19 @@ impl ArchiveObjectKey {
         period: &crate::ledger::MonthlyDigestPeriod,
     ) -> Result<Self, ArchiveBackendError> {
         let key = format!("digests/{}/digest.json", period.as_str());
+        Self::new(key)
+    }
+
+    /// 月次 digest の timestamping token（RFC 3161 `TimeStampResp`）用の標準キーを
+    /// 生成する。形式: `timestamping/{YYYY-MM}/token.tsr`
+    ///
+    /// `for_monthly_digest` と同系の period 由来キー。verify が period のみから
+    /// key を再計算できるよう、token serial 等には依存しない（v0.2.0 は順次
+    /// fallback で月内 token 1 件）。
+    pub fn for_timestamping_token(
+        period: &crate::ledger::MonthlyDigestPeriod,
+    ) -> Result<Self, ArchiveBackendError> {
+        let key = format!("timestamping/{}/token.tsr", period.as_str());
         Self::new(key)
     }
 
@@ -119,4 +133,23 @@ pub trait ArchiveBackend: Send + Sync + 'static {
     ) -> Result<ArchiveVerifyOutcome, ArchiveBackendError>;
 
     async fn list_objects(&self) -> Result<Vec<ArchiveObjectKey>, ArchiveBackendError>;
+
+    /// 非 digest の opaque object（RFC 3161 TSA token 等）を保管する。
+    ///
+    /// 引数型は `&ArchiveOpaqueObject` であり、`ArchiveOpaqueObject::from_timestamping_token`
+    /// からのみ構築できる。digest 用の `put_object` と同じく、秘密情報を backend へ
+    /// 渡せない構造を維持する。
+    async fn put_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+        object: &ArchiveOpaqueObject,
+    ) -> Result<(), ArchiveBackendError>;
+
+    /// 保管済み opaque object のバイト列を取得する。存在しなければ `None`。
+    ///
+    /// timestamping verify が保管済み token を読み出すために使う。
+    async fn get_opaque_object(
+        &self,
+        key: &ArchiveObjectKey,
+    ) -> Result<Option<Vec<u8>>, ArchiveBackendError>;
 }

@@ -22,15 +22,25 @@ serde_json = "1.0.149"
 sha2 = "0.11.0"
 sha3 = "0.11"
 time = { version = "0.3.47", features = ["formatting", "parsing"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tower-http = { version = "0.6", features = ["trace", "sensitive-headers"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 uuid = "1.23.1"
 zeroize = "1.8.2"
 fs4 = "1.1.0"
+x509-tsp = "0.1"
+cms = { version = "0.2", default-features = false, features = ["alloc", "std"] }
+der = { version = "0.7", features = ["alloc", "oid"] }
+cmpv2 = "0.2"
+spki = "0.7"
 
 [dev-dependencies]
+cmpv2 = "0.2"
+cms = { version = "0.2", default-features = false, features = ["alloc", "std"] }
+der = { version = "0.7", features = ["alloc", "oid"] }
 proptest = "1.11.0"
+spki = "0.7"
 tokio = { version = "1", features = ["test-util"] }
 wiremock = "0.6"
+x509-tsp = { version = "0.1", default-features = false }

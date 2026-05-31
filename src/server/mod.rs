@@ -21,4 +21,5 @@ pub mod siem_forwarding;
 mod signature_key;
 pub mod state;
 pub mod supabase;
+pub mod timestamping;
 pub(crate) mod use_cases;

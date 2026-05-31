@@ -11,11 +11,18 @@ use std::sync::{Arc, Mutex};
 
 use crate::ledger::DigestHash;
 
-use super::service::{TimestampingService, TimestampingServiceError, TimestampingToken};
+use super::service::{
+    TimestampVerification, TimestampVerificationFailureKind, TimestampingProviderKind,
+    TimestampingService, TimestampingServiceError, TimestampingToken, VerifiedTimestamp,
+};
 
 /// dummy backend が返す token の固定 prefix。
 /// 本番 RFC 3161 token と取り違えないための識別子。
 const DUMMY_TOKEN_PREFIX: &[u8] = b"DUMMY-TST-V1:";
+
+/// dummy backend が `verify_timestamp` 成功時に返す固定 serial（hex）。
+/// 本番 TSA serial ではないことを示す識別子。
+const DUMMY_TSA_SERIAL_HEX: &str = "00";
 
 /// メモリ上の timestamping backend（テスト専用）。
 ///
@@ -64,6 +71,44 @@ impl TimestampingService for InMemoryTimestampingService {
         guard.insert(*digest_hash.as_bytes(), token.clone());
         Ok(token)
     }
+
+    async fn verify_timestamp(
+        &self,
+        token: &TimestampingToken,
+        expected_hash: &DigestHash,
+    ) -> Result<TimestampVerification, TimestampingServiceError> {
+        Ok(verify_dummy_token(token, expected_hash))
+    }
+
+    fn provider_kind(&self) -> TimestampingProviderKind {
+        TimestampingProviderKind::LocalDummy
+    }
+}
+
+/// dummy token（`DUMMY-TST-V1:` + digest_hash 32 バイト）を検証する。
+///
+/// 本番 RFC 3161 検証の代替であり、prefix と埋め込まれた hash が `expected_hash`
+/// と一致するかのみを確認する（法的時刻保証性は持たない）。
+fn verify_dummy_token(
+    token: &TimestampingToken,
+    expected_hash: &DigestHash,
+) -> TimestampVerification {
+    let bytes = token.as_bytes();
+    let Some(embedded_hash) = bytes.strip_prefix(DUMMY_TOKEN_PREFIX) else {
+        return TimestampVerification::Invalid {
+            failure_kind: TimestampVerificationFailureKind::Malformed,
+        };
+    };
+    if embedded_hash == expected_hash.as_bytes() {
+        TimestampVerification::Valid(VerifiedTimestamp {
+            tsa_serial_hex: DUMMY_TSA_SERIAL_HEX.to_owned(),
+            gen_time: None,
+        })
+    } else {
+        TimestampVerification::Invalid {
+            failure_kind: TimestampVerificationFailureKind::ImprintMismatch,
+        }
+    }
 }
 
 fn build_dummy_token(
@@ -96,6 +141,20 @@ impl TimestampingService for FailingTimestampingService {
         Err(TimestampingServiceError::BackendFailed {
             code: self.code.clone(),
         })
+    }
+
+    async fn verify_timestamp(
+        &self,
+        _token: &TimestampingToken,
+        _expected_hash: &DigestHash,
+    ) -> Result<TimestampVerification, TimestampingServiceError> {
+        Err(TimestampingServiceError::BackendFailed {
+            code: self.code.clone(),
+        })
+    }
+
+    fn provider_kind(&self) -> TimestampingProviderKind {
+        TimestampingProviderKind::LocalDummy
     }
 }
 

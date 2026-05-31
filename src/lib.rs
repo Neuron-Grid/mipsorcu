@@ -31,9 +31,9 @@ pub use alias::{
 };
 pub use archive::{
     ARCHIVE_SCHEMA_VERSION, AnyArchiveBackend, ArchiveBackend, ArchiveBackendError,
-    ArchiveExportPackage, ArchiveObjectKey, ArchiveVerifyOutcome, InMemoryArchiveBackend,
-    LocalFileArchiveBackend, S3ArchiveBackendConfig, S3ArchiveBackendConfigError,
-    S3ImmutableArchiveBackend, S3ObjectLockMode,
+    ArchiveExportPackage, ArchiveObjectKey, ArchiveOpaqueObject, ArchiveVerifyOutcome,
+    InMemoryArchiveBackend, LocalFileArchiveBackend, S3ArchiveBackendConfig,
+    S3ArchiveBackendConfigError, S3ImmutableArchiveBackend, S3ObjectLockMode,
 };
 pub use audit::{
     ArchiveExportMetadata, ArchiveSweepOutcome, AuditAction, AuditAppendError, AuditEvent,
@@ -112,8 +112,11 @@ pub use siem::{
     build_siem_forward_failure_audit_event,
 };
 pub use timestamping::{
-    FailingTimestampingService, InMemoryTimestampingService, TimestampingService,
-    TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
+    AnyTimestampingProvider, FailingTimestampingService, InMemoryTimestampingService,
+    RetryingTimestampingService, Rfc3161TimestampingService, TimestampVerification,
+    TimestampVerificationFailureKind, TimestampingProviderKind, TimestampingRetryPolicy,
+    TimestampingService, TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
+    TsaCredentials, VerifiedTimestamp,
 };
 pub use types::{
     AliasEncryptionKey, AliasFingerprintKey, AliasFingerprintSchemaVersion, Ciphertext,

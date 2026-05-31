@@ -8,10 +8,18 @@
 //! `&DigestHash`（32 バイト SHA3-256）に限定される。`LedgerEntry` 全件・
 //! `SignedMonthlyDigest` の他フィールド・平文・鍵・JWT が型レベルで送信不可。
 
+pub mod any;
 pub mod dummy;
+pub mod rfc3161;
+pub mod sender;
 pub mod service;
 
+pub use any::AnyTimestampingProvider;
 pub use dummy::{FailingTimestampingService, InMemoryTimestampingService};
+pub use rfc3161::{Rfc3161TimestampingService, TsaCredentials};
+pub use sender::{RetryingTimestampingService, TimestampingRetryPolicy};
 pub use service::{
+    TimestampVerification, TimestampVerificationFailureKind, TimestampingProviderKind,
     TimestampingService, TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
+    VerifiedTimestamp,
 };

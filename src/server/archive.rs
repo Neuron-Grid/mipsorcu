@@ -307,7 +307,7 @@ async fn run_verify_command(
 /// `verify_monthly_digest` 内部の canonical form 再構築と同一手順。生成時と同じ
 /// 入力を `build_monthly_digest_canonical_form` に与えるため、結果の object key /
 /// archive bytes は生成時と一致する（再現可能性）。
-fn reconstruct_signed_digest(
+pub(crate) fn reconstruct_signed_digest(
     materials: &MonthlyDigestVerificationMaterials,
 ) -> Result<SignedMonthlyDigest, ArchiveCliError> {
     let canonical_bytes = build_monthly_digest_canonical_form(
@@ -340,7 +340,7 @@ fn reconstruct_signed_digest(
     })
 }
 
-async fn fetch_materials(
+pub(crate) async fn fetch_materials(
     supabase_client: &Arc<SupabaseClient>,
     period: &MonthlyDigestPeriod,
 ) -> Result<MonthlyDigestVerificationMaterials, ArchiveCliError> {
@@ -371,7 +371,7 @@ async fn fetch_materials(
 /// 値は必須（誤って production digest を local_dummy へ送ることを防ぐ）。
 /// S3 接続情報・credential は process 環境変数（`MIPSORCU_ARCHIVE_S3_*`）から読み、
 /// backend 内部の `SecretString` に閉じる。
-fn build_backend(config: &AppConfig) -> Result<AnyArchiveBackend, ArchiveCliError> {
+pub(crate) fn build_backend(config: &AppConfig) -> Result<AnyArchiveBackend, ArchiveCliError> {
     let backend_kind = std::env::var(ENV_ARCHIVE_BACKEND)
         .ok()
         .map(|value| value.trim().to_owned())
@@ -447,7 +447,9 @@ async fn record_archive_verify_incident(
     }
 }
 
-fn build_supabase_client(config: &AppConfig) -> Result<Arc<SupabaseClient>, ArchiveCliError> {
+pub(crate) fn build_supabase_client(
+    config: &AppConfig,
+) -> Result<Arc<SupabaseClient>, ArchiveCliError> {
     let http_client = crate::server::config::build_outbound_http_client(config)
         .map_err(|error| ArchiveCliError::Config(error.to_string()))?;
     Ok(Arc::new(SupabaseClient::new(
@@ -458,7 +460,7 @@ fn build_supabase_client(config: &AppConfig) -> Result<Arc<SupabaseClient>, Arch
     )))
 }
 
-fn build_audit_recorder(
+pub(crate) fn build_audit_recorder(
     config: &AppConfig,
     supabase_client: Arc<SupabaseClient>,
 ) -> Arc<AuditRecorder<SupabaseAuditAppender>> {
@@ -471,7 +473,7 @@ fn build_audit_recorder(
     Arc::new(AuditRecorder::new(audit_appender, fallback_store))
 }
 
-fn build_ledger_appender(
+pub(crate) fn build_ledger_appender(
     config: &AppConfig,
     supabase_client: Arc<SupabaseClient>,
 ) -> Arc<LedgerAppender> {

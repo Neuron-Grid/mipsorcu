@@ -119,6 +119,77 @@ impl fmt::Display for TimestampingServiceError {
 
 impl std::error::Error for TimestampingServiceError {}
 
+/// timestamping backend の種別（表示・ログ用。秘密情報を含まない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimestampingProviderKind {
+    /// テスト用 in-memory dummy backend。
+    LocalDummy,
+    /// RFC 3161 互換 TSA backend。
+    Rfc3161,
+}
+
+impl TimestampingProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalDummy => "local_dummy",
+            Self::Rfc3161 => "rfc3161",
+        }
+    }
+}
+
+impl fmt::Display for TimestampingProviderKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// `verify_timestamp` の検証結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimestampVerification {
+    /// token は有効。imprint が `expected_hash` と一致し、TSA 署名も検証済み。
+    Valid(VerifiedTimestamp),
+    /// 検証に失敗した（理由つき）。token 自体は秘密ではないため理由を保持してよい。
+    Invalid {
+        failure_kind: TimestampVerificationFailureKind,
+    },
+}
+
+/// 検証に成功した timestamp から取り出した非秘密メタデータ。
+///
+/// いずれも CLI 出力・structured log 用であり、ledger / audit_events には
+/// 記録しない（ADR-0040 の payload allowlist を変えない）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VerifiedTimestamp {
+    /// TSA serial number（小文字 hex）。dummy backend では固定値。
+    pub tsa_serial_hex: String,
+    /// TSA の gen_time（RFC 3339）。dummy backend では `None`。
+    pub gen_time: Option<String>,
+}
+
+/// timestamp 検証失敗の分類。`audit_events`/incident には `as_str` の固定文字列を使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimestampVerificationFailureKind {
+    /// token を RFC 3161 TimeStampResp / TST として解析できない。
+    Malformed,
+    /// PKIStatus が granted / grantedWithMods でない。
+    NotGranted,
+    /// TST の MessageImprint（hash algorithm / value）が `expected_hash` と一致しない。
+    ImprintMismatch,
+    /// TSA 署名が証明書チェーンに対して無効。
+    SignatureInvalid,
+}
+
+impl TimestampVerificationFailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::NotGranted => "not_granted",
+            Self::ImprintMismatch => "imprint_mismatch",
+            Self::SignatureInvalid => "signature_invalid",
+        }
+    }
+}
+
 /// 外部 timestamping サービスの抽象化 trait。
 ///
 /// # 型安全保証
@@ -140,6 +211,22 @@ pub trait TimestampingService: Send + Sync + 'static {
         &self,
         digest_hash: &DigestHash,
     ) -> Result<TimestampingToken, TimestampingServiceError>;
+
+    /// 取得済み token が `expected_hash`（32 バイト SHA3-256）に対する有効な
+    /// timestamp かを検証する。
+    ///
+    /// ネットワーク不要のオフライン検証。RFC 3161 backend では token 内の
+    /// TSA 証明書チェーンに対して署名を検証し、TST の MessageImprint が
+    /// `expected_hash` と一致することを確認する。引数は token と hash のみで、
+    /// 秘密情報・credential を必要としない。
+    async fn verify_timestamp(
+        &self,
+        token: &TimestampingToken,
+        expected_hash: &DigestHash,
+    ) -> Result<TimestampVerification, TimestampingServiceError>;
+
+    /// backend 種別を返す（表示・ログ用、秘密情報なし）。
+    fn provider_kind(&self) -> TimestampingProviderKind;
 }
 
 #[cfg(test)]

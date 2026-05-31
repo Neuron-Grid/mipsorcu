@@ -15,6 +15,7 @@ use crate::archive::backend::{
 };
 use crate::archive::dummy::InMemoryArchiveBackend;
 use crate::archive::export::ArchiveExportPackage;
+use crate::archive::opaque::ArchiveOpaqueObject;
 use crate::ledger::{
     DigestHash, LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerHash, LedgerSequenceNo, LedgerSignature,
     LedgerSignatureKeyVersion, LedgerSigningKey, MonthlyDigestPeriod, SignedMonthlyDigest,
@@ -395,6 +396,21 @@ impl ArchiveBackend for FailingPutBackend {
     async fn list_objects(&self) -> Result<Vec<ArchiveObjectKey>, ArchiveBackendError> {
         Ok(Vec::new())
     }
+
+    async fn put_opaque_object(
+        &self,
+        _key: &ArchiveObjectKey,
+        _object: &ArchiveOpaqueObject,
+    ) -> Result<(), ArchiveBackendError> {
+        Ok(())
+    }
+
+    async fn get_opaque_object(
+        &self,
+        _key: &ArchiveObjectKey,
+    ) -> Result<Option<Vec<u8>>, ArchiveBackendError> {
+        Ok(None)
+    }
 }
 
 struct MismatchAfterPutBackend;
@@ -418,6 +434,21 @@ impl ArchiveBackend for MismatchAfterPutBackend {
 
     async fn list_objects(&self) -> Result<Vec<ArchiveObjectKey>, ArchiveBackendError> {
         Ok(Vec::new())
+    }
+
+    async fn put_opaque_object(
+        &self,
+        _key: &ArchiveObjectKey,
+        _object: &ArchiveOpaqueObject,
+    ) -> Result<(), ArchiveBackendError> {
+        Ok(())
+    }
+
+    async fn get_opaque_object(
+        &self,
+        _key: &ArchiveObjectKey,
+    ) -> Result<Option<Vec<u8>>, ArchiveBackendError> {
+        Ok(None)
     }
 }
 

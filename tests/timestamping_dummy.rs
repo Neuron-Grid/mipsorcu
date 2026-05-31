@@ -15,11 +15,13 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use mipsorcu::{
-    AuditRecorder, DigestHash, FailingTimestampingService, InMemoryTimestampingService, LedgerHash,
+    ArchiveBackend, ArchiveObjectKey, ArchiveOpaqueObject, AuditRecorder, DigestHash,
+    FailingTimestampingService, InMemoryArchiveBackend, InMemoryTimestampingService, LedgerHash,
     LedgerSequenceNo, LedgerSignature, LedgerSignatureKeyVersion, LocalAuditFallbackStore,
     MonthlyDigestPeriod, RequestId, RequestTimestampingError, SignedMonthlyDigest, SourceEventAt,
+    TimestampVerification, TimestampVerificationFailureKind, TimestampingProviderKind,
     TimestampingService, TimestampingServiceError, TimestampingToken, TimestampingTokenHash,
-    build_monthly_digest_canonical_form, request_timestamping_for_digest,
+    VerifiedTimestamp, build_monthly_digest_canonical_form, request_timestamping_for_digest,
 };
 
 // LedgerAppender / SupabaseClient はクレート内 (pub) なので直接アクセス可能。
@@ -161,6 +163,18 @@ async fn payload_to_backend_contains_only_digest_hash_bytes() {
         ) -> Result<TimestampingToken, TimestampingServiceError> {
             self.captured.lock().unwrap().push(*digest_hash.as_bytes());
             TimestampingToken::new(vec![0xfa, 0xce, 0xfe, 0xed])
+        }
+
+        async fn verify_timestamp(
+            &self,
+            _token: &TimestampingToken,
+            _expected_hash: &DigestHash,
+        ) -> Result<TimestampVerification, TimestampingServiceError> {
+            Ok(TimestampVerification::Valid(VerifiedTimestamp::default()))
+        }
+
+        fn provider_kind(&self) -> TimestampingProviderKind {
+            TimestampingProviderKind::LocalDummy
         }
     }
 
@@ -553,4 +567,90 @@ async fn ledger_append_failure_after_token_acquired_records_success_audit_and_re
     assert_eq!(audit_request.body["p_action"], "digest_timestamping");
     assert_eq!(audit_request.body["p_result"], "success");
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dummy provider: verify + archive opaque 保管経路（Task 11）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `test_signed_monthly_digest` とは別の digest_hash を作るヘルパ。
+fn other_digest_hash() -> DigestHash {
+    let period = MonthlyDigestPeriod::parse("2026-04").unwrap();
+    let canonical = build_monthly_digest_canonical_form(
+        &period,
+        LedgerSequenceNo::new(1).unwrap(),
+        LedgerSequenceNo::new(7).unwrap(),
+        LedgerHash::from_bytes(&[0x11; 32]).unwrap(),
+        LedgerHash::from_bytes(&[0x22; 32]).unwrap(),
+        7,
+        &SourceEventAt::parse("2026-05-01T00:00:00Z").unwrap(),
+        LedgerSignatureKeyVersion::new(1).unwrap(),
+    )
+    .unwrap();
+    DigestHash::from_canonical_bytes(&canonical)
+}
+
+#[tokio::test]
+async fn dummy_verify_valid_for_matching_hash_and_invalid_for_other() {
+    let service = InMemoryTimestampingService::new();
+    let digest = test_signed_monthly_digest();
+    let token = service
+        .request_timestamp(&digest.digest_hash)
+        .await
+        .unwrap();
+
+    // 同じ digest_hash → Valid（dummy は serial を固定値で返す）。
+    match service
+        .verify_timestamp(&token, &digest.digest_hash)
+        .await
+        .unwrap()
+    {
+        TimestampVerification::Valid(meta) => assert!(!meta.tsa_serial_hex.is_empty()),
+        other => panic!("expected Valid, got {other:?}"),
+    }
+
+    // 異なる digest_hash → Invalid{ImprintMismatch}。
+    assert_eq!(
+        service
+            .verify_timestamp(&token, &other_digest_hash())
+            .await
+            .unwrap(),
+        TimestampVerification::Invalid {
+            failure_kind: TimestampVerificationFailureKind::ImprintMismatch,
+        }
+    );
+}
+
+#[tokio::test]
+async fn dummy_token_archive_opaque_round_trip_then_verify() {
+    let service = InMemoryTimestampingService::new();
+    let digest = test_signed_monthly_digest();
+    let token = service
+        .request_timestamp(&digest.digest_hash)
+        .await
+        .unwrap();
+
+    // ArchiveOpaqueObject は token からのみ構築でき、backend へ秘密を渡せない。
+    let backend = InMemoryArchiveBackend::new();
+    let key = ArchiveObjectKey::for_timestamping_token(&digest.period).unwrap();
+    let object = ArchiveOpaqueObject::from_timestamping_token(&token);
+    backend.put_opaque_object(&key, &object).await.unwrap();
+
+    // verify は period のみから同じ key を再計算して token を取得できる。
+    let fetched = backend
+        .get_opaque_object(&key)
+        .await
+        .unwrap()
+        .expect("token must be stored in the archive");
+    assert_eq!(fetched, token.as_bytes());
+
+    let restored = TimestampingToken::new(fetched).unwrap();
+    match service
+        .verify_timestamp(&restored, &digest.digest_hash)
+        .await
+        .unwrap()
+    {
+        TimestampVerification::Valid(_) => {}
+        other => panic!("expected Valid after archive round-trip, got {other:?}"),
+    }
 }
