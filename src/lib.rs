@@ -15,6 +15,7 @@ pub mod error;
 pub mod incident;
 pub mod ledger;
 pub mod read;
+pub mod scheduler;
 pub mod server;
 pub mod siem;
 pub mod timestamping;

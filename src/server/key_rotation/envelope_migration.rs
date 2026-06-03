@@ -657,12 +657,12 @@ mod tests;
 /// 信頼境界ノート: フィールドはすべて非秘密の集計値のみ。Master Key・DEK 平文・
 /// 暗号文の長さなど秘密情報に直結するフィールドを含めない。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(in crate::server) struct RunScheduledEnvelopeMigrationOutcome {
-    pub(in crate::server) selected_count: u64,
-    pub(in crate::server) success_count: u64,
-    pub(in crate::server) failure_count: u64,
-    pub(in crate::server) remaining_legacy_rows: i64,
-    pub(in crate::server) batches_executed: u32,
+pub(crate) struct RunScheduledEnvelopeMigrationOutcome {
+    pub(crate) selected_count: u64,
+    pub(crate) success_count: u64,
+    pub(crate) failure_count: u64,
+    pub(crate) remaining_legacy_rows: i64,
+    pub(crate) batches_executed: u32,
 }
 
 /// scheduler 経路から起動する envelope lazy migration。
@@ -671,7 +671,7 @@ pub(in crate::server) struct RunScheduledEnvelopeMigrationOutcome {
 /// scheduler が持つ `AppState` 由来の値（`MasterKeyRing` / supabase /
 /// ledger appender）のみで完結させる。dry-run / format / secret-id は scheduler
 /// 経路ではサポートしない（呼び出し側で必要になれば後続タスクで拡張）。
-pub(in crate::server) async fn run_scheduled_envelope_migration(
+pub(crate) async fn run_scheduled_envelope_migration(
     supabase_client: Arc<SupabaseClient>,
     ledger_appender: Arc<LedgerAppender>,
     master_key_ring: Arc<MasterKeyRing>,

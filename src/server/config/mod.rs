@@ -35,7 +35,7 @@ pub use operational_checks::{
 pub use scheduler::{
     parse_scheduler_enabled, parse_scheduler_monthly_day, parse_scheduler_monthly_hour_utc,
     parse_scheduler_poll_interval, parse_scheduler_quarterly_hour_utc,
-    parse_scheduler_startup_delay,
+    parse_scheduler_startup_delay, scheduler_startup_delay_value,
 };
 pub use siem::{
     SiemExporterConfig, parse_siem_exporter_config, parse_siem_long_failure_threshold,

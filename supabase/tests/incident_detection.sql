@@ -124,6 +124,12 @@ end;
 $$;
 
 select is(
+    public.incident_type_allowed('scheduler_failure'),
+    true,
+    'scheduler_failure is an allowed incident type'
+);
+
+select is(
     public.rpc_incident_recently_seen(
         'hash_chain_mismatch',
         'global-chain',

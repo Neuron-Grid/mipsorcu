@@ -284,6 +284,10 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         audit_recorder.clone(),
         readiness_state.clone(),
     ));
+    let scheduler_status = crate::scheduler::SchedulerStatusState::new(
+        config.scheduler_enabled,
+        config.scheduler_startup_delay,
+    );
 
     Ok(AppState {
         master_key_ring: Arc::new(config.master_key_ring),
@@ -297,6 +301,7 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         ledger_appender,
         incident_recorder,
         siem_forwarding,
+        scheduler_status,
         audit_fallback_store,
         readiness_state,
         health_readiness_poll_interval: config.health_readiness_poll_interval,

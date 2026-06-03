@@ -167,6 +167,31 @@ pub(super) fn allowed_metadata_keys(
             TRIGGER_KEY,
             SOURCE_EVENT_AT_KEY,
         ],
+        AuditAction::SchedulerJobStarted => &[
+            "job_name",
+            "scheduled_at",
+            "started_at",
+            SOURCE_EVENT_AT_KEY,
+        ],
+        AuditAction::SchedulerJobCompleted => &[
+            "completed_at",
+            "duration_ms",
+            "job_name",
+            "result_summary",
+            "started_at",
+            SOURCE_EVENT_AT_KEY,
+        ],
+        AuditAction::SchedulerJobFailed => &[
+            "error_code",
+            "failed_at",
+            "job_name",
+            "retry_count",
+            "started_at",
+            SOURCE_EVENT_AT_KEY,
+        ],
+        AuditAction::SchedulerJobSkipped => {
+            &["job_name", "reason", "skipped_at", SOURCE_EVENT_AT_KEY]
+        }
         AuditAction::IncidentDetected => &[
             "incident_type",
             "severity",
@@ -292,6 +317,22 @@ pub(super) fn required_metadata_keys(
         AuditAction::AuditReportGenerate => &["format", "period_end", "period_start"],
         AuditAction::AuditUiRead => &["endpoint", "method", "resource"],
         AuditAction::SchedulerJob => &["job_name", TRIGGER_KEY, "duration_ms"],
+        AuditAction::SchedulerJobStarted => &["job_name", "scheduled_at", "started_at"],
+        AuditAction::SchedulerJobCompleted => &[
+            "job_name",
+            "started_at",
+            "completed_at",
+            "duration_ms",
+            "result_summary",
+        ],
+        AuditAction::SchedulerJobFailed => &[
+            "job_name",
+            "started_at",
+            "failed_at",
+            "error_code",
+            "retry_count",
+        ],
+        AuditAction::SchedulerJobSkipped => &["job_name", "skipped_at", "reason"],
         AuditAction::IncidentDetected => &[
             "incident_type",
             "severity",

@@ -1664,6 +1664,182 @@ select is(
 );
 
 select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001220',
+        '00000000-0000-4000-8000-000000001220',
+        null,
+        null,
+        'scheduler_job_started',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'scheduled_at', '2026-06-01T02:00:00Z',
+            'started_at', '2026-06-01T02:00:01Z',
+            'source_event_at', '2026-06-01T02:00:01Z'
+        )
+    ),
+    'ok',
+    'scheduler_job_started accepts lifecycle metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001221',
+        '00000000-0000-4000-8000-000000001221',
+        null,
+        null,
+        'scheduler_job_completed',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'started_at', '2026-06-01T02:00:01Z',
+            'completed_at', '2026-06-01T02:00:02Z',
+            'duration_ms', 1000,
+            'result_summary', jsonb_build_object('valid', true),
+            'source_event_at', '2026-06-01T02:00:02Z'
+        )
+    ),
+    'ok',
+    'scheduler_job_completed accepts lifecycle metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001222',
+        '00000000-0000-4000-8000-000000001222',
+        null,
+        null,
+        'scheduler_job_failed',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'started_at', '2026-06-01T02:00:01Z',
+            'failed_at', '2026-06-01T02:00:02Z',
+            'error_code', 'scheduler_job_timeout',
+            'retry_count', 0,
+            'source_event_at', '2026-06-01T02:00:02Z'
+        )
+    ),
+    'ok',
+    'scheduler_job_failed accepts failure lifecycle metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001223',
+        '00000000-0000-4000-8000-000000001223',
+        null,
+        null,
+        'scheduler_job_skipped',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'skipped_at', '2026-06-01T02:00:01Z',
+            'reason', 'lock_not_acquired',
+            'source_event_at', '2026-06-01T02:00:01Z'
+        )
+    ),
+    'ok',
+    'scheduler_job_skipped accepts lock contention metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001224',
+        '00000000-0000-4000-8000-000000001224',
+        null,
+        null,
+        'scheduler_job_started',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'scheduled_at', '2026-06-01T02:00:00Z',
+            'started_at', '2026-06-01T02:00:01Z',
+            'source_event_at', '2026-06-01T02:00:01Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job_started rejects failure result'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001225',
+        '00000000-0000-4000-8000-000000001225',
+        null,
+        null,
+        'scheduler_job_failed',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'started_at', '2026-06-01T02:00:01Z',
+            'failed_at', '2026-06-01T02:00:02Z',
+            'error_code', 'scheduler_job_timeout',
+            'retry_count', 1,
+            'source_event_at', '2026-06-01T02:00:02Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job_failed rejects non-zero retry_count'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001226',
+        '00000000-0000-4000-8000-000000001226',
+        null,
+        null,
+        'scheduler_job_skipped',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'skipped_at', '2026-06-01T02:00:01Z',
+            'reason', 'maintenance',
+            'source_event_at', '2026-06-01T02:00:01Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job_skipped rejects unknown reason'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001227',
+        '00000000-0000-4000-8000-000000001227',
+        null,
+        null,
+        'scheduler_job_completed',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'started_at', '2026-06-01T02:00:01Z',
+            'completed_at', '2026-06-01T02:00:02Z',
+            'duration_ms', 1000,
+            'result_summary', 'not_an_object',
+            'source_event_at', '2026-06-01T02:00:02Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'scheduler_job_completed rejects non-object result_summary'
+);
+
+select is(
     has_function_privilege(
         'anon',
         'public.audit_metadata_has_invalid_value_for_action(text, text, jsonb)',

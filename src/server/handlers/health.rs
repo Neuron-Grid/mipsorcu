@@ -73,6 +73,12 @@ pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<Hea
     )
 }
 
+pub async fn scheduler_status(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<crate::scheduler::SchedulerStatusSnapshot>) {
+    (StatusCode::OK, Json(state.scheduler_status.snapshot()))
+}
+
 pub async fn not_found(request_context: RequestContext) -> impl IntoResponse {
     ApiError::NotFound("not found".to_owned())
         .with_request_id(request_context.request_id())

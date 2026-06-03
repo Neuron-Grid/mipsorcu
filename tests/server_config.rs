@@ -13,6 +13,7 @@ use mipsorcu::server::config::{
     parse_integrity_check_startup_delay, parse_jwks_refresh_interval,
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
+    parse_scheduler_enabled, parse_scheduler_startup_delay, scheduler_startup_delay_value,
 };
 use mipsorcu::{
     AliasEncryptionKey, AliasFingerprintKey, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
@@ -640,6 +641,49 @@ fn integrity_check_startup_delay_rejects_empty_and_non_numeric_values() {
 }
 
 #[test]
+fn scheduler_enabled_defaults_to_false_and_accepts_booleans() {
+    assert!(
+        !parse_scheduler_enabled(None).expect("scheduler enabled default should be valid"),
+        "scheduler must be opt-in by default"
+    );
+    assert!(parse_scheduler_enabled(Some("true".to_owned())).expect("true should parse"));
+    assert!(!parse_scheduler_enabled(Some("false".to_owned())).expect("false should parse"));
+    assert!(parse_scheduler_enabled(Some("1".to_owned())).expect("1 should parse"));
+    assert!(!parse_scheduler_enabled(Some("0".to_owned())).expect("0 should parse"));
+}
+
+#[test]
+fn scheduler_enabled_rejects_invalid_value() {
+    assert!(matches!(
+        parse_scheduler_enabled(Some("enabled".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn scheduler_startup_delay_defaults_to_thirty_seconds() {
+    let delay =
+        parse_scheduler_startup_delay(None).expect("default scheduler startup delay should parse");
+
+    assert_eq!(delay, Duration::from_secs(30));
+}
+
+#[test]
+fn scheduler_startup_delay_accepts_seconds_alias_with_canonical_precedence() {
+    let legacy = scheduler_startup_delay_value(None, Some("5".to_owned()));
+    let canonical = scheduler_startup_delay_value(Some("30".to_owned()), Some("5".to_owned()));
+
+    assert_eq!(
+        parse_scheduler_startup_delay(legacy).expect("legacy SEC alias should parse"),
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        parse_scheduler_startup_delay(canonical).expect("canonical SECONDS should parse"),
+        Duration::from_secs(30)
+    );
+}
+
+#[test]
 fn jwks_refresh_interval_defaults_to_sixty_minutes() {
     let interval = parse_jwks_refresh_interval(None).expect("default interval should be valid");
 
@@ -920,7 +964,7 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         integrity_check_interval: Duration::from_secs(24 * 60 * 60),
         integrity_check_startup_delay: Duration::from_secs(3900),
         scheduler_enabled: true,
-        scheduler_startup_delay: Duration::from_secs(4500),
+        scheduler_startup_delay: Duration::from_secs(30),
         scheduler_poll_interval: Duration::from_secs(3600),
         scheduler_monthly_day: 1,
         scheduler_monthly_hour_utc: 3,
@@ -972,7 +1016,7 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("10"));
     assert!(output.contains("scheduler_enabled"));
     assert!(output.contains("scheduler_startup_delay_seconds"));
-    assert!(output.contains("4500"));
+    assert!(output.contains("30"));
     assert!(output.contains("scheduler_poll_interval_seconds"));
     assert!(output.contains("3600"));
     assert!(output.contains("scheduler_local_archive_dir"));

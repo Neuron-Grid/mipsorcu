@@ -341,6 +341,7 @@ fn test_app_state_with_fallback(
         ledger_appender,
         incident_recorder,
         siem_forwarding,
+        scheduler_status: mipsorcu::scheduler::SchedulerStatusState::default(),
         audit_fallback_store,
         readiness_state,
         health_readiness_poll_interval: Duration::from_secs(30),

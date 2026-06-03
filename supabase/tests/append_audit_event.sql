@@ -889,6 +889,50 @@ select is(
     'append audit RPC rejects scheduled trigger'
 );
 
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000130',
+        '00000000-0000-4000-8000-000000000130',
+        null,
+        null,
+        'scheduler_job_started',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'scheduled_at', '2026-04-08T12:00:00Z',
+            'started_at', '2026-04-08T12:00:01Z',
+            'source_event_at', '2026-04-08T12:00:01Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts scheduler_job_started with valid metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000131',
+        '00000000-0000-4000-8000-000000000131',
+        null,
+        null,
+        'scheduler_job_failed',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'job_name', 'monthly_hash_chain_verify',
+            'started_at', '2026-04-08T12:00:01Z',
+            'failed_at', '2026-04-08T12:00:02Z',
+            'error_code', 'scheduler_job_timeout',
+            'retry_count', 0,
+            'source_event_at', '2026-04-08T12:00:02Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects scheduler_job_failed success result'
+);
+
 select * from finish();
 
 rollback;

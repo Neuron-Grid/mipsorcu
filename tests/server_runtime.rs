@@ -576,6 +576,7 @@ fn test_app_state(
         ledger_appender,
         incident_recorder,
         siem_forwarding,
+        scheduler_status: mipsorcu::scheduler::SchedulerStatusState::default(),
         audit_fallback_store,
         readiness_state,
         health_readiness_poll_interval: Duration::from_secs(30),
@@ -1569,6 +1570,41 @@ async fn health_endpoint_returns_minimal_liveness_and_does_not_call_supabase() {
     assert!(body.get("supabase_last_checked_at").is_none());
     assert!(body.get("supabase_reachable").is_none());
     assert!(body.get("master_key_loaded").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_status_endpoint_returns_non_secret_snapshot() {
+    let (supabase_url, receiver, server_thread) =
+        spawn_capture_server(Duration::from_millis(250)).expect("capture server should start");
+    let state = test_app_state(&supabase_url, temp_path("scheduler-status"))
+        .expect("test app state should be created");
+    let (app_url, app_task) = spawn_app(state).await.expect("test app should start");
+
+    let response = reqwest::get(format!("{app_url}/internal/scheduler/status"))
+        .await
+        .expect("scheduler status request should succeed");
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .expect("scheduler status response should be JSON");
+
+    app_task.abort();
+    assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err());
+    let join_result = server_thread
+        .join()
+        .expect("capture server thread should not panic");
+    join_result.expect("capture server should exit cleanly");
+
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["enabled"], false);
+    assert_eq!(body["engine"], "tokio_cron_scheduler");
+    assert_eq!(body["startup_delay_seconds"].as_u64(), Some(30));
+    assert_eq!(body["jobs"].as_array().map(|jobs| jobs.len()), Some(0));
+    assert!(body.get("master_key").is_none());
+    assert!(body.get("service_role_key").is_none());
+    assert!(body.get("jwt").is_none());
+    assert_eq!(body.as_object().map(|object| object.len()), Some(4));
 }
 
 #[tokio::test(flavor = "current_thread")]

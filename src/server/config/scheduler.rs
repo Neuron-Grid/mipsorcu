@@ -16,7 +16,7 @@ use super::parse::{parse_non_negative_u64_config, parse_positive_u64_config};
 
 pub fn parse_scheduler_enabled(value: Option<String>) -> Result<bool, ConfigError> {
     let Some(value) = value else {
-        return Ok(true);
+        return Ok(false);
     };
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" => Ok(true),
@@ -26,6 +26,13 @@ pub fn parse_scheduler_enabled(value: Option<String>) -> Result<bool, ConfigErro
             reason: "value must be true or false".to_owned(),
         }),
     }
+}
+
+pub fn scheduler_startup_delay_value(
+    seconds_value: Option<String>,
+    legacy_sec_value: Option<String>,
+) -> Option<String> {
+    seconds_value.or(legacy_sec_value)
 }
 
 pub fn parse_scheduler_startup_delay(value: Option<String>) -> Result<Duration, ConfigError> {

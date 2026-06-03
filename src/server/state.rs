@@ -6,6 +6,7 @@ use time::OffsetDateTime;
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::JwtVerifier;
 use crate::incident::{AnyNotificationSink, IncidentRecorder};
+use crate::scheduler::SchedulerStatusState;
 use crate::siem::AnySiemSink;
 use crate::{AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MasterKeyRing};
 
@@ -33,6 +34,7 @@ pub struct AppState {
     pub http_handler_timeout: Duration,
     pub http_rate_limit_requests: u64,
     pub http_rate_limit_window: Duration,
+    pub scheduler_status: SchedulerStatusState,
 }
 
 #[derive(Clone, Default)]

@@ -118,8 +118,9 @@ fn validate_metadata_values(
 ) -> Result<(), AuditEventError> {
     validate_numeric_metadata_values(result, object)?;
     validate_id_metadata_values(action, result, object)?;
-    validate_string_metadata_values(result, object)?;
+    validate_string_metadata_values(action, result, object)?;
     validate_timestamp_metadata_values(object)?;
+    validate_object_metadata_values(object)?;
     validate_integrity_violation_summary_values(action, object)?;
     Ok(())
 }
@@ -145,6 +146,12 @@ fn validate_numeric_metadata_values(
         if let Some(value) = object.get(key) {
             validate_u64_value(key, value)?;
         }
+    }
+
+    if let Some(value) = object.get("retry_count")
+        && value.as_u64() != Some(0)
+    {
+        return Err(AuditEventError::InvalidMetadataValue { key: "retry_count" });
     }
 
     for key in [
@@ -226,6 +233,7 @@ fn validate_id_metadata_values(
 
 /// 文字列・列挙・hex 系メタデータの形式と、result に依存する出現可否を検証する。
 fn validate_string_metadata_values(
+    action: AuditAction,
     result: AuditResult,
     object: &Map<String, Value>,
 ) -> Result<(), AuditEventError> {
@@ -337,7 +345,11 @@ fn validate_string_metadata_values(
     }
 
     if let Some(value) = object.get("reason") {
-        validate_exact_string("reason", value, "no_current_secret_versions")?;
+        if action == AuditAction::SchedulerJobSkipped {
+            validate_enum_metadata_value("reason", value, &["lock_not_acquired"])?;
+        } else {
+            validate_exact_string("reason", value, "no_current_secret_versions")?;
+        }
     }
 
     Ok(())
@@ -345,7 +357,16 @@ fn validate_string_metadata_values(
 
 /// 時刻・期間系メタデータ（タイムスタンプ / 年月）の形式を検証する。
 fn validate_timestamp_metadata_values(object: &Map<String, Value>) -> Result<(), AuditEventError> {
-    for key in ["created_at", "activated_at", "retired_at"] {
+    for key in [
+        "created_at",
+        "activated_at",
+        "retired_at",
+        "scheduled_at",
+        "started_at",
+        "completed_at",
+        "failed_at",
+        "skipped_at",
+    ] {
         if let Some(value) = object.get(key) {
             let text = value
                 .as_str()
@@ -376,6 +397,18 @@ fn validate_timestamp_metadata_values(object: &Map<String, Value>) -> Result<(),
             SourceEventAt::parse(text)
                 .map_err(|_| AuditEventError::InvalidMetadataValue { key })?;
         }
+    }
+
+    Ok(())
+}
+
+fn validate_object_metadata_values(object: &Map<String, Value>) -> Result<(), AuditEventError> {
+    if let Some(value) = object.get("result_summary")
+        && !value.is_object()
+    {
+        return Err(AuditEventError::InvalidMetadataValue {
+            key: "result_summary",
+        });
     }
 
     Ok(())
@@ -505,6 +538,7 @@ fn incident_type_allowed(value: &str) -> bool {
             | "ledger_secret_leak_suspected"
             | "siem_long_failure"
             | "audit_ui_forbidden_operation"
+            | "scheduler_failure"
     )
 }
 

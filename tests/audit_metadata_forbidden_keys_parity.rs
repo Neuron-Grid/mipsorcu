@@ -9,7 +9,7 @@ use mipsorcu::{
 const CURRENT_FORBIDDEN_KEY_MIGRATION_PATH: &str =
     "supabase/migrations/1250_security_forbidden_key_parity.sql";
 const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
-    "supabase/migrations/1360_record_monthly_digest_success_audit.sql";
+    "supabase/migrations/1380_scheduler_production_lock_and_actions.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -335,6 +335,95 @@ fn rust_allowlist_rejects_secret_alias_success_with_error_code() {
     );
 }
 
+#[test]
+fn rust_allowlist_accepts_scheduler_lifecycle_metadata() {
+    let started = AuditMetadata::new(serde_json::json!({
+        "job_name": "monthly_hash_chain_verify",
+        "scheduled_at": "2026-04-08T12:00:00Z",
+        "started_at": "2026-04-08T12:00:01Z",
+        "source_event_at": "2026-04-08T12:00:01Z"
+    }))
+    .unwrap();
+    assert!(
+        started
+            .validate_allowlist_for_action(AuditAction::SchedulerJobStarted, AuditResult::Success)
+            .is_ok()
+    );
+
+    let completed = AuditMetadata::new(serde_json::json!({
+        "job_name": "monthly_hash_chain_verify",
+        "started_at": "2026-04-08T12:00:01Z",
+        "completed_at": "2026-04-08T12:00:02Z",
+        "duration_ms": 1000,
+        "result_summary": { "valid": true },
+        "source_event_at": "2026-04-08T12:00:02Z"
+    }))
+    .unwrap();
+    assert!(
+        completed
+            .validate_allowlist_for_action(AuditAction::SchedulerJobCompleted, AuditResult::Success)
+            .is_ok()
+    );
+
+    let failed = AuditMetadata::new(serde_json::json!({
+        "job_name": "monthly_hash_chain_verify",
+        "started_at": "2026-04-08T12:00:01Z",
+        "failed_at": "2026-04-08T12:00:02Z",
+        "error_code": "scheduler_job_timeout",
+        "retry_count": 0,
+        "source_event_at": "2026-04-08T12:00:02Z"
+    }))
+    .unwrap();
+    assert!(
+        failed
+            .validate_allowlist_for_action(AuditAction::SchedulerJobFailed, AuditResult::Failure)
+            .is_ok()
+    );
+
+    let skipped = AuditMetadata::new(serde_json::json!({
+        "job_name": "monthly_hash_chain_verify",
+        "skipped_at": "2026-04-08T12:00:01Z",
+        "reason": "lock_not_acquired",
+        "source_event_at": "2026-04-08T12:00:01Z"
+    }))
+    .unwrap();
+    assert!(
+        skipped
+            .validate_allowlist_for_action(AuditAction::SchedulerJobSkipped, AuditResult::Success)
+            .is_ok()
+    );
+}
+
+#[test]
+fn rust_allowlist_rejects_scheduler_lifecycle_invalid_values() {
+    let retry = AuditMetadata::new(serde_json::json!({
+        "job_name": "monthly_hash_chain_verify",
+        "started_at": "2026-04-08T12:00:01Z",
+        "failed_at": "2026-04-08T12:00:02Z",
+        "error_code": "scheduler_job_failed",
+        "retry_count": 1,
+        "source_event_at": "2026-04-08T12:00:02Z"
+    }))
+    .unwrap();
+    assert!(matches!(
+        retry.validate_allowlist_for_action(AuditAction::SchedulerJobFailed, AuditResult::Failure),
+        Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "retry_count" })
+    ));
+
+    let reason = AuditMetadata::new(serde_json::json!({
+        "job_name": "monthly_hash_chain_verify",
+        "skipped_at": "2026-04-08T12:00:01Z",
+        "reason": "maintenance",
+        "source_event_at": "2026-04-08T12:00:01Z"
+    }))
+    .unwrap();
+    assert!(matches!(
+        reason
+            .validate_allowlist_for_action(AuditAction::SchedulerJobSkipped, AuditResult::Success),
+        Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "reason" })
+    ));
+}
+
 // ─── Parity: Rust ↔ SQL same case, same accept/reject ───
 
 #[test]
@@ -649,6 +738,10 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::AuditReportGenerate,
         AuditAction::AuditUiRead,
         AuditAction::SchedulerJob,
+        AuditAction::SchedulerJobStarted,
+        AuditAction::SchedulerJobCompleted,
+        AuditAction::SchedulerJobFailed,
+        AuditAction::SchedulerJobSkipped,
         AuditAction::IncidentDetected,
         AuditAction::SecretAliasCreate,
         AuditAction::SecretAliasUpdate,
@@ -825,6 +918,32 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "target_year_month",
                 "trigger",
             ]
+        }
+        AuditAction::SchedulerJobStarted => {
+            vec!["job_name", "scheduled_at", "source_event_at", "started_at"]
+        }
+        AuditAction::SchedulerJobCompleted => {
+            vec![
+                "completed_at",
+                "duration_ms",
+                "job_name",
+                "result_summary",
+                "source_event_at",
+                "started_at",
+            ]
+        }
+        AuditAction::SchedulerJobFailed => {
+            vec![
+                "error_code",
+                "failed_at",
+                "job_name",
+                "retry_count",
+                "source_event_at",
+                "started_at",
+            ]
+        }
+        AuditAction::SchedulerJobSkipped => {
+            vec!["job_name", "reason", "skipped_at", "source_event_at"]
         }
         AuditAction::IncidentDetected => {
             vec![

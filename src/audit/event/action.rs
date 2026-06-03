@@ -38,6 +38,14 @@ pub enum AuditAction {
     AuditUiRead,
     /// 定期実行スケジューラ job の実行結果（成功・失敗両方の監査記録用）。
     SchedulerJob,
+    /// 定期実行スケジューラ job が開始された。
+    SchedulerJobStarted,
+    /// 定期実行スケジューラ job が正常完了した。
+    SchedulerJobCompleted,
+    /// 定期実行スケジューラ job が失敗した。
+    SchedulerJobFailed,
+    /// 定期実行スケジューラ job が lock 取得不可などで skip された。
+    SchedulerJobSkipped,
     /// インシデント検知（failure-only の監査）。
     IncidentDetected,
     /// 暗号化済み secret alias の作成。
@@ -76,6 +84,10 @@ impl AuditAction {
             "audit_report_generate" => Ok(Self::AuditReportGenerate),
             "audit_ui_read" => Ok(Self::AuditUiRead),
             "scheduler_job" => Ok(Self::SchedulerJob),
+            "scheduler_job_started" => Ok(Self::SchedulerJobStarted),
+            "scheduler_job_completed" => Ok(Self::SchedulerJobCompleted),
+            "scheduler_job_failed" => Ok(Self::SchedulerJobFailed),
+            "scheduler_job_skipped" => Ok(Self::SchedulerJobSkipped),
             "incident_detected" => Ok(Self::IncidentDetected),
             "secret_alias_create" => Ok(Self::SecretAliasCreate),
             "secret_alias_update" => Ok(Self::SecretAliasUpdate),
@@ -112,6 +124,10 @@ impl AuditAction {
             Self::AuditReportGenerate => "audit_report_generate",
             Self::AuditUiRead => "audit_ui_read",
             Self::SchedulerJob => "scheduler_job",
+            Self::SchedulerJobStarted => "scheduler_job_started",
+            Self::SchedulerJobCompleted => "scheduler_job_completed",
+            Self::SchedulerJobFailed => "scheduler_job_failed",
+            Self::SchedulerJobSkipped => "scheduler_job_skipped",
             Self::IncidentDetected => "incident_detected",
             Self::SecretAliasCreate => "secret_alias_create",
             Self::SecretAliasUpdate => "secret_alias_update",
@@ -134,6 +150,7 @@ impl AuditAction {
                 | Self::SiemForwardFailure
                 | Self::IncidentDetected
                 | Self::KeyRotationEnvelopeFailed
+                | Self::SchedulerJobFailed
         )
     }
 }

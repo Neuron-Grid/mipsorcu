@@ -32,6 +32,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/v1/aliases/resolve", post(handlers::resolve_secret_alias))
         .route("/health", get(handlers::health_check))
         .route("/ready", get(handlers::ready_check))
+        .route(
+            "/internal/scheduler/status",
+            get(handlers::scheduler_status),
+        )
         .fallback(handlers::not_found);
 
     apply_standard_layers(router, state)

@@ -19,6 +19,7 @@ pub enum IncidentType {
     LedgerSecretLeakSuspected,
     SiemLongFailure,
     AuditUiForbiddenOperation,
+    SchedulerFailure,
 }
 
 impl IncidentType {
@@ -35,6 +36,7 @@ impl IncidentType {
             Self::LedgerSecretLeakSuspected => "ledger_secret_leak_suspected",
             Self::SiemLongFailure => "siem_long_failure",
             Self::AuditUiForbiddenOperation => "audit_ui_forbidden_operation",
+            Self::SchedulerFailure => "scheduler_failure",
         }
     }
 }

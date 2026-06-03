@@ -12,5 +12,6 @@ pub use alias::{
 };
 pub use create::create_secret;
 pub use decrypt::decrypt_secret;
+pub use health::scheduler_status;
 pub use health::{health_check, not_found, ready_check};
 pub use rotate::rotate_secret;

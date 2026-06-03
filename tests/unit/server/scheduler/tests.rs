@@ -52,6 +52,41 @@ fn scheduled_job_name_includes_new_v02_jobs() {
 }
 
 #[test]
+fn scheduled_job_specs_use_task_12_cron_and_timeouts() {
+    let specs = SCHEDULED_JOB_SPECS
+        .iter()
+        .map(|spec| (spec.name.as_str(), spec.cron, spec.timeout.as_secs()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        specs,
+        vec![
+            ("monthly_hash_chain_verify", "0 0 2 1 * *", 30 * 60),
+            ("monthly_signature_verify", "0 30 2 1 * *", 30 * 60),
+            ("monthly_digest_generate", "0 0 3 1 * *", 30 * 60),
+            ("monthly_archive_upload", "0 30 3 1 * *", 30 * 60),
+            ("monthly_timestamping_obtain", "0 0 4 1 * *", 30 * 60),
+            ("daily_envelope_lazy_migration", "0 0 4 * * *", 2 * 60 * 60),
+            (
+                "quarterly_restore_drill_reminder",
+                "0 0 5 1 1,4,7,10 *",
+                30 * 60
+            ),
+            (
+                "quarterly_signing_key_review_reminder",
+                "0 10 5 1 1,4,7,10 *",
+                5 * 60
+            ),
+            (
+                "quarterly_auditor_privilege_review_reminder",
+                "0 20 5 1 1,4,7,10 *",
+                5 * 60
+            ),
+        ]
+    );
+}
+
+#[test]
 fn scheduler_runtime_state_assigns_distinct_locks_for_new_jobs() {
     let runtime_state = SchedulerRuntimeState::new();
     let timestamping_lock_ptr = std::ptr::from_ref::<JobLock>(
@@ -60,8 +95,9 @@ fn scheduler_runtime_state_assigns_distinct_locks_for_new_jobs() {
     let envelope_lock_ptr = std::ptr::from_ref::<JobLock>(
         runtime_state.lock_for(ScheduledJobName::DailyEnvelopeLazyMigration),
     );
-    let archive_lock_ptr =
-        std::ptr::from_ref::<JobLock>(runtime_state.lock_for(ScheduledJobName::ArchiveExport));
+    let archive_lock_ptr = std::ptr::from_ref::<JobLock>(
+        runtime_state.lock_for(ScheduledJobName::MonthlyArchiveUpload),
+    );
     assert_ne!(timestamping_lock_ptr, envelope_lock_ptr);
     assert_ne!(timestamping_lock_ptr, archive_lock_ptr);
     assert_ne!(envelope_lock_ptr, archive_lock_ptr);
@@ -146,7 +182,7 @@ async fn run_once_per_period_does_not_complete_failed_job() {
 async fn run_once_per_period_returns_none_for_completed_job() {
     let mut runtime_state = SchedulerRuntimeState::new();
     let key = JobRunKey {
-        job_name: ScheduledJobName::ArchiveExport,
+        job_name: ScheduledJobName::MonthlyArchiveUpload,
         period_key: "2026-05".to_owned(),
     };
 

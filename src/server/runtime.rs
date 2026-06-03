@@ -289,18 +289,7 @@ async fn build_app_state(
         siem_resend_interval: config.siem_resend_interval,
         siem_long_failure_threshold: config.siem_long_failure_threshold,
         scheduler_enabled: config.scheduler_enabled,
-        scheduler: scheduler::SchedulerConfig {
-            startup_delay: config.scheduler_startup_delay,
-            poll_interval: config.scheduler_poll_interval,
-            monthly_day: config.scheduler_monthly_day,
-            monthly_hour_utc: config.scheduler_monthly_hour_utc,
-            quarterly_hour_utc: config.scheduler_quarterly_hour_utc,
-            daily_hour_utc: config.scheduler_daily_hour_utc,
-            envelope_migration_batch_size: config.scheduler_envelope_migration_batch_size,
-            envelope_migration_max_batches: config.scheduler_envelope_migration_max_batches,
-            restore_test_sample_limit: config.restore_test_sample_limit,
-            local_archive_dir: config.scheduler_local_archive_dir.clone(),
-        },
+        scheduler: build_scheduler_runtime_config(&config),
     };
 
     let state = AppState {
@@ -322,9 +311,47 @@ async fn build_app_state(
         http_handler_timeout: config.http_handler_timeout,
         http_rate_limit_requests: config.http_rate_limit_requests,
         http_rate_limit_window: config.http_rate_limit_window,
+        scheduler_status: crate::scheduler::SchedulerStatusState::new(
+            config.scheduler_enabled,
+            config.scheduler_startup_delay,
+        ),
     };
 
     (state, deps)
+}
+
+fn build_scheduler_runtime_config(config: &config::AppConfig) -> scheduler::SchedulerConfig {
+    let (archive_backend, timestamping_provider) = if config.scheduler_enabled {
+        let archive_backend = archive::build_backend(config).unwrap_or_else(|error| {
+            tracing::error!(error = %error, "scheduler archive backend initialization failed");
+            std::process::exit(1);
+        });
+        let timestamping_provider = timestamping::build_provider(config).unwrap_or_else(|error| {
+            tracing::error!(error = %error, "scheduler timestamping provider initialization failed");
+            std::process::exit(1);
+        });
+        (
+            Some(Arc::new(archive_backend)),
+            Some(Arc::new(timestamping_provider)),
+        )
+    } else {
+        (None, None)
+    };
+
+    scheduler::SchedulerConfig {
+        startup_delay: config.scheduler_startup_delay,
+        poll_interval: config.scheduler_poll_interval,
+        monthly_day: config.scheduler_monthly_day,
+        monthly_hour_utc: config.scheduler_monthly_hour_utc,
+        quarterly_hour_utc: config.scheduler_quarterly_hour_utc,
+        daily_hour_utc: config.scheduler_daily_hour_utc,
+        envelope_migration_batch_size: config.scheduler_envelope_migration_batch_size,
+        envelope_migration_max_batches: config.scheduler_envelope_migration_max_batches,
+        restore_test_sample_limit: config.restore_test_sample_limit,
+        local_archive_dir: config.scheduler_local_archive_dir.clone(),
+        archive_backend,
+        timestamping_provider,
+    }
 }
 
 /// JWKS を取得してキャッシュし、JWT verifier を構築する。

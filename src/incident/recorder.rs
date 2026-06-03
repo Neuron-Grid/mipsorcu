@@ -600,7 +600,8 @@ pub fn severity_for_incident(incident_type: IncidentType) -> IncidentSeverity {
         | IncidentType::MonthlyDigestMismatch
         | IncidentType::DigestTimestampingMismatch
         | IncidentType::ArchiveExportMismatch
-        | IncidentType::SequenceGap => IncidentSeverity::High,
+        | IncidentType::SequenceGap
+        | IncidentType::SchedulerFailure => IncidentSeverity::High,
         IncidentType::NonAuditorLedgerRead
         | IncidentType::SiemLongFailure
         | IncidentType::AuditUiForbiddenOperation => IncidentSeverity::Medium,

@@ -411,7 +411,9 @@ fn map_request_error(error: RequestTimestampingError) -> TimestampingCliError {
 /// 値は必須（誤って production digest を dummy provider へ送らないため）。
 /// rfc3161 の場合 `MIPSORCU_TSA_URL`（`,` 区切り）を必須とし、credential は
 /// `SecretString` に閉じる。
-fn build_provider(config: &AppConfig) -> Result<AnyTimestampingProvider, TimestampingCliError> {
+pub(crate) fn build_provider(
+    config: &AppConfig,
+) -> Result<AnyTimestampingProvider, TimestampingCliError> {
     let provider_kind = std::env::var(ENV_PROVIDER)
         .ok()
         .map(|value| value.trim().to_owned())

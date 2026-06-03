@@ -25,7 +25,7 @@ use super::constants::{
     ENV_SCHEDULER_ENVELOPE_MIGRATION_BATCH_SIZE, ENV_SCHEDULER_ENVELOPE_MIGRATION_MAX_BATCHES,
     ENV_SCHEDULER_LOCAL_ARCHIVE_DIR, ENV_SCHEDULER_MONTHLY_DAY, ENV_SCHEDULER_MONTHLY_HOUR_UTC,
     ENV_SCHEDULER_POLL_INTERVAL_SECONDS, ENV_SCHEDULER_QUARTERLY_HOUR_UTC,
-    ENV_SCHEDULER_STARTUP_DELAY_SECONDS, ENV_SIEM_BUFFER_PATH,
+    ENV_SCHEDULER_STARTUP_DELAY_SEC, ENV_SCHEDULER_STARTUP_DELAY_SECONDS, ENV_SIEM_BUFFER_PATH,
     ENV_SIEM_LONG_FAILURE_THRESHOLD_SECONDS, ENV_SIEM_RESEND_INTERVAL_SECONDS,
     ENV_SUPABASE_PUBLISHABLE_KEY, ENV_SUPABASE_SERVICE_ROLE_KEY, ENV_SUPABASE_URL,
 };
@@ -48,6 +48,7 @@ use super::scheduler::{
     parse_scheduler_envelope_migration_batch_size, parse_scheduler_envelope_migration_max_batches,
     parse_scheduler_monthly_day, parse_scheduler_monthly_hour_utc, parse_scheduler_poll_interval,
     parse_scheduler_quarterly_hour_utc, parse_scheduler_startup_delay,
+    scheduler_startup_delay_value,
 };
 use super::siem::SiemExporterConfig;
 use super::siem::{
@@ -421,10 +422,9 @@ where
 {
     let enabled =
         parse_scheduler_enabled(optional_var(ENV_SCHEDULER_ENABLED, dotenv, get_process_var))?;
-    let startup_delay = parse_scheduler_startup_delay(optional_var(
-        ENV_SCHEDULER_STARTUP_DELAY_SECONDS,
-        dotenv,
-        get_process_var,
+    let startup_delay = parse_scheduler_startup_delay(scheduler_startup_delay_value(
+        optional_var(ENV_SCHEDULER_STARTUP_DELAY_SECONDS, dotenv, get_process_var),
+        optional_var(ENV_SCHEDULER_STARTUP_DELAY_SEC, dotenv, get_process_var),
     ))?;
     let poll_interval = parse_scheduler_poll_interval(optional_var(
         ENV_SCHEDULER_POLL_INTERVAL_SECONDS,

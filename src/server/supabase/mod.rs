@@ -14,6 +14,7 @@ mod ledger_rpc;
 mod readiness;
 mod response;
 mod restore_rpc;
+mod scheduler_rpc;
 mod secret_rpc;
 mod verify_digest_rpc;
 mod write_secret_rpc;
