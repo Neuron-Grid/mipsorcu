@@ -25,6 +25,29 @@ pub struct SiemForwardingService<S: SiemSink> {
     readiness_state: ReadinessState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureAuditRecordEffect {
+    PrimarySucceeded,
+    FallbackSucceeded,
+    BothFailed,
+    UnexpectedError,
+}
+
+impl FailureAuditRecordEffect {
+    fn audit_record_outcome(self) -> &'static str {
+        match self {
+            Self::PrimarySucceeded => "primary_succeeded",
+            Self::FallbackSucceeded => "fallback_succeeded",
+            Self::BothFailed => "both_failed",
+            Self::UnexpectedError => "unexpected_error",
+        }
+    }
+
+    fn marks_readiness_failure(self) -> bool {
+        matches!(self, Self::BothFailed)
+    }
+}
+
 impl<S: SiemSink> SiemForwardingService<S> {
     pub fn new(
         forwarder: SiemForwarder<S>,
@@ -73,13 +96,9 @@ impl<S: SiemSink> SiemForwardingService<S> {
         source_event_type: &str,
     ) -> SiemForwardOutcome {
         let outcome = self.forwarder.forward(event).await;
-        match &outcome {
-            SiemForwardOutcome::SentDirect => {}
-            SiemForwardOutcome::Buffered { sink_error_code }
-            | SiemForwardOutcome::BufferingFailed { sink_error_code } => {
-                self.record_forward_failure(&request_id, source_event_type, sink_error_code)
-                    .await;
-            }
+        if let Some(sink_error_code) = forward_failure_sink_error_code(&outcome) {
+            self.record_forward_failure(&request_id, source_event_type, sink_error_code)
+                .await;
         }
         outcome
     }
@@ -111,50 +130,174 @@ impl<S: SiemSink> SiemForwardingService<S> {
             }
         };
 
-        match self.audit_recorder.record(&event).await {
-            Ok(AuditRecordOutcome::PrimarySucceeded) => {
-                tracing::warn!(
-                    request_id = %request_id.as_canonical_string(),
-                    action = "siem_forward_failure",
-                    result = "failure",
-                    error_code = sink_error_code,
-                    audit_record_outcome = "primary_succeeded",
-                    "SIEM forward failure audit recorded"
-                );
-            }
-            Ok(AuditRecordOutcome::FallbackSucceeded) => {
-                tracing::warn!(
-                    request_id = %request_id.as_canonical_string(),
-                    action = "siem_forward_failure",
-                    result = "failure",
-                    error_code = sink_error_code,
-                    audit_record_outcome = "fallback_succeeded",
-                    "SIEM forward failure audit recorded to local fallback"
-                );
-            }
-            Err(error @ AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
-                self.readiness_state.mark_failure_audit_both_failed();
+        let record_result = self.audit_recorder.record(&event).await;
+        let effect = failure_audit_record_effect(&record_result);
+        if effect.marks_readiness_failure() {
+            self.readiness_state.mark_failure_audit_both_failed();
+        }
+        log_failure_audit_record_result(request_id, sink_error_code, &record_result, effect);
+    }
+}
+
+fn forward_failure_sink_error_code(outcome: &SiemForwardOutcome) -> Option<&str> {
+    match outcome {
+        SiemForwardOutcome::SentDirect => None,
+        SiemForwardOutcome::Buffered { sink_error_code }
+        | SiemForwardOutcome::BufferingFailed { sink_error_code } => Some(sink_error_code.as_str()),
+    }
+}
+
+fn failure_audit_record_effect(
+    result: &Result<AuditRecordOutcome, AuditRecordError>,
+) -> FailureAuditRecordEffect {
+    match result {
+        Ok(AuditRecordOutcome::PrimarySucceeded) => FailureAuditRecordEffect::PrimarySucceeded,
+        Ok(AuditRecordOutcome::FallbackSucceeded) => FailureAuditRecordEffect::FallbackSucceeded,
+        Err(AuditRecordError::PrimaryAndFallbackFailed { .. }) => {
+            FailureAuditRecordEffect::BothFailed
+        }
+        Err(_) => FailureAuditRecordEffect::UnexpectedError,
+    }
+}
+
+fn log_failure_audit_record_result(
+    request_id: &RequestId,
+    sink_error_code: &str,
+    record_result: &Result<AuditRecordOutcome, AuditRecordError>,
+    effect: FailureAuditRecordEffect,
+) {
+    match effect {
+        FailureAuditRecordEffect::PrimarySucceeded => {
+            tracing::warn!(
+                request_id = %request_id.as_canonical_string(),
+                action = "siem_forward_failure",
+                result = "failure",
+                error_code = sink_error_code,
+                audit_record_outcome = effect.audit_record_outcome(),
+                "SIEM forward failure audit recorded"
+            );
+        }
+        FailureAuditRecordEffect::FallbackSucceeded => {
+            tracing::warn!(
+                request_id = %request_id.as_canonical_string(),
+                action = "siem_forward_failure",
+                result = "failure",
+                error_code = sink_error_code,
+                audit_record_outcome = effect.audit_record_outcome(),
+                "SIEM forward failure audit recorded to local fallback"
+            );
+        }
+        FailureAuditRecordEffect::BothFailed | FailureAuditRecordEffect::UnexpectedError => {
+            if let Err(error) = record_result {
+                let message = match effect {
+                    FailureAuditRecordEffect::BothFailed => {
+                        "SIEM forward failure audit recording failed"
+                    }
+                    FailureAuditRecordEffect::UnexpectedError => {
+                        "SIEM forward failure audit recording failed"
+                    }
+                    FailureAuditRecordEffect::PrimarySucceeded
+                    | FailureAuditRecordEffect::FallbackSucceeded => {
+                        "SIEM forward failure audit recorded"
+                    }
+                };
                 tracing::error!(
                     request_id = %request_id.as_canonical_string(),
                     error = %error,
                     action = "siem_forward_failure",
                     result = "failure",
                     error_code = sink_error_code,
-                    audit_record_outcome = "both_failed",
-                    "SIEM forward failure audit recording failed"
+                    audit_record_outcome = effect.audit_record_outcome(),
+                    "{}", message
                 );
-            }
-            Err(error) => {
+            } else {
                 tracing::error!(
                     request_id = %request_id.as_canonical_string(),
-                    error = %error,
                     action = "siem_forward_failure",
                     result = "failure",
                     error_code = sink_error_code,
-                    audit_record_outcome = "unexpected_error",
-                    "SIEM forward failure audit recording failed"
+                    audit_record_outcome = effect.audit_record_outcome(),
+                    classification_error_code = "audit_record_classification_mismatch",
+                    "SIEM forward failure audit classification mismatch"
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::{AuditAppendError, LocalAuditStoreError};
+
+    fn primary_and_fallback_failed_result() -> Result<AuditRecordOutcome, AuditRecordError> {
+        Err(AuditRecordError::PrimaryAndFallbackFailed {
+            append_error: AuditAppendError::ExternalDependencyFailed { code: "test" },
+            store_error: LocalAuditStoreError::LockPoisoned,
+        })
+    }
+
+    #[test]
+    fn forward_failure_sink_error_code_is_none_for_direct_success() {
+        assert_eq!(
+            forward_failure_sink_error_code(&SiemForwardOutcome::SentDirect),
+            None
+        );
+    }
+
+    #[test]
+    fn forward_failure_sink_error_code_extracts_buffered_error() {
+        let outcome = SiemForwardOutcome::Buffered {
+            sink_error_code: "sink_failed".to_owned(),
+        };
+
+        assert_eq!(
+            forward_failure_sink_error_code(&outcome),
+            Some("sink_failed")
+        );
+    }
+
+    #[test]
+    fn forward_failure_sink_error_code_extracts_buffering_failed_error() {
+        let outcome = SiemForwardOutcome::BufferingFailed {
+            sink_error_code: "buffer_failed".to_owned(),
+        };
+
+        assert_eq!(
+            forward_failure_sink_error_code(&outcome),
+            Some("buffer_failed")
+        );
+    }
+
+    #[test]
+    fn failure_audit_record_effect_classifies_success_and_error_paths() {
+        assert_eq!(
+            failure_audit_record_effect(&Ok(AuditRecordOutcome::PrimarySucceeded)),
+            FailureAuditRecordEffect::PrimarySucceeded
+        );
+        assert_eq!(
+            failure_audit_record_effect(&Ok(AuditRecordOutcome::FallbackSucceeded)),
+            FailureAuditRecordEffect::FallbackSucceeded
+        );
+        assert_eq!(
+            failure_audit_record_effect(&primary_and_fallback_failed_result()),
+            FailureAuditRecordEffect::BothFailed
+        );
+        assert_eq!(
+            failure_audit_record_effect(&Err(AuditRecordError::IdempotencyConflict)),
+            FailureAuditRecordEffect::UnexpectedError
+        );
+    }
+
+    #[test]
+    fn only_primary_and_fallback_failure_marks_readiness_failure() {
+        assert!(
+            FailureAuditRecordEffect::BothFailed.marks_readiness_failure(),
+            "both_failed must mark readiness degraded"
+        );
+        assert!(
+            !FailureAuditRecordEffect::UnexpectedError.marks_readiness_failure(),
+            "unexpected audit errors are logged but do not mean fallback also failed"
+        );
     }
 }

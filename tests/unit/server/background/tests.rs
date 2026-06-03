@@ -21,7 +21,10 @@ use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{
     IntegrityCheckViolationSummary, SupabaseAuditAppender, SupabaseClient,
 };
-use crate::siem::{InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
+use crate::siem::{
+    InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder, SiemForwarderStatus,
+    SiemResendSummary,
+};
 use crate::types::{
     AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
 };
@@ -492,4 +495,44 @@ fn resend_audit_error_kind_reports_idempotency_conflict() {
         super::resend_audit_error_kind(&AuditRecordError::IdempotencyConflict),
         "idempotency_conflict"
     );
+}
+
+#[test]
+fn siem_resend_attempted_reports_only_non_empty_batches() {
+    assert!(!super::siem_resend_attempted(&SiemResendSummary {
+        attempted: 0,
+        sent: 0,
+        failed: 0,
+    }));
+    assert!(super::siem_resend_attempted(&SiemResendSummary {
+        attempted: 1,
+        sent: 0,
+        failed: 1,
+    }));
+}
+
+#[test]
+fn fresh_siem_status_does_not_record_long_failure_incident() {
+    assert!(!super::should_record_siem_long_failure(
+        &SiemForwarderStatus::new(),
+        time::OffsetDateTime::now_utc(),
+        Duration::from_secs(1),
+    ));
+}
+
+#[test]
+fn siem_long_failure_incident_input_uses_fixed_operational_vocabulary() {
+    let input = super::siem_long_failure_incident_input();
+
+    assert_eq!(
+        input.incident_type,
+        crate::incident::IncidentType::SiemLongFailure
+    );
+    assert_eq!(input.detection_source, "siem_resend_loop");
+    assert_eq!(input.dedupe_key, "siem-long-failure");
+    assert_eq!(input.error_code, "siem_long_outage");
+    assert_eq!(input.incident_source_event_id, None);
+    assert_eq!(input.target_sequence_no, None);
+    assert_eq!(input.target_year_month, None);
+    assert_eq!(input.dedupe_window_seconds, 3600);
 }

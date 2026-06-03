@@ -229,33 +229,31 @@ async fn run_verify_command(
 fn restore_signed_entries(
     rows: &[LedgerVerificationMaterialRow],
 ) -> Result<Vec<crate::ledger::SignedLedgerEntry>, AuditorCliError> {
-    let mut entries = Vec::with_capacity(rows.len());
-    for row in rows {
-        let entry = row
-            .try_restore_signed_ledger_entry()
-            .map_err(|error| AuditorCliError::ExportFailure(error.to_string()))?;
-        entries.push(entry);
-    }
-    Ok(entries)
+    rows.iter()
+        .map(|row| {
+            row.try_restore_signed_ledger_entry()
+                .map_err(|error| AuditorCliError::ExportFailure(error.to_string()))
+        })
+        .collect()
 }
 
 /// export 行から検証鍵を復元する（key_version で重複排除）。
 fn restore_dedup_verifying_keys(
     rows: &[LedgerVerificationMaterialRow],
 ) -> Result<Vec<LedgerVerifyingKey>, AuditorCliError> {
-    let mut verification_keys: Vec<LedgerVerifyingKey> = Vec::new();
-    for row in rows {
-        if let Some(key) = row
+    rows.iter().try_fold(Vec::new(), |mut keys, row| {
+        let maybe_key = row
             .try_restore_verifying_key()
-            .map_err(|error| AuditorCliError::ExportFailure(error.to_string()))?
-            && !verification_keys
+            .map_err(|error| AuditorCliError::ExportFailure(error.to_string()))?;
+        if let Some(key) = maybe_key
+            && keys
                 .iter()
-                .any(|existing| existing.key_version() == key.key_version())
+                .all(|existing: &LedgerVerifyingKey| existing.key_version() != key.key_version())
         {
-            verification_keys.push(key);
+            keys.push(key);
         }
-    }
-    Ok(verification_keys)
+        Ok(keys)
+    })
 }
 
 /// 復元済みエントリと検証鍵から検証を実行し、出力を組み立てる。

@@ -9,8 +9,8 @@ use crate::archive::{
 use crate::audit::{AuditTrigger, RequestId};
 use crate::incident::ledger_payload_contains_forbidden_key;
 use crate::ledger::{
-    DigestHash, LedgerChainHead, LedgerSequenceNo, MonthlyDigestPeriod, SignedLedgerEntry,
-    SignedMonthlyDigest, build_monthly_digest_canonical_form,
+    DigestHash, LedgerChainHead, LedgerHash, LedgerSequenceNo, MonthlyDigestPeriod,
+    SignedLedgerEntry, SignedMonthlyDigest, build_monthly_digest_canonical_form,
 };
 use crate::server::key_rotation::{
     KeyRotationCliError, envelope_migration::run_scheduled_envelope_migration,
@@ -59,97 +59,175 @@ pub(crate) async fn run_job_body(
 ) -> Result<JobExecutionSummary, &'static str> {
     let started = Instant::now();
     match spec.name {
-        ScheduledJobName::MonthlyHashChainVerify => {
-            let summary = verify_full_ledger_hash_chain(state.supabase_client.as_ref()).await?;
-            if summary.valid {
-                Ok(JobExecutionSummary::new(
-                    json!({ "checked_count": summary.checked_count, "valid": true }),
-                    None,
-                    started,
-                ))
-            } else {
-                Err(summary.error_code.unwrap_or("ledger_verification_failed"))
-            }
-        }
-        ScheduledJobName::MonthlySignatureVerify => {
-            let summary = verify_full_ledger_signatures(state.supabase_client.as_ref()).await?;
-            if summary.valid {
-                Ok(JobExecutionSummary::new(
-                    json!({ "checked_count": summary.checked_count, "valid": true }),
-                    None,
-                    started,
-                ))
-            } else {
-                Err(summary
-                    .error_code
-                    .unwrap_or("ledger_signature_verification_failed"))
-            }
-        }
+        ScheduledJobName::MonthlyHashChainVerify => run_hash_chain_verify_job(state, started).await,
+        ScheduledJobName::MonthlySignatureVerify => run_signature_verify_job(state, started).await,
         ScheduledJobName::MonthlyDigestGenerate => {
-            let period = previous_month_period(OffsetDateTime::now_utc())
-                .map_err(|_| "scheduler_previous_month_failed")?;
-            ensure_monthly_verification_preconditions(state).await?;
-            let digest = run_monthly_digest_generate_job(state, period.clone()).await?;
-            Ok(JobExecutionSummary::new(
-                json!({
-                    "digest_hash": digest.digest_hash.to_hex(),
-                    "target_year_month": period.as_str()
-                }),
-                Some(period),
-                started,
-            ))
+            run_monthly_digest_scheduler_job(state, started).await
         }
         ScheduledJobName::MonthlyArchiveUpload => {
-            let period = previous_month_period(OffsetDateTime::now_utc())
-                .map_err(|_| "scheduler_previous_month_failed")?;
-            let digest = fetch_signed_digest(state.supabase_client.as_ref(), &period)
-                .await
-                .map_err(|_| "scheduler_precondition_monthly_digest_missing")?;
-            run_archive_export_job(state, config, digest).await?;
-            Ok(JobExecutionSummary::new(
-                json!({ "target_year_month": period.as_str() }),
-                Some(period),
-                started,
-            ))
+            run_monthly_archive_scheduler_job(state, config, started).await
         }
         ScheduledJobName::MonthlyTimestampingObtain => {
-            let period = previous_month_period(OffsetDateTime::now_utc())
-                .map_err(|_| "scheduler_previous_month_failed")?;
-            let digest = fetch_signed_digest(state.supabase_client.as_ref(), &period)
-                .await
-                .map_err(|_| "scheduler_precondition_monthly_digest_missing")?;
-            let token = run_monthly_timestamping_obtain_job(state, config, digest).await?;
-            Ok(JobExecutionSummary::new(
-                json!({
-                    "target_year_month": period.as_str(),
-                    "timestamp_token_hash": TimestampingTokenHash::from_token(&token).to_hex()
-                }),
-                Some(period),
-                started,
-            ))
+            run_monthly_timestamping_scheduler_job(state, config, started).await
         }
         ScheduledJobName::DailyEnvelopeLazyMigration => {
-            run_daily_envelope_lazy_migration_job(state, config).await?;
-            Ok(JobExecutionSummary::new(
-                json!({
-                    "batch_size": config.envelope_migration_batch_size,
-                    "max_batches": config.envelope_migration_max_batches
-                }),
-                None,
-                started,
-            ))
+            run_daily_envelope_scheduler_job(state, config, started).await
         }
         ScheduledJobName::QuarterlyRestoreDrillReminder
         | ScheduledJobName::QuarterlySigningKeyReviewReminder
         | ScheduledJobName::QuarterlyAuditorPrivilegeReviewReminder => {
-            run_quarterly_job(state, config, spec.name).await?;
-            Ok(JobExecutionSummary::new(
-                json!({ "reminder": spec.name.as_str() }),
-                None,
-                started,
-            ))
+            run_quarterly_scheduler_job(state, config, spec.name, started).await
         }
     }
+}
+
+async fn run_hash_chain_verify_job(
+    state: &AppState,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    let summary = verify_full_ledger_hash_chain(state.supabase_client.as_ref()).await?;
+    ledger_verification_job_summary(summary, "ledger_verification_failed", started)
+}
+
+async fn run_signature_verify_job(
+    state: &AppState,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    let summary = verify_full_ledger_signatures(state.supabase_client.as_ref()).await?;
+    ledger_verification_job_summary(summary, "ledger_signature_verification_failed", started)
+}
+
+async fn run_monthly_digest_scheduler_job(
+    state: &AppState,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    let period = previous_month_period_from_now()?;
+    ensure_monthly_verification_preconditions(state).await?;
+    let digest = run_monthly_digest_generate_job(state, period.clone()).await?;
+    Ok(monthly_digest_summary(digest, period, started))
+}
+
+async fn run_monthly_archive_scheduler_job(
+    state: &AppState,
+    config: &SchedulerConfig,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    let period = previous_month_period_from_now()?;
+    let digest = fetch_required_signed_digest(state.supabase_client.as_ref(), &period).await?;
+    run_archive_export_job(state, config, digest).await?;
+    Ok(monthly_archive_summary(period, started))
+}
+
+async fn run_monthly_timestamping_scheduler_job(
+    state: &AppState,
+    config: &SchedulerConfig,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    let period = previous_month_period_from_now()?;
+    let digest = fetch_required_signed_digest(state.supabase_client.as_ref(), &period).await?;
+    let token = run_monthly_timestamping_obtain_job(state, config, digest).await?;
+    Ok(monthly_timestamping_summary(period, &token, started))
+}
+
+async fn run_daily_envelope_scheduler_job(
+    state: &AppState,
+    config: &SchedulerConfig,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    run_daily_envelope_lazy_migration_job(state, config).await?;
+    Ok(daily_envelope_summary(config, started))
+}
+
+async fn run_quarterly_scheduler_job(
+    state: &AppState,
+    config: &SchedulerConfig,
+    job_name: ScheduledJobName,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    run_quarterly_job(state, config, job_name).await?;
+    Ok(quarterly_reminder_summary(job_name, started))
+}
+
+fn ledger_verification_job_summary(
+    summary: LedgerVerificationSummary,
+    default_error_code: &'static str,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    if summary.valid {
+        Ok(JobExecutionSummary::new(
+            json!({ "checked_count": summary.checked_count, "valid": true }),
+            None,
+            started,
+        ))
+    } else {
+        Err(summary.error_code.unwrap_or(default_error_code))
+    }
+}
+
+fn monthly_digest_summary(
+    digest: SignedMonthlyDigest,
+    period: MonthlyDigestPeriod,
+    started: Instant,
+) -> JobExecutionSummary {
+    JobExecutionSummary::new(
+        json!({
+            "digest_hash": digest.digest_hash.to_hex(),
+            "target_year_month": period.as_str()
+        }),
+        Some(period),
+        started,
+    )
+}
+
+fn monthly_archive_summary(period: MonthlyDigestPeriod, started: Instant) -> JobExecutionSummary {
+    JobExecutionSummary::new(
+        json!({ "target_year_month": period.as_str() }),
+        Some(period),
+        started,
+    )
+}
+
+fn monthly_timestamping_summary(
+    period: MonthlyDigestPeriod,
+    token: &TimestampingToken,
+    started: Instant,
+) -> JobExecutionSummary {
+    JobExecutionSummary::new(
+        json!({
+            "target_year_month": period.as_str(),
+            "timestamp_token_hash": TimestampingTokenHash::from_token(token).to_hex()
+        }),
+        Some(period),
+        started,
+    )
+}
+
+fn daily_envelope_summary(config: &SchedulerConfig, started: Instant) -> JobExecutionSummary {
+    JobExecutionSummary::new(
+        json!({
+            "batch_size": config.envelope_migration_batch_size,
+            "max_batches": config.envelope_migration_max_batches
+        }),
+        None,
+        started,
+    )
+}
+
+fn quarterly_reminder_summary(job_name: ScheduledJobName, started: Instant) -> JobExecutionSummary {
+    JobExecutionSummary::new(json!({ "reminder": job_name.as_str() }), None, started)
+}
+
+fn previous_month_period_from_now() -> Result<MonthlyDigestPeriod, &'static str> {
+    previous_month_period(OffsetDateTime::now_utc()).map_err(|_| "scheduler_previous_month_failed")
+}
+
+async fn fetch_required_signed_digest(
+    client: &SupabaseClient,
+    period: &MonthlyDigestPeriod,
+) -> Result<SignedMonthlyDigest, &'static str> {
+    fetch_signed_digest(client, period)
+        .await
+        .map_err(|_| "scheduler_precondition_monthly_digest_missing")
 }
 
 async fn ensure_monthly_verification_preconditions(state: &AppState) -> Result<(), &'static str> {
@@ -383,6 +461,24 @@ pub(crate) struct LedgerVerificationSummary {
     pub(crate) error_code: Option<&'static str>,
 }
 
+impl LedgerVerificationSummary {
+    fn valid(checked_count: u64) -> Self {
+        Self {
+            valid: true,
+            checked_count,
+            error_code: None,
+        }
+    }
+
+    fn invalid(checked_count: u64, error_code: &'static str) -> Self {
+        Self {
+            valid: false,
+            checked_count,
+            error_code: Some(error_code),
+        }
+    }
+}
+
 pub(crate) async fn verify_full_ledger_hash_chain(
     client: &SupabaseClient,
 ) -> Result<LedgerVerificationSummary, &'static str> {
@@ -447,11 +543,12 @@ fn restore_entries_checking_forbidden_keys(
     let mut entries: Vec<SignedLedgerEntry> = Vec::with_capacity(rows.len());
     for row in rows {
         if ledger_payload_contains_forbidden_key(&row.payload) {
-            return Ok(RestoreResult::ForbiddenKey(LedgerVerificationSummary {
-                valid: false,
-                checked_count: entry_count(entries.len()),
-                error_code: Some("ledger_payload_forbidden_key"),
-            }));
+            return Ok(RestoreResult::ForbiddenKey(
+                LedgerVerificationSummary::invalid(
+                    entry_count(entries.len()),
+                    "ledger_payload_forbidden_key",
+                ),
+            ));
         }
 
         let entry = row
@@ -473,51 +570,48 @@ fn verify_chain_links(
         let expected_sequence_no = previous_sequence_no
             .checked_add(1)
             .ok_or("ledger_sequence_overflow")?;
-        let actual_sequence_no = entry.sequence_no().get();
 
-        if actual_sequence_no != expected_sequence_no {
-            return Ok(LedgerVerificationSummary {
-                valid: false,
-                checked_count: entry_count(entries.len()),
-                error_code: Some("ledger_sequence_gap"),
-            });
+        if let Some(error_code) = chain_link_error(entry, expected_sequence_no, previous_hash) {
+            return Ok(ledger_chain_failure_summary(entries, error_code));
         }
 
-        if entry.previous_entry_hash() != previous_hash {
-            return Ok(LedgerVerificationSummary {
-                valid: false,
-                checked_count: entry_count(entries.len()),
-                error_code: Some("ledger_previous_hash_mismatch"),
-            });
-        }
-
-        if entry.recompute_entry_hash() != entry.entry_hash() {
-            return Ok(LedgerVerificationSummary {
-                valid: false,
-                checked_count: entry_count(entries.len()),
-                error_code: Some("ledger_entry_hash_mismatch"),
-            });
-        }
-
-        previous_sequence_no = actual_sequence_no;
+        previous_sequence_no = entry.sequence_no().get();
         previous_hash = entry.entry_hash();
     }
 
     if previous_sequence_no != chain_head.last_sequence_no()
         || previous_hash != chain_head.last_entry_hash()
     {
-        return Ok(LedgerVerificationSummary {
-            valid: false,
-            checked_count: entry_count(entries.len()),
-            error_code: Some("ledger_chain_head_mismatch"),
-        });
+        return Ok(ledger_chain_failure_summary(
+            entries,
+            "ledger_chain_head_mismatch",
+        ));
     }
 
-    Ok(LedgerVerificationSummary {
-        valid: true,
-        checked_count: entry_count(entries.len()),
-        error_code: None,
-    })
+    Ok(LedgerVerificationSummary::valid(entry_count(entries.len())))
+}
+
+fn chain_link_error(
+    entry: &SignedLedgerEntry,
+    expected_sequence_no: u64,
+    previous_hash: LedgerHash,
+) -> Option<&'static str> {
+    if entry.sequence_no().get() != expected_sequence_no {
+        Some("ledger_sequence_gap")
+    } else if entry.previous_entry_hash() != previous_hash {
+        Some("ledger_previous_hash_mismatch")
+    } else if entry.recompute_entry_hash() != entry.entry_hash() {
+        Some("ledger_entry_hash_mismatch")
+    } else {
+        None
+    }
+}
+
+fn ledger_chain_failure_summary(
+    entries: &[SignedLedgerEntry],
+    error_code: &'static str,
+) -> LedgerVerificationSummary {
+    LedgerVerificationSummary::invalid(entry_count(entries.len()), error_code)
 }
 
 fn verify_signature_rows(
@@ -526,11 +620,10 @@ fn verify_signature_rows(
     let mut checked_count = 0;
     for row in &rows {
         if ledger_payload_contains_forbidden_key(&row.payload) {
-            return Ok(LedgerVerificationSummary {
-                valid: false,
+            return Ok(LedgerVerificationSummary::invalid(
                 checked_count,
-                error_code: Some("ledger_payload_forbidden_key"),
-            });
+                "ledger_payload_forbidden_key",
+            ));
         }
 
         let entry = row
@@ -540,29 +633,23 @@ fn verify_signature_rows(
             .try_restore_verifying_key()
             .map_err(|_| "ledger_key_restore_failed")?
         else {
-            return Ok(LedgerVerificationSummary {
-                valid: false,
-                checked_count: entry_count(rows.len()),
-                error_code: Some("ledger_signature_key_missing"),
-            });
+            return Ok(LedgerVerificationSummary::invalid(
+                entry_count(rows.len()),
+                "ledger_signature_key_missing",
+            ));
         };
 
         if entry.verify_signature(&key).is_err() {
-            return Ok(LedgerVerificationSummary {
-                valid: false,
-                checked_count: entry_count(rows.len()),
-                error_code: Some("ledger_signature_invalid"),
-            });
+            return Ok(LedgerVerificationSummary::invalid(
+                entry_count(rows.len()),
+                "ledger_signature_invalid",
+            ));
         }
 
         checked_count += 1;
     }
 
-    Ok(LedgerVerificationSummary {
-        valid: true,
-        checked_count,
-        error_code: None,
-    })
+    Ok(LedgerVerificationSummary::valid(checked_count))
 }
 
 fn entry_count(len: usize) -> u64 {

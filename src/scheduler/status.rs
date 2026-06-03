@@ -50,6 +50,14 @@ pub struct SchedulerJobStatus {
     pub failure_streak: u32,
 }
 
+#[derive(Clone, Copy)]
+enum SchedulerJobTransition<'a> {
+    Started(&'a SourceEventAt),
+    Completed(&'a SourceEventAt),
+    Failed(&'a SourceEventAt),
+    Skipped(&'a SourceEventAt),
+}
+
 impl SchedulerStatusState {
     pub fn new(enabled: bool, startup_delay: Duration) -> Self {
         let state = Self::default();
@@ -66,50 +74,30 @@ impl SchedulerStatusState {
 
     pub(crate) fn register_jobs(&self, specs: &[ScheduledJobSpec]) {
         self.with_write(|inner| {
-            for spec in specs {
+            specs.iter().for_each(|spec| {
                 inner
                     .jobs
                     .entry(spec.name.as_str())
                     .or_insert_with(|| SchedulerJobStatus::new(*spec));
-            }
+            });
         });
     }
 
     pub(crate) fn mark_started(&self, spec: ScheduledJobSpec, started_at: &SourceEventAt) {
-        self.update_job(spec, |job| {
-            job.running = true;
-            job.last_status = Some("started");
-            job.last_started_at = Some(started_at.as_str().to_owned());
-        });
+        self.apply_job_transition(spec, SchedulerJobTransition::Started(started_at));
     }
 
     pub(crate) fn mark_completed(&self, spec: ScheduledJobSpec, completed_at: &SourceEventAt) {
-        self.update_job(spec, |job| {
-            job.running = false;
-            job.last_status = Some("completed");
-            job.last_completed_at = Some(completed_at.as_str().to_owned());
-            job.failure_streak = 0;
-        });
+        self.apply_job_transition(spec, SchedulerJobTransition::Completed(completed_at));
     }
 
     pub(crate) fn mark_failed(&self, spec: ScheduledJobSpec, failed_at: &SourceEventAt) -> u32 {
-        let mut streak = 1;
-        self.update_job(spec, |job| {
-            job.running = false;
-            job.last_status = Some("failed");
-            job.last_failed_at = Some(failed_at.as_str().to_owned());
-            job.failure_streak = job.failure_streak.saturating_add(1);
-            streak = job.failure_streak;
-        });
-        streak
+        self.apply_job_transition(spec, SchedulerJobTransition::Failed(failed_at))
+            .failure_streak
     }
 
     pub(crate) fn mark_skipped(&self, spec: ScheduledJobSpec, skipped_at: &SourceEventAt) {
-        self.update_job(spec, |job| {
-            job.running = false;
-            job.last_status = Some("skipped");
-            job.last_skipped_at = Some(skipped_at.as_str().to_owned());
-        });
+        self.apply_job_transition(spec, SchedulerJobTransition::Skipped(skipped_at));
     }
 
     pub fn snapshot(&self) -> SchedulerStatusSnapshot {
@@ -125,14 +113,21 @@ impl SchedulerStatusState {
         })
     }
 
-    fn update_job(&self, spec: ScheduledJobSpec, update: impl FnOnce(&mut SchedulerJobStatus)) {
+    fn apply_job_transition(
+        &self,
+        spec: ScheduledJobSpec,
+        transition: SchedulerJobTransition<'_>,
+    ) -> SchedulerJobStatus {
         self.with_write(|inner| {
-            let job = inner
+            let current = inner
                 .jobs
                 .entry(spec.name.as_str())
-                .or_insert_with(|| SchedulerJobStatus::new(spec));
-            update(job);
-        });
+                .or_insert_with(|| SchedulerJobStatus::new(spec))
+                .clone();
+            let next = current.apply_transition(transition);
+            inner.jobs.insert(spec.name.as_str(), next.clone());
+            next
+        })
     }
 
     fn with_read<T>(&self, read: impl FnOnce(&SchedulerStatusInner) -> T) -> T {
@@ -142,7 +137,7 @@ impl SchedulerStatusState {
         }
     }
 
-    fn with_write(&self, write: impl FnOnce(&mut SchedulerStatusInner)) {
+    fn with_write<T>(&self, write: impl FnOnce(&mut SchedulerStatusInner) -> T) -> T {
         match self.inner.write() {
             Ok(mut guard) => write(&mut guard),
             Err(poisoned) => write(&mut poisoned.into_inner()),
@@ -165,4 +160,36 @@ impl SchedulerJobStatus {
             failure_streak: 0,
         }
     }
+
+    fn apply_transition(mut self, transition: SchedulerJobTransition<'_>) -> Self {
+        match transition {
+            SchedulerJobTransition::Started(started_at) => {
+                self.running = true;
+                self.last_status = Some("started");
+                self.last_started_at = Some(timestamp_string(started_at));
+            }
+            SchedulerJobTransition::Completed(completed_at) => {
+                self.running = false;
+                self.last_status = Some("completed");
+                self.last_completed_at = Some(timestamp_string(completed_at));
+                self.failure_streak = 0;
+            }
+            SchedulerJobTransition::Failed(failed_at) => {
+                self.running = false;
+                self.last_status = Some("failed");
+                self.last_failed_at = Some(timestamp_string(failed_at));
+                self.failure_streak = self.failure_streak.saturating_add(1);
+            }
+            SchedulerJobTransition::Skipped(skipped_at) => {
+                self.running = false;
+                self.last_status = Some("skipped");
+                self.last_skipped_at = Some(timestamp_string(skipped_at));
+            }
+        }
+        self
+    }
+}
+
+fn timestamp_string(timestamp: &SourceEventAt) -> String {
+    timestamp.as_str().to_owned()
 }

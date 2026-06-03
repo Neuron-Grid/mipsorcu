@@ -14,7 +14,7 @@ use crate::server::siem_forwarding::SiemForwardingService;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::server::{integrity_check, restore_test};
-use crate::siem::AnySiemSink;
+use crate::siem::{AnySiemSink, SiemForwarderStatus, SiemResendSummary};
 
 const AUDIT_ARCHIVE_SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -269,12 +269,12 @@ pub(crate) async fn run_siem_resend_loop(
 }
 
 async fn record_siem_resend_result(
-    summary: crate::siem::SiemResendSummary,
+    summary: SiemResendSummary,
     siem_forwarding: &SiemForwardingService<AnySiemSink>,
     incident_recorder: &IncidentRecorder<AnyNotificationSink>,
     long_failure_threshold: Duration,
 ) {
-    if summary.attempted > 0 {
+    if siem_resend_attempted(&summary) {
         tracing::info!(
             attempted = summary.attempted,
             sent = summary.sent,
@@ -284,22 +284,12 @@ async fn record_siem_resend_result(
     }
 
     let now = time::OffsetDateTime::now_utc();
-    if siem_forwarding
-        .status()
-        .is_long_failure(now, long_failure_threshold)
-    {
+    if should_record_siem_long_failure(&siem_forwarding.status(), now, long_failure_threshold) {
         tracing::warn!(
             threshold_seconds = long_failure_threshold.as_secs(),
             "SIEM forwarding has been failing longer than threshold"
         );
-        let incident_type = IncidentType::SiemLongFailure;
-        let input = IncidentRecordInput::new(
-            incident_type,
-            crate::incident::severity_for_incident(incident_type),
-            "siem_resend_loop",
-            "siem-long-failure",
-            "siem_long_outage",
-        );
+        let input = siem_long_failure_incident_input();
         match incident_recorder.record(input).await {
             Ok(result) => {
                 tracing::info!(
@@ -316,6 +306,29 @@ async fn record_siem_resend_result(
             }
         }
     }
+}
+
+fn siem_resend_attempted(summary: &SiemResendSummary) -> bool {
+    summary.attempted > 0
+}
+
+fn should_record_siem_long_failure(
+    status: &SiemForwarderStatus,
+    now: time::OffsetDateTime,
+    threshold: Duration,
+) -> bool {
+    status.is_long_failure(now, threshold)
+}
+
+fn siem_long_failure_incident_input() -> IncidentRecordInput {
+    let incident_type = IncidentType::SiemLongFailure;
+    IncidentRecordInput::new(
+        incident_type,
+        crate::incident::severity_for_incident(incident_type),
+        "siem_resend_loop",
+        "siem-long-failure",
+        "siem_long_outage",
+    )
 }
 
 pub async fn run_audit_fallback_rollover_once(

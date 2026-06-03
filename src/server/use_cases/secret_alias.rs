@@ -315,10 +315,10 @@ pub(in crate::server) async fn list_aliases(
         }
     };
 
-    let mut aliases = Vec::with_capacity(rows.len());
-    for row in rows {
-        aliases.push(parse_list_alias_row(state, actor_user_id.clone(), row)?);
-    }
+    let aliases = rows
+        .into_iter()
+        .map(|row| parse_list_alias_row(state, actor_user_id.clone(), row))
+        .collect::<Result<Vec<_>, _>>()?;
 
     record_alias_list_success_audit(state, request_id, &actor_user_id, aliases.len()).await?;
 
