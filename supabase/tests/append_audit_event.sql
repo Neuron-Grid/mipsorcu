@@ -933,6 +933,133 @@ select is(
     'append audit RPC rejects scheduler_job_failed success result'
 );
 
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000132',
+        '00000000-0000-4000-8000-000000000132',
+        null,
+        null,
+        'siem_event_forwarded',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'exporter_kind', 'splunk_hec',
+            'batch_size', 100,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts siem_event_forwarded success metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000133',
+        '00000000-0000-4000-8000-000000000133',
+        null,
+        null,
+        'siem_event_forwarded',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'exporter_kind', 'splunk_hec',
+            'batch_size', 1,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects siem_event_forwarded failure result'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000134',
+        '00000000-0000-4000-8000-000000000134',
+        null,
+        null,
+        'siem_event_failed',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'exporter_kind', 'splunk_hec',
+            'error_code', 'siem_splunk_http_503',
+            'buffered', true,
+            'batch_size', 3,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts siem_event_failed failure metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000135',
+        '00000000-0000-4000-8000-000000000135',
+        null,
+        null,
+        'siem_event_failed',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'exporter_kind', 'splunk_hec',
+            'error_code', 'siem_splunk_http_503',
+            'buffered', true,
+            'batch_size', 3,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'append audit RPC rejects siem_event_failed success result'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000136',
+        '00000000-0000-4000-8000-000000000136',
+        null,
+        null,
+        'siem_buffer_flushed',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'flushed_count', 3,
+            'buffer_remaining_bytes', 1048576,
+            'source_event_at', '2026-04-08T12:00:00Z'
+        )
+    ),
+    'ok',
+    'append audit RPC accepts siem_buffer_flushed success metadata'
+);
+
+select ok(
+    position(
+        'audit_events_siem_event_failed_failure_only' in test_helpers.try_insert_audit_event(
+            '10000000-0000-4000-8000-000000000137',
+            '00000000-0000-4000-8000-000000000137',
+            null,
+            null,
+            'siem_event_failed',
+            null,
+            'success',
+            null,
+            jsonb_build_object(
+                'exporter_kind', 'splunk_hec',
+                'error_code', 'siem_splunk_http_503',
+                'buffered', true,
+                'batch_size', 3,
+                'source_event_at', '2026-04-08T12:00:00Z'
+            )
+        )
+    ) > 0,
+    'direct audit_events insert rejects siem_event_failed success via table constraint'
+);
+
 select * from finish();
 
 rollback;

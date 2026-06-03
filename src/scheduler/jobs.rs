@@ -26,6 +26,7 @@ use crate::server::use_cases::generate_monthly_digest::{
     record_monthly_digest_success_audit,
 };
 use crate::server::use_cases::request_timestamping_for_digest::request_timestamping_for_digest_with_incident;
+use crate::siem::SIEM_MAX_BATCH_SIZE;
 use crate::timestamping::{InMemoryTimestampingService, TimestampingToken, TimestampingTokenHash};
 use crate::types::SourceEventAt;
 
@@ -78,6 +79,7 @@ pub(crate) async fn run_job_body(
         | ScheduledJobName::QuarterlyAuditorPrivilegeReviewReminder => {
             run_quarterly_scheduler_job(state, config, spec.name, started).await
         }
+        ScheduledJobName::SiemBufferFlush => run_siem_buffer_flush_job(state, started).await,
     }
 }
 
@@ -148,6 +150,17 @@ async fn run_quarterly_scheduler_job(
     Ok(quarterly_reminder_summary(job_name, started))
 }
 
+async fn run_siem_buffer_flush_job(
+    state: &AppState,
+    started: Instant,
+) -> Result<JobExecutionSummary, &'static str> {
+    let summary = state
+        .siem_forwarding
+        .resend_pending_batch(SIEM_MAX_BATCH_SIZE)
+        .await;
+    Ok(siem_buffer_flush_summary(summary, started))
+}
+
 fn ledger_verification_job_summary(
     summary: LedgerVerificationSummary,
     default_error_code: &'static str,
@@ -215,6 +228,21 @@ fn daily_envelope_summary(config: &SchedulerConfig, started: Instant) -> JobExec
 
 fn quarterly_reminder_summary(job_name: ScheduledJobName, started: Instant) -> JobExecutionSummary {
     JobExecutionSummary::new(json!({ "reminder": job_name.as_str() }), None, started)
+}
+
+fn siem_buffer_flush_summary(
+    summary: crate::siem::SiemResendSummary,
+    started: Instant,
+) -> JobExecutionSummary {
+    JobExecutionSummary::new(
+        json!({
+            "attempted": summary.attempted,
+            "sent": summary.sent,
+            "failed": summary.failed
+        }),
+        None,
+        started,
+    )
 }
 
 fn previous_month_period_from_now() -> Result<MonthlyDigestPeriod, &'static str> {

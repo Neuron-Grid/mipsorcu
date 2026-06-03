@@ -138,6 +138,19 @@ pub(super) fn allowed_metadata_keys(
             "event_count",
             SOURCE_EVENT_AT_KEY,
         ],
+        AuditAction::SiemEventForwarded => &["exporter_kind", "batch_size", SOURCE_EVENT_AT_KEY],
+        AuditAction::SiemEventFailed => &[
+            "exporter_kind",
+            "error_code",
+            "buffered",
+            "batch_size",
+            SOURCE_EVENT_AT_KEY,
+        ],
+        AuditAction::SiemBufferFlushed => &[
+            "flushed_count",
+            "buffer_remaining_bytes",
+            SOURCE_EVENT_AT_KEY,
+        ],
         // 監査レポート生成（成功・失敗両方を記録）。
         AuditAction::AuditReportGenerate => &[
             "format",
@@ -313,6 +326,9 @@ pub(super) fn required_metadata_keys(
         AuditAction::DigestTimestamping => &["target_year_month"],
         // SIEM forward failure は error_code が常に必須（failure-only）。
         AuditAction::SiemForwardFailure => &["error_code"],
+        AuditAction::SiemEventForwarded => &["exporter_kind", "batch_size"],
+        AuditAction::SiemEventFailed => &["exporter_kind", "error_code", "buffered", "batch_size"],
+        AuditAction::SiemBufferFlushed => &["flushed_count", "buffer_remaining_bytes"],
         // audit_report_generate は対象期間と出力形式が常に必須。
         AuditAction::AuditReportGenerate => &["format", "period_end", "period_start"],
         AuditAction::AuditUiRead => &["endpoint", "method", "resource"],

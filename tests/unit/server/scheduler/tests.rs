@@ -49,6 +49,10 @@ fn scheduled_job_name_includes_new_v02_jobs() {
         ScheduledJobName::DailyEnvelopeLazyMigration.as_str(),
         "daily_envelope_lazy_migration"
     );
+    assert_eq!(
+        ScheduledJobName::SiemBufferFlush.as_str(),
+        "siem_buffer_flush"
+    );
 }
 
 #[test]
@@ -82,6 +86,7 @@ fn scheduled_job_specs_use_task_12_cron_and_timeouts() {
                 "0 20 5 1 1,4,7,10 *",
                 5 * 60
             ),
+            ("siem_buffer_flush", "0 */5 * * * *", 2 * 60),
         ]
     );
 }
@@ -98,9 +103,13 @@ fn scheduler_runtime_state_assigns_distinct_locks_for_new_jobs() {
     let archive_lock_ptr = std::ptr::from_ref::<JobLock>(
         runtime_state.lock_for(ScheduledJobName::MonthlyArchiveUpload),
     );
+    let siem_flush_lock_ptr =
+        std::ptr::from_ref::<JobLock>(runtime_state.lock_for(ScheduledJobName::SiemBufferFlush));
     assert_ne!(timestamping_lock_ptr, envelope_lock_ptr);
     assert_ne!(timestamping_lock_ptr, archive_lock_ptr);
     assert_ne!(envelope_lock_ptr, archive_lock_ptr);
+    assert_ne!(siem_flush_lock_ptr, archive_lock_ptr);
+    assert_ne!(siem_flush_lock_ptr, envelope_lock_ptr);
 }
 
 #[tokio::test]

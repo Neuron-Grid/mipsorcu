@@ -1840,6 +1840,132 @@ select is(
 );
 
 select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001228',
+        '00000000-0000-4000-8000-000000001228',
+        null,
+        null,
+        'siem_event_forwarded',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'exporter_kind', 'splunk_hec',
+            'batch_size', 100,
+            'source_event_at', '2026-06-01T02:00:00Z'
+        )
+    ),
+    'ok',
+    'siem_event_forwarded accepts required metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000001229',
+        '00000000-0000-4000-8000-000000001229',
+        null,
+        null,
+        'siem_event_forwarded',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'exporter_kind', 'webhook',
+            'batch_size', 1,
+            'source_event_at', '2026-06-01T02:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'siem_event_forwarded rejects unknown exporter_kind'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-00000000122a',
+        '00000000-0000-4000-8000-00000000122a',
+        null,
+        null,
+        'siem_event_failed',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'exporter_kind', 'splunk_hec',
+            'error_code', 'siem_splunk_http_503',
+            'buffered', 'true',
+            'batch_size', 1,
+            'source_event_at', '2026-06-01T02:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'siem_event_failed rejects non-boolean buffered'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-00000000122b',
+        '00000000-0000-4000-8000-00000000122b',
+        null,
+        null,
+        'siem_event_failed',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'exporter_kind', 'splunk_hec',
+            'error_code', 'siem_splunk_http_503',
+            'buffered', true,
+            'batch_size', 1,
+            'nonce_or_iv', 'leak',
+            'source_event_at', '2026-06-01T02:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'siem_event_failed rejects forbidden nonce_or_iv key'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-00000000122c',
+        '00000000-0000-4000-8000-00000000122c',
+        null,
+        null,
+        'siem_buffer_flushed',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'flushed_count', 3,
+            'buffer_remaining_bytes', 0,
+            'source_event_at', '2026-06-01T02:00:00Z'
+        )
+    ),
+    'ok',
+    'siem_buffer_flushed accepts required metadata'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-00000000122d',
+        '00000000-0000-4000-8000-00000000122d',
+        null,
+        null,
+        'siem_buffer_flushed',
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'flushed_count', 3,
+            'buffer_remaining_bytes', 0,
+            'unexpected', 'bad',
+            'source_event_at', '2026-06-01T02:00:00Z'
+        )
+    ),
+    'invalid_rpc_input',
+    'siem_buffer_flushed rejects unknown metadata key'
+);
+
+select is(
     has_function_privilege(
         'anon',
         'public.audit_metadata_has_invalid_value_for_action(text, text, jsonb)',

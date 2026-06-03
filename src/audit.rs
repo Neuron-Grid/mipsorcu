@@ -14,7 +14,8 @@ pub use event::{
     KeyRotationEnvelopeMigratedMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
     MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RequestId, RestoreTestMetadata,
     SchedulerJobMetadata, SecretAliasCreateMetadata, SecretAliasDeleteMetadata,
-    SecretAliasListMetadata, SecretAliasUpdateMetadata, SiemForwardFailureMetadata,
+    SecretAliasListMetadata, SecretAliasUpdateMetadata, SiemBufferFlushedMetadata,
+    SiemEventFailedMetadata, SiemEventForwardedMetadata, SiemForwardFailureMetadata,
     SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata,
     VersionPurgeMetadata,
 };

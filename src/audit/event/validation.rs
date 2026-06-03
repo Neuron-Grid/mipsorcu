@@ -18,6 +18,11 @@ pub(super) fn validate_event_parts(parts: &AuditEventParts) -> Result<(), AuditE
             action: parts.action,
         });
     }
+    if parts.result == AuditResult::Failure && parts.action.is_success_only() {
+        return Err(AuditEventError::SuccessOnlyActionFailureNotAllowed {
+            action: parts.action,
+        });
+    }
     if parts.action == AuditAction::AuthFailure {
         validate_auth_failure_parts(parts)?;
     }

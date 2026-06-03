@@ -11,7 +11,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use super::event::SiemEvent;
-use super::sink::{SiemSink, SiemSinkError};
+use super::sink::{ForwardReceipt, SiemExporterKind, SiemSink, SiemSinkError, validate_batch_size};
 
 /// メモリ上の SIEM sink（テスト専用）。
 ///
@@ -51,15 +51,20 @@ impl fmt::Debug for InMemorySiemSink {
 }
 
 impl SiemSink for InMemorySiemSink {
-    async fn send_event(&self, event: &SiemEvent) -> Result<(), SiemSinkError> {
+    fn exporter_kind(&self) -> SiemExporterKind {
+        SiemExporterKind::InMemory
+    }
+
+    async fn send_batch(&self, batch: &[SiemEvent]) -> Result<ForwardReceipt, SiemSinkError> {
+        validate_batch_size(batch.len())?;
         let mut guard = self
             .events
             .lock()
             .map_err(|_| SiemSinkError::BackendFailed {
                 code: "mutex_poisoned".to_owned(),
             })?;
-        guard.push(event.clone());
-        Ok(())
+        guard.extend(batch.iter().cloned());
+        Ok(ForwardReceipt::new(self.exporter_kind(), batch.len()))
     }
 }
 
@@ -76,7 +81,11 @@ impl FailingSiemSink {
 }
 
 impl SiemSink for FailingSiemSink {
-    async fn send_event(&self, _event: &SiemEvent) -> Result<(), SiemSinkError> {
+    fn exporter_kind(&self) -> SiemExporterKind {
+        SiemExporterKind::InMemory
+    }
+
+    async fn send_batch(&self, _batch: &[SiemEvent]) -> Result<ForwardReceipt, SiemSinkError> {
         Err(SiemSinkError::BackendFailed {
             code: self.code.clone(),
         })

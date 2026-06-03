@@ -15,7 +15,8 @@ pub use metadata::{
     KeyRotationEnvelopeMigratedMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
     MonthlyDigestGenerateMetadata, MonthlyDigestVerifyMetadata, RestoreTestMetadata,
     SchedulerJobMetadata, SecretAliasCreateMetadata, SecretAliasDeleteMetadata,
-    SecretAliasListMetadata, SecretAliasUpdateMetadata, SiemForwardFailureMetadata,
+    SecretAliasListMetadata, SecretAliasUpdateMetadata, SiemBufferFlushedMetadata,
+    SiemEventFailedMetadata, SiemEventForwardedMetadata, SiemForwardFailureMetadata,
     SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata,
     VersionPurgeMetadata,
 };

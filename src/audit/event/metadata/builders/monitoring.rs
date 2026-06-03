@@ -76,6 +76,132 @@ impl SiemForwardFailureMetadata {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Task 13 SIEM production operational audit metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct SiemEventForwardedMetadata {
+    exporter_kind: String,
+    batch_size: u64,
+    source_event_at: SourceEventAt,
+}
+
+impl SiemEventForwardedMetadata {
+    pub fn new(
+        exporter_kind: impl Into<String>,
+        batch_size: u64,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            exporter_kind: exporter_kind.into(),
+            batch_size,
+            source_event_at,
+        }
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert(
+            "exporter_kind".to_owned(),
+            Value::String(self.exporter_kind),
+        );
+        object.insert(
+            "batch_size".to_owned(),
+            Value::Number(self.batch_size.into()),
+        );
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SiemEventFailedMetadata {
+    exporter_kind: String,
+    error_code: String,
+    buffered: bool,
+    batch_size: u64,
+    source_event_at: SourceEventAt,
+}
+
+impl SiemEventFailedMetadata {
+    pub fn new(
+        exporter_kind: impl Into<String>,
+        error_code: impl Into<String>,
+        buffered: bool,
+        batch_size: u64,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            exporter_kind: exporter_kind.into(),
+            error_code: error_code.into(),
+            buffered,
+            batch_size,
+            source_event_at,
+        }
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert(
+            "exporter_kind".to_owned(),
+            Value::String(self.exporter_kind),
+        );
+        object.insert("error_code".to_owned(), Value::String(self.error_code));
+        object.insert("buffered".to_owned(), Value::Bool(self.buffered));
+        object.insert(
+            "batch_size".to_owned(),
+            Value::Number(self.batch_size.into()),
+        );
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SiemBufferFlushedMetadata {
+    flushed_count: u64,
+    buffer_remaining_bytes: u64,
+    source_event_at: SourceEventAt,
+}
+
+impl SiemBufferFlushedMetadata {
+    pub fn new(
+        flushed_count: u64,
+        buffer_remaining_bytes: u64,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            flushed_count,
+            buffer_remaining_bytes,
+            source_event_at,
+        }
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = Map::new();
+        object.insert(
+            "flushed_count".to_owned(),
+            Value::Number(self.flushed_count.into()),
+        );
+        object.insert(
+            "buffer_remaining_bytes".to_owned(),
+            Value::Number(self.buffer_remaining_bytes.into()),
+        );
+        object.insert(
+            SOURCE_EVENT_AT_KEY.to_owned(),
+            Value::String(self.source_event_at.as_str().to_owned()),
+        );
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // IncidentDetectedMetadata
 // ─────────────────────────────────────────────────────────────────────────────
 

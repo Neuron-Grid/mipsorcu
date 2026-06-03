@@ -10,6 +10,7 @@ pub enum AuditEventError {
     UnknownResult { value: String },
     WriteSuccessActionNotAllowed { action: AuditAction },
     FailureOnlyActionSuccessNotAllowed { action: AuditAction },
+    SuccessOnlyActionFailureNotAllowed { action: AuditAction },
     AuthFailureFieldMustBeNull { field: &'static str },
     MetadataMustBeObject,
     ForbiddenMetadataKey { key: String },
@@ -46,6 +47,13 @@ impl fmt::Display for AuditEventError {
                 write!(
                     formatter,
                     "success audit for {} is not allowed",
+                    action.as_str()
+                )
+            }
+            Self::SuccessOnlyActionFailureNotAllowed { action } => {
+                write!(
+                    formatter,
+                    "failure audit for {} is not allowed",
                     action.as_str()
                 )
             }

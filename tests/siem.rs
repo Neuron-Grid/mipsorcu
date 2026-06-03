@@ -15,14 +15,14 @@ use mipsorcu::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditMetadata, AuditResult,
     AuthFailureMetadata, DecryptMetadata, FORBIDDEN_AUDIT_METADATA_KEYS, FailingSiemSink,
     InMemorySiemSink, LocalSiemFallbackBuffer, RequestId, SIEM_EVENT_TOP_LEVEL_KEYS, SecretId,
-    SiemEvent, SiemForwardOutcome, SiemForwarder, SiemSink, SiemSinkError,
+    SiemEvent, SiemForwardOutcome, SiemForwarder, SiemRetryPolicy, SiemSink, SiemSinkError,
     build_siem_forward_failure_audit_event,
 };
 
 fn tempfile_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!(
-        "mipsorcu-t11-siem-{}-{}-{}.jsonl",
+        "mipsorcu-t11-siem-{}-{}-{}",
         name,
         std::process::id(),
         std::time::SystemTime::now()
@@ -30,8 +30,7 @@ fn tempfile_path(name: &str) -> PathBuf {
             .map(|duration| duration.as_nanos())
             .unwrap_or(0),
     ));
-    let _ = std::fs::remove_file(&path);
-    path
+    path.join("siem-buffer-current.jsonl")
 }
 
 fn build_decrypt_failure_audit_event() -> AuditEvent {
@@ -99,7 +98,8 @@ async fn backend_failure_buffers_event_and_builds_failure_audit() {
     let path = tempfile_path("failure_audit");
     let sink = FailingSiemSink::new("siem_simulated_outage");
     let buffer = LocalSiemFallbackBuffer::new(&path);
-    let forwarder = SiemForwarder::new(sink, buffer.clone());
+    let forwarder =
+        SiemForwarder::new_with_retry_policy(sink, buffer.clone(), SiemRetryPolicy::no_retry());
 
     let audit_event = build_decrypt_failure_audit_event();
     let siem_event = SiemEvent::from_audit_event(&audit_event);
@@ -144,7 +144,7 @@ async fn long_failure_warning_threshold_reached() {
     let path = tempfile_path("long_failure");
     let sink = FailingSiemSink::new("siem_long_outage");
     let buffer = LocalSiemFallbackBuffer::new(&path);
-    let forwarder = SiemForwarder::new(sink, buffer);
+    let forwarder = SiemForwarder::new_with_retry_policy(sink, buffer, SiemRetryPolicy::no_retry());
 
     let audit_event = build_auth_failure_audit_event();
     let siem_event = SiemEvent::from_audit_event(&audit_event);
@@ -185,7 +185,7 @@ async fn forward_failure_does_not_propagate_to_primary_operation() {
     let path = tempfile_path("isolation");
     let sink = FailingSiemSink::new("siem_total_outage");
     let buffer = LocalSiemFallbackBuffer::new(&path);
-    let forwarder = SiemForwarder::new(sink, buffer);
+    let forwarder = SiemForwarder::new_with_retry_policy(sink, buffer, SiemRetryPolicy::no_retry());
 
     async fn primary_with_siem_post_hook<S: SiemSink>(
         forwarder: &SiemForwarder<S>,

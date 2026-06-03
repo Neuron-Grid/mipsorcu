@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use crate::types::SecretString;
 
 use super::event::SiemEvent;
-use super::sink::{SiemSink, SiemSinkError};
+use super::sink::{ForwardReceipt, SiemExporterKind, SiemSink, SiemSinkError, validate_batch_size};
 
 /// OTLP/HTTP/JSON `/v1/logs` への SIEM exporter。
 pub struct OtlpSiemSink {
@@ -85,7 +85,9 @@ impl OtlpSiemSink {
         })
     }
 
-    fn build_request_body(&self, event: &SiemEvent) -> Vec<u8> {
+    fn build_request_body(&self, batch: &[SiemEvent]) -> Result<Vec<u8>, SiemSinkError> {
+        validate_batch_size(batch.len())?;
+        let log_records: Vec<Value> = batch.iter().map(Self::build_log_record).collect();
         let payload = json!({
             "resourceLogs": [{
                 "resource": {
@@ -95,11 +97,13 @@ impl OtlpSiemSink {
                 },
                 "scopeLogs": [{
                     "scope": {"name": "mipsorcu.audit"},
-                    "logRecords": [Self::build_log_record(event)],
+                    "logRecords": log_records,
                 }],
             }],
         });
-        serde_json::to_vec(&payload).unwrap_or_default()
+        serde_json::to_vec(&payload).map_err(|_| SiemSinkError::BackendFailed {
+            code: "siem_otlp_serialize".to_owned(),
+        })
     }
 }
 
@@ -126,8 +130,12 @@ fn source_event_at_to_unix_nano(value: &str) -> String {
 }
 
 impl SiemSink for OtlpSiemSink {
-    async fn send_event(&self, event: &SiemEvent) -> Result<(), SiemSinkError> {
-        let body = self.build_request_body(event);
+    fn exporter_kind(&self) -> SiemExporterKind {
+        SiemExporterKind::Otlp
+    }
+
+    async fn send_batch(&self, batch: &[SiemEvent]) -> Result<ForwardReceipt, SiemSinkError> {
+        let body = self.build_request_body(batch)?;
         let mut request = self
             .client
             .post(self.endpoint.as_str())
@@ -150,7 +158,7 @@ impl SiemSink for OtlpSiemSink {
         })?;
         let status = response.status();
         if status.is_success() {
-            return Ok(());
+            return Ok(ForwardReceipt::new(self.exporter_kind(), batch.len()));
         }
         Err(SiemSinkError::BackendFailed {
             code: format!("siem_otlp_http_{}", status.as_u16()),

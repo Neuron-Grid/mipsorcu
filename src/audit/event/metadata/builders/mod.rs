@@ -26,7 +26,10 @@ pub use key_rotation::{
     KeyRotationCompleteMetadata, KeyRotationEnvelopeFailedMetadata,
     KeyRotationEnvelopeMigratedMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
 };
-pub use monitoring::{IncidentDetectedMetadata, SiemForwardFailureMetadata};
+pub use monitoring::{
+    IncidentDetectedMetadata, SiemBufferFlushedMetadata, SiemEventFailedMetadata,
+    SiemEventForwardedMetadata, SiemForwardFailureMetadata,
+};
 pub use report::{AuditReportGenerateMetadata, AuditUiReadMetadata};
 pub use secret_ops::{
     AuthFailureMetadata, DecryptMetadata, EncryptCreateMetadata, EncryptRotateMetadata,

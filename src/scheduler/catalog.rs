@@ -11,6 +11,7 @@ pub(crate) enum ScheduledJobName {
     QuarterlyRestoreDrillReminder,
     QuarterlySigningKeyReviewReminder,
     QuarterlyAuditorPrivilegeReviewReminder,
+    SiemBufferFlush,
 }
 
 impl ScheduledJobName {
@@ -27,6 +28,7 @@ impl ScheduledJobName {
             Self::QuarterlyAuditorPrivilegeReviewReminder => {
                 "quarterly_auditor_privilege_review_reminder"
             }
+            Self::SiemBufferFlush => "siem_buffer_flush",
         }
     }
 }
@@ -41,6 +43,7 @@ pub(crate) struct ScheduledJobSpec {
 pub(crate) const MONTHLY_JOB_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub(crate) const DAILY_ENVELOPE_MIGRATION_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 pub(crate) const REMINDER_JOB_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub(crate) const SIEM_BUFFER_FLUSH_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 pub(crate) const SCHEDULER_LOCK_TTL_SECONDS: u32 = 60 * 60;
 
 pub(crate) const SCHEDULED_JOB_SPECS: &[ScheduledJobSpec] = &[
@@ -88,5 +91,10 @@ pub(crate) const SCHEDULED_JOB_SPECS: &[ScheduledJobSpec] = &[
         name: ScheduledJobName::QuarterlyAuditorPrivilegeReviewReminder,
         cron: "0 20 5 1 1,4,7,10 *",
         timeout: REMINDER_JOB_TIMEOUT,
+    },
+    ScheduledJobSpec {
+        name: ScheduledJobName::SiemBufferFlush,
+        cron: "0 */5 * * * *",
+        timeout: SIEM_BUFFER_FLUSH_TIMEOUT,
     },
 ];

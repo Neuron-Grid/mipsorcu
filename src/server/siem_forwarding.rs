@@ -5,7 +5,9 @@ use crate::ledger::SignedLedgerEntry;
 use crate::server::state::ReadinessState;
 use crate::server::supabase::SupabaseAuditAppender;
 use crate::siem::{
-    SiemEvent, SiemForwardOutcome, SiemForwarder, SiemForwarderStatus, SiemResendSummary, SiemSink,
+    SiemEvent, SiemExporterKind, SiemForwardOutcome, SiemForwarder, SiemForwarderStatus,
+    SiemResendSummary, SiemSink, build_siem_buffer_flushed_audit_event,
+    build_siem_event_failed_audit_event, build_siem_event_forwarded_audit_event,
     build_siem_forward_failure_audit_event,
 };
 
@@ -66,10 +68,22 @@ impl<S: SiemSink> SiemForwardingService<S> {
     }
 
     pub async fn resend_pending(&self) -> SiemResendSummary {
-        self.forwarder.resend_pending().await
+        self.resend_pending_batch(crate::siem::SIEM_MAX_BATCH_SIZE)
+            .await
+    }
+
+    pub async fn resend_pending_batch(&self, limit: usize) -> SiemResendSummary {
+        let summary = self.forwarder.resend_pending_batch(limit).await;
+        if summary.sent > 0 {
+            self.record_buffer_flushed(summary.sent).await;
+        }
+        summary
     }
 
     pub async fn forward_audit_event(&self, event: &AuditEvent) -> SiemForwardOutcome {
+        if is_siem_operational_action(event.action()) {
+            return SiemForwardOutcome::SentDirect;
+        }
         let siem_event = SiemEvent::from_audit_event(event);
         self.forward_siem_event(
             &siem_event,
@@ -96,11 +110,119 @@ impl<S: SiemSink> SiemForwardingService<S> {
         source_event_type: &str,
     ) -> SiemForwardOutcome {
         let outcome = self.forwarder.forward(event).await;
-        if let Some(sink_error_code) = forward_failure_sink_error_code(&outcome) {
+        let exporter_kind = self.forwarder.exporter_kind();
+        if should_record_siem_operational_audit(exporter_kind) {
+            self.record_forward_outcome(&request_id, exporter_kind, &outcome, 1)
+                .await;
+        } else if let Some(sink_error_code) = forward_failure_sink_error_code(&outcome) {
             self.record_forward_failure(&request_id, source_event_type, sink_error_code)
                 .await;
         }
         outcome
+    }
+
+    async fn record_forward_outcome(
+        &self,
+        request_id: &RequestId,
+        exporter_kind: SiemExporterKind,
+        outcome: &SiemForwardOutcome,
+        batch_size: usize,
+    ) {
+        let event = match outcome {
+            SiemForwardOutcome::SentDirect => build_siem_event_forwarded_audit_event(
+                request_id.clone(),
+                exporter_kind,
+                batch_size,
+            ),
+            SiemForwardOutcome::Buffered { sink_error_code } => {
+                build_siem_event_failed_audit_event(
+                    request_id.clone(),
+                    exporter_kind,
+                    sink_error_code,
+                    true,
+                    batch_size,
+                )
+            }
+            SiemForwardOutcome::BufferingFailed { sink_error_code } => {
+                build_siem_event_failed_audit_event(
+                    request_id.clone(),
+                    exporter_kind,
+                    sink_error_code,
+                    false,
+                    batch_size,
+                )
+            }
+        };
+
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                self.readiness_state.mark_failure_audit_both_failed();
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %error,
+                    "failed to construct SIEM operational audit event"
+                );
+                return;
+            }
+        };
+
+        self.record_operational_audit(request_id, &event).await;
+    }
+
+    async fn record_buffer_flushed(&self, flushed_count: usize) {
+        if !should_record_siem_operational_audit(self.forwarder.exporter_kind()) {
+            return;
+        }
+
+        let request_id = match RequestId::generate() {
+            Ok(request_id) => request_id,
+            Err(error) => {
+                self.readiness_state.mark_failure_audit_both_failed();
+                tracing::error!(
+                    error = %error,
+                    "failed to generate request_id for SIEM buffer flush audit"
+                );
+                return;
+            }
+        };
+        let buffer_remaining_bytes = match self.forwarder.buffer().remaining_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to read SIEM buffer remaining bytes for flush audit"
+                );
+                0
+            }
+        };
+        let event = match build_siem_buffer_flushed_audit_event(
+            request_id.clone(),
+            flushed_count,
+            buffer_remaining_bytes,
+        ) {
+            Ok(event) => event,
+            Err(error) => {
+                self.readiness_state.mark_failure_audit_both_failed();
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %error,
+                    "failed to construct SIEM buffer flushed audit event"
+                );
+                return;
+            }
+        };
+
+        self.record_operational_audit(&request_id, &event).await;
+    }
+
+    async fn record_operational_audit(&self, request_id: &RequestId, event: &AuditEvent) {
+        let record_result = self.audit_recorder.record(event).await;
+        let effect = failure_audit_record_effect(&record_result);
+        if effect.marks_readiness_failure() {
+            self.readiness_state.mark_failure_audit_both_failed();
+        }
+        log_operational_audit_record_result(request_id, event, &record_result, effect);
     }
 
     async fn record_forward_failure(
@@ -137,6 +259,20 @@ impl<S: SiemSink> SiemForwardingService<S> {
         }
         log_failure_audit_record_result(request_id, sink_error_code, &record_result, effect);
     }
+}
+
+fn is_siem_operational_action(action: crate::audit::AuditAction) -> bool {
+    matches!(
+        action,
+        crate::audit::AuditAction::SiemForwardFailure
+            | crate::audit::AuditAction::SiemEventForwarded
+            | crate::audit::AuditAction::SiemEventFailed
+            | crate::audit::AuditAction::SiemBufferFlushed
+    )
+}
+
+fn should_record_siem_operational_audit(exporter_kind: SiemExporterKind) -> bool {
+    exporter_kind != SiemExporterKind::InMemory
 }
 
 fn forward_failure_sink_error_code(outcome: &SiemForwardOutcome) -> Option<&str> {
@@ -219,6 +355,38 @@ fn log_failure_audit_record_result(
                     audit_record_outcome = effect.audit_record_outcome(),
                     classification_error_code = "audit_record_classification_mismatch",
                     "SIEM forward failure audit classification mismatch"
+                );
+            }
+        }
+    }
+}
+
+fn log_operational_audit_record_result(
+    request_id: &RequestId,
+    event: &AuditEvent,
+    record_result: &Result<AuditRecordOutcome, AuditRecordError>,
+    effect: FailureAuditRecordEffect,
+) {
+    match effect {
+        FailureAuditRecordEffect::PrimarySucceeded
+        | FailureAuditRecordEffect::FallbackSucceeded => {
+            tracing::debug!(
+                request_id = %request_id.as_canonical_string(),
+                action = event.action().as_str(),
+                result = event.result().as_str(),
+                audit_record_outcome = effect.audit_record_outcome(),
+                "SIEM operational audit recorded"
+            );
+        }
+        FailureAuditRecordEffect::BothFailed | FailureAuditRecordEffect::UnexpectedError => {
+            if let Err(error) = record_result {
+                tracing::error!(
+                    request_id = %request_id.as_canonical_string(),
+                    error = %error,
+                    action = event.action().as_str(),
+                    result = event.result().as_str(),
+                    audit_record_outcome = effect.audit_record_outcome(),
+                    "SIEM operational audit recording failed"
                 );
             }
         }

@@ -28,12 +28,15 @@ fn build_event() -> SiemEvent {
 fn tempfile_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!(
-        "mipsorcu-siem-buffer-{}-{}.jsonl",
+        "mipsorcu-siem-buffer-{}-{}-{}",
         name,
-        std::process::id()
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
     ));
-    let _ = fs::remove_file(&path);
-    path
+    path.join("siem-buffer-current.jsonl")
 }
 
 #[test]
@@ -94,4 +97,64 @@ fn clone_shares_underlying_file() {
     let pending = buffer.pending_events().unwrap();
     assert_eq!(pending.len(), 1);
     let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn append_rotates_current_file_and_pending_batch_replays_rotated_plus_current() {
+    let path = tempfile_path("rotate");
+    let buffer = LocalSiemFallbackBuffer::with_config(&path, 1);
+    let first = build_event();
+    let second = build_event();
+
+    buffer.append_pending(&first).unwrap();
+    buffer.append_pending(&second).unwrap();
+
+    let parent = path.parent().expect("buffer path has parent");
+    let rotated = rotated_files(parent);
+    assert_eq!(rotated.len(), 1, "second append should rotate current file");
+    let pending = buffer.pending_batch(100).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].event_id(), first.event_id());
+    assert_eq!(pending[1].event_id(), second.event_id());
+    assert_eq!(buffer.pending_batch(1).unwrap().len(), 1);
+    assert_eq!(buffer.remaining_bytes().unwrap(), 0);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&rotated[0]).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rotated SIEM buffer file must be 0600");
+    }
+}
+
+#[test]
+fn mark_sent_in_current_file_overrides_pending_record_in_rotated_file() {
+    let path = tempfile_path("rotate_sent");
+    let buffer = LocalSiemFallbackBuffer::with_config(&path, 1);
+    let first = build_event();
+    let second = build_event();
+
+    buffer.append_pending(&first).unwrap();
+    buffer.append_pending(&second).unwrap();
+    buffer.mark_sent(&first).unwrap();
+
+    let pending = buffer.pending_batch(100).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].event_id(), second.event_id());
+}
+
+fn rotated_files(parent: &std::path::Path) -> Vec<PathBuf> {
+    let mut files = fs::read_dir(parent)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("siem-buffer-") && name != "siem-buffer-current.jsonl")
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
 }

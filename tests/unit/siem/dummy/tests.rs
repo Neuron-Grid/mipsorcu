@@ -40,6 +40,25 @@ async fn in_memory_sink_stores_events_in_order() {
 }
 
 #[tokio::test]
+async fn in_memory_sink_stores_batch_and_returns_receipt() {
+    let sink = InMemorySiemSink::new();
+    let event_a = SiemEvent::from_audit_event(&build_auth_failure_event());
+    let event_b = SiemEvent::from_audit_event(&build_auth_failure_event());
+
+    let receipt = sink
+        .send_batch(&[event_a.clone(), event_b.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.exporter_kind(), SiemExporterKind::InMemory);
+    assert_eq!(receipt.batch_size(), 2);
+    let stored = sink.events();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[0].event_id(), event_a.event_id());
+    assert_eq!(stored[1].event_id(), event_b.event_id());
+}
+
+#[tokio::test]
 async fn in_memory_sink_is_shared_via_clone() {
     let sink = InMemorySiemSink::new();
     let clone = sink.clone();

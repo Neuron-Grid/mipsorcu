@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::types::SecretString;
 
 use super::event::SiemEvent;
-use super::sink::{SiemSink, SiemSinkError};
+use super::sink::{ForwardReceipt, SiemExporterKind, SiemSink, SiemSinkError, validate_batch_size};
 
 /// Splunk HEC への SIEM exporter。
 pub struct SplunkHecSiemSink {
@@ -63,8 +63,13 @@ fn source_event_at_to_unix_seconds(value: &str) -> f64 {
 }
 
 impl SiemSink for SplunkHecSiemSink {
-    async fn send_event(&self, event: &SiemEvent) -> Result<(), SiemSinkError> {
-        let body = serde_json::to_vec(&self.build_payload(event)).unwrap_or_default();
+    fn exporter_kind(&self) -> SiemExporterKind {
+        SiemExporterKind::SplunkHec
+    }
+
+    async fn send_batch(&self, batch: &[SiemEvent]) -> Result<ForwardReceipt, SiemSinkError> {
+        validate_batch_size(batch.len())?;
+        let body = self.build_batch_body(batch)?;
         let response = self
             .client
             .post(self.endpoint.as_str())
@@ -85,11 +90,29 @@ impl SiemSink for SplunkHecSiemSink {
             })?;
         let status = response.status();
         if status.is_success() {
-            return Ok(());
+            return Ok(ForwardReceipt::new(self.exporter_kind(), batch.len()));
         }
         Err(SiemSinkError::BackendFailed {
             code: format!("siem_splunk_http_{}", status.as_u16()),
         })
+    }
+}
+
+impl SplunkHecSiemSink {
+    fn build_batch_body(&self, batch: &[SiemEvent]) -> Result<Vec<u8>, SiemSinkError> {
+        let mut body = Vec::new();
+        for event in batch {
+            if !body.is_empty() {
+                body.push(b'\n');
+            }
+            let payload = self.build_payload(event);
+            let mut bytes =
+                serde_json::to_vec(&payload).map_err(|_| SiemSinkError::BackendFailed {
+                    code: "siem_splunk_serialize".to_owned(),
+                })?;
+            body.append(&mut bytes);
+        }
+        Ok(body)
     }
 }
 

@@ -73,6 +73,7 @@ pub(crate) struct SchedulerRuntimeState {
     restore_lock: JobLock,
     signature_review_lock: JobLock,
     auditor_review_lock: JobLock,
+    siem_buffer_flush_lock: JobLock,
 }
 
 impl SchedulerRuntimeState {
@@ -88,6 +89,7 @@ impl SchedulerRuntimeState {
             restore_lock: JobLock::new(),
             signature_review_lock: JobLock::new(),
             auditor_review_lock: JobLock::new(),
+            siem_buffer_flush_lock: JobLock::new(),
         }
     }
 
@@ -102,6 +104,7 @@ impl SchedulerRuntimeState {
             ScheduledJobName::QuarterlyRestoreDrillReminder => &self.restore_lock,
             ScheduledJobName::QuarterlySigningKeyReviewReminder => &self.signature_review_lock,
             ScheduledJobName::QuarterlyAuditorPrivilegeReviewReminder => &self.auditor_review_lock,
+            ScheduledJobName::SiemBufferFlush => &self.siem_buffer_flush_lock,
         }
     }
 }

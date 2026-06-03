@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::audit::{
@@ -8,6 +10,36 @@ use crate::audit::{
 
 use super::super::dummy::{FailingSiemSink, InMemorySiemSink};
 use super::*;
+
+#[derive(Clone)]
+struct CountingFailingSiemSink {
+    attempts: Arc<AtomicUsize>,
+}
+
+impl CountingFailingSiemSink {
+    fn new() -> Self {
+        Self {
+            attempts: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
+    }
+}
+
+impl SiemSink for CountingFailingSiemSink {
+    fn exporter_kind(&self) -> SiemExporterKind {
+        SiemExporterKind::SplunkHec
+    }
+
+    async fn send_batch(&self, _batch: &[SiemEvent]) -> Result<ForwardReceipt, SiemSinkError> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        Err(SiemSinkError::BackendFailed {
+            code: "siem_retry_test".to_owned(),
+        })
+    }
+}
 
 fn build_audit_event() -> AuditEvent {
     let metadata = AuthFailureMetadata::new("authorization_header_missing")
@@ -36,12 +68,15 @@ fn build_siem_event() -> SiemEvent {
 fn tempfile_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!(
-        "mipsorcu-siem-forwarder-{}-{}.jsonl",
+        "mipsorcu-siem-forwarder-{}-{}-{}",
         name,
-        std::process::id()
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
     ));
-    let _ = std::fs::remove_file(&path);
-    path
+    path.join("siem-buffer-current.jsonl")
 }
 
 #[tokio::test]
@@ -64,7 +99,8 @@ async fn forward_buffers_event_on_sink_failure_and_records_failure_since() {
     let path = tempfile_path("fail");
     let sink = FailingSiemSink::new("simulated_outage");
     let buffer = LocalSiemFallbackBuffer::new(&path);
-    let forwarder = SiemForwarder::new(sink, buffer.clone());
+    let forwarder =
+        SiemForwarder::new_with_retry_policy(sink, buffer.clone(), SiemRetryPolicy::no_retry());
     let event = build_siem_event();
 
     let outcome = forwarder.forward(&event).await;
@@ -87,7 +123,7 @@ async fn forward_preserves_backend_code_with_siem_prefix() {
     let path = tempfile_path("prefix");
     let sink = FailingSiemSink::new("siem_rate_limited");
     let buffer = LocalSiemFallbackBuffer::new(&path);
-    let forwarder = SiemForwarder::new(sink, buffer);
+    let forwarder = SiemForwarder::new_with_retry_policy(sink, buffer, SiemRetryPolicy::no_retry());
     let event = build_siem_event();
 
     let outcome = forwarder.forward(&event).await;
@@ -105,7 +141,8 @@ async fn resend_pending_drains_buffer_when_sink_recovers() {
     let path = tempfile_path("resend");
     let failing = FailingSiemSink::new("simulated_outage");
     let buffer = LocalSiemFallbackBuffer::new(&path);
-    let forwarder = SiemForwarder::new(failing, buffer.clone());
+    let forwarder =
+        SiemForwarder::new_with_retry_policy(failing, buffer.clone(), SiemRetryPolicy::no_retry());
 
     // 1) sink 失敗で buffer に積む
     let event = build_siem_event();
@@ -132,7 +169,7 @@ async fn status_is_long_failure_after_threshold() {
     let path = tempfile_path("longfail");
     let sink = FailingSiemSink::new("siem_long_outage");
     let buffer = LocalSiemFallbackBuffer::new(&path);
-    let forwarder = SiemForwarder::new(sink, buffer);
+    let forwarder = SiemForwarder::new_with_retry_policy(sink, buffer, SiemRetryPolicy::no_retry());
 
     let event = build_siem_event();
     let _ = forwarder.forward(&event).await;
@@ -156,6 +193,25 @@ async fn status_is_long_failure_after_threshold() {
             .is_long_failure(later, Duration::from_secs(60))
     );
 
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn forward_batch_retries_at_most_configured_attempts() {
+    let path = tempfile_path("retry");
+    let sink = CountingFailingSiemSink::new();
+    let buffer = LocalSiemFallbackBuffer::new(&path);
+    let forwarder = SiemForwarder::new_with_retry_policy(
+        sink.clone(),
+        buffer,
+        SiemRetryPolicy::for_test(3, Duration::ZERO, Duration::ZERO),
+    );
+    let event = build_siem_event();
+
+    let outcome = forwarder.forward(&event).await;
+
+    assert!(matches!(outcome, SiemForwardOutcome::Buffered { .. }));
+    assert_eq!(sink.attempts(), 3);
     let _ = std::fs::remove_file(&path);
 }
 

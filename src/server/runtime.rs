@@ -455,7 +455,10 @@ fn build_siem_forwarding(
     audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     readiness_state: &ReadinessState,
 ) -> Arc<SiemForwardingService<AnySiemSink>> {
-    let siem_buffer = LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone());
+    let siem_buffer = LocalSiemFallbackBuffer::with_config(
+        config.siem_buffer_path.clone(),
+        config.siem_buffer_max_bytes,
+    );
     let siem_forwarder = SiemForwarder::new(siem_sink, siem_buffer);
     Arc::new(SiemForwardingService::new(
         siem_forwarder,
@@ -536,18 +539,18 @@ fn spawn_background_loops(
         shutdown_sender.subscribe(),
     ));
 
-    tokio::spawn(background::run_siem_resend_loop(
-        state.siem_forwarding.clone(),
-        state.incident_recorder.clone(),
-        siem_resend_interval,
-        siem_long_failure_threshold,
-        shutdown_sender.subscribe(),
-    ));
-
     if scheduler_enabled {
         tokio::spawn(scheduler::run_scheduler_loop(
             state.clone(),
             scheduler,
+            shutdown_sender.subscribe(),
+        ));
+    } else {
+        tokio::spawn(background::run_siem_resend_loop(
+            state.siem_forwarding.clone(),
+            state.incident_recorder.clone(),
+            siem_resend_interval,
+            siem_long_failure_threshold,
             shutdown_sender.subscribe(),
         ));
     }

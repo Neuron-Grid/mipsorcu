@@ -121,6 +121,7 @@ fn validate_metadata_values(
     validate_string_metadata_values(action, result, object)?;
     validate_timestamp_metadata_values(object)?;
     validate_object_metadata_values(object)?;
+    validate_bool_metadata_values(object)?;
     validate_integrity_violation_summary_values(action, object)?;
     Ok(())
 }
@@ -142,6 +143,8 @@ fn validate_numeric_metadata_values(
         "result_count",
         "success_count",
         "failure_count",
+        "flushed_count",
+        "buffer_remaining_bytes",
     ] {
         if let Some(value) = object.get(key) {
             validate_u64_value(key, value)?;
@@ -329,6 +332,10 @@ fn validate_string_metadata_values(
         validate_enum_metadata_value("format", value, &["json", "markdown"])?;
     }
 
+    if let Some(value) = object.get("exporter_kind") {
+        validate_enum_metadata_value("exporter_kind", value, &["in_memory", "otlp", "splunk_hec"])?;
+    }
+
     if let Some(value) = object.get("archive_key") {
         if result == AuditResult::Failure {
             return Err(AuditEventError::InvalidMetadataValue { key: "archive_key" });
@@ -409,6 +416,16 @@ fn validate_object_metadata_values(object: &Map<String, Value>) -> Result<(), Au
         return Err(AuditEventError::InvalidMetadataValue {
             key: "result_summary",
         });
+    }
+
+    Ok(())
+}
+
+fn validate_bool_metadata_values(object: &Map<String, Value>) -> Result<(), AuditEventError> {
+    if let Some(value) = object.get("buffered")
+        && !value.is_boolean()
+    {
+        return Err(AuditEventError::InvalidMetadataValue { key: "buffered" });
     }
 
     Ok(())

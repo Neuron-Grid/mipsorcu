@@ -18,13 +18,16 @@ pub mod otlp;
 pub mod sink;
 pub mod splunk_hec;
 
-pub use buffer::{LocalSiemBufferError, LocalSiemFallbackBuffer};
+pub use buffer::{DEFAULT_SIEM_BUFFER_MAX_BYTES, LocalSiemBufferError, LocalSiemFallbackBuffer};
 pub use dummy::{FailingSiemSink, InMemorySiemSink};
 pub use event::{SIEM_EVENT_SCHEMA_VERSION, SIEM_EVENT_TOP_LEVEL_KEYS, SiemEvent};
 pub use forwarder::{
-    SiemForwardOutcome, SiemForwarder, SiemForwarderStatus, SiemResendSummary,
-    build_siem_forward_failure_audit_event,
+    SiemForwardOutcome, SiemForwarder, SiemForwarderStatus, SiemResendSummary, SiemRetryPolicy,
+    build_siem_buffer_flushed_audit_event, build_siem_event_failed_audit_event,
+    build_siem_event_forwarded_audit_event, build_siem_forward_failure_audit_event,
 };
 pub use otlp::OtlpSiemSink;
-pub use sink::{AnySiemSink, SiemSink, SiemSinkError};
+pub use sink::{
+    AnySiemSink, ForwardReceipt, SIEM_MAX_BATCH_SIZE, SiemExporterKind, SiemSink, SiemSinkError,
+};
 pub use splunk_hec::SplunkHecSiemSink;

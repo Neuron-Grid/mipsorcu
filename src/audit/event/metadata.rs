@@ -16,7 +16,8 @@ pub use builders::{
     KeyRotationReencryptMetadata, KeyRotationStartMetadata, MonthlyDigestGenerateMetadata,
     MonthlyDigestVerifyMetadata, RestoreTestMetadata, SchedulerJobMetadata,
     SecretAliasCreateMetadata, SecretAliasDeleteMetadata, SecretAliasListMetadata,
-    SecretAliasUpdateMetadata, SiemForwardFailureMetadata, SignatureKeyActivatedMetadata,
+    SecretAliasUpdateMetadata, SiemBufferFlushedMetadata, SiemEventFailedMetadata,
+    SiemEventForwardedMetadata, SiemForwardFailureMetadata, SignatureKeyActivatedMetadata,
     SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata, VersionPurgeMetadata,
 };
 
@@ -34,6 +35,7 @@ pub const FORBIDDEN_AUDIT_METADATA_KEYS: &[&str] = &[
     "alias_decryption_key",
     "alias_encryption_key",
     "alias_fingerprint_key",
+    "alias_nonce",
     "authorization",
     "authorization_header",
     "bearer_token",
@@ -47,8 +49,11 @@ pub const FORBIDDEN_AUDIT_METADATA_KEYS: &[&str] = &[
     "encrypted_data_key",
     "jwt",
     "jwt_full",
+    "kek_value",
     "ledger_signing_key",
     "master_key",
+    "nonce",
+    "nonce_or_iv",
     "passphrase",
     "password",
     "plain_text",
@@ -63,7 +68,9 @@ pub const FORBIDDEN_AUDIT_METADATA_KEYS: &[&str] = &[
     "secret_value",
     "service_role",
     "service_role_key",
+    "signature_private_key",
     "token",
+    "wrapped_dek",
 ];
 
 #[derive(Clone, PartialEq, Eq)]

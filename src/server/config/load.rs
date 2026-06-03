@@ -25,9 +25,10 @@ use super::constants::{
     ENV_SCHEDULER_ENVELOPE_MIGRATION_BATCH_SIZE, ENV_SCHEDULER_ENVELOPE_MIGRATION_MAX_BATCHES,
     ENV_SCHEDULER_LOCAL_ARCHIVE_DIR, ENV_SCHEDULER_MONTHLY_DAY, ENV_SCHEDULER_MONTHLY_HOUR_UTC,
     ENV_SCHEDULER_POLL_INTERVAL_SECONDS, ENV_SCHEDULER_QUARTERLY_HOUR_UTC,
-    ENV_SCHEDULER_STARTUP_DELAY_SEC, ENV_SCHEDULER_STARTUP_DELAY_SECONDS, ENV_SIEM_BUFFER_PATH,
-    ENV_SIEM_LONG_FAILURE_THRESHOLD_SECONDS, ENV_SIEM_RESEND_INTERVAL_SECONDS,
-    ENV_SUPABASE_PUBLISHABLE_KEY, ENV_SUPABASE_SERVICE_ROLE_KEY, ENV_SUPABASE_URL,
+    ENV_SCHEDULER_STARTUP_DELAY_SEC, ENV_SCHEDULER_STARTUP_DELAY_SECONDS,
+    ENV_SIEM_BUFFER_MAX_BYTES, ENV_SIEM_BUFFER_PATH, ENV_SIEM_LONG_FAILURE_THRESHOLD_SECONDS,
+    ENV_SIEM_RESEND_INTERVAL_SECONDS, ENV_SUPABASE_PUBLISHABLE_KEY, ENV_SUPABASE_SERVICE_ROLE_KEY,
+    ENV_SUPABASE_URL,
 };
 use super::env::{DotenvVars, current_process_var, load_dotenv_file, optional_var, required_var};
 use super::error::ConfigError;
@@ -52,7 +53,8 @@ use super::scheduler::{
 };
 use super::siem::SiemExporterConfig;
 use super::siem::{
-    parse_siem_exporter_config, parse_siem_long_failure_threshold, parse_siem_resend_interval,
+    parse_siem_buffer_max_bytes, parse_siem_exporter_config, parse_siem_long_failure_threshold,
+    parse_siem_resend_interval,
 };
 use crate::{AliasEncryptionKey, AliasFingerprintKey, KeyVersion};
 
@@ -121,6 +123,7 @@ where
         http_rate_limit_window: http.http_rate_limit_window,
         audit_fallback_path: audit_fallback.path,
         siem_buffer_path: siem.buffer_path,
+        siem_buffer_max_bytes: siem.buffer_max_bytes,
         siem_exporter: siem.exporter,
         incident_notifier,
         audit_resend_interval: audit_fallback.resend_interval,
@@ -315,6 +318,7 @@ where
 /// SIEM エクスポータとバッファ・再送に関する設定。
 struct SiemConfig {
     buffer_path: PathBuf,
+    buffer_max_bytes: u64,
     exporter: SiemExporterConfig,
     resend_interval: Duration,
     long_failure_threshold: Duration,
@@ -328,6 +332,11 @@ where
         optional_var(ENV_SIEM_BUFFER_PATH, dotenv, get_process_var)
             .unwrap_or_else(|| DEFAULT_SIEM_BUFFER_PATH.to_owned()),
     );
+    let buffer_max_bytes = parse_siem_buffer_max_bytes(optional_var(
+        ENV_SIEM_BUFFER_MAX_BYTES,
+        dotenv,
+        get_process_var,
+    ))?;
     let exporter = parse_siem_exporter_config(dotenv, get_process_var)?;
     let resend_interval = parse_siem_resend_interval(optional_var(
         ENV_SIEM_RESEND_INTERVAL_SECONDS,
@@ -342,6 +351,7 @@ where
 
     Ok(SiemConfig {
         buffer_path,
+        buffer_max_bytes,
         exporter,
         resend_interval,
         long_failure_threshold,

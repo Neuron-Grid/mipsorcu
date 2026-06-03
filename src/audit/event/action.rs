@@ -32,6 +32,12 @@ pub enum AuditAction {
     DigestTimestamping,
     /// SIEM への監査イベント転送に失敗した（failure-only の監査）。
     SiemForwardFailure,
+    /// SIEM への監査イベント転送に成功した（success-only の監査）。
+    SiemEventForwarded,
+    /// SIEM への監査イベント転送に失敗した（failure-only の監査）。
+    SiemEventFailed,
+    /// SIEM buffer からの再送 flush が成功した（success-only の監査）。
+    SiemBufferFlushed,
     /// 監査レポート生成操作（成功・失敗両方の監査記録用）。
     AuditReportGenerate,
     /// 監査担当者向け UI backend read-only API の閲覧操作。
@@ -81,6 +87,9 @@ impl AuditAction {
             "archive_export" => Ok(Self::ArchiveExport),
             "digest_timestamping" => Ok(Self::DigestTimestamping),
             "siem_forward_failure" => Ok(Self::SiemForwardFailure),
+            "siem_event_forwarded" => Ok(Self::SiemEventForwarded),
+            "siem_event_failed" => Ok(Self::SiemEventFailed),
+            "siem_buffer_flushed" => Ok(Self::SiemBufferFlushed),
             "audit_report_generate" => Ok(Self::AuditReportGenerate),
             "audit_ui_read" => Ok(Self::AuditUiRead),
             "scheduler_job" => Ok(Self::SchedulerJob),
@@ -121,6 +130,9 @@ impl AuditAction {
             Self::ArchiveExport => "archive_export",
             Self::DigestTimestamping => "digest_timestamping",
             Self::SiemForwardFailure => "siem_forward_failure",
+            Self::SiemEventForwarded => "siem_event_forwarded",
+            Self::SiemEventFailed => "siem_event_failed",
+            Self::SiemBufferFlushed => "siem_buffer_flushed",
             Self::AuditReportGenerate => "audit_report_generate",
             Self::AuditUiRead => "audit_ui_read",
             Self::SchedulerJob => "scheduler_job",
@@ -148,9 +160,21 @@ impl AuditAction {
             self,
             Self::AuthFailure
                 | Self::SiemForwardFailure
+                | Self::SiemEventFailed
                 | Self::IncidentDetected
                 | Self::KeyRotationEnvelopeFailed
                 | Self::SchedulerJobFailed
+        )
+    }
+
+    pub fn is_success_only(self) -> bool {
+        matches!(
+            self,
+            Self::SiemEventForwarded
+                | Self::SiemBufferFlushed
+                | Self::SchedulerJobStarted
+                | Self::SchedulerJobCompleted
+                | Self::SchedulerJobSkipped
         )
     }
 }

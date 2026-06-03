@@ -38,6 +38,6 @@ pub use scheduler::{
     parse_scheduler_startup_delay, scheduler_startup_delay_value,
 };
 pub use siem::{
-    SiemExporterConfig, parse_siem_exporter_config, parse_siem_long_failure_threshold,
-    parse_siem_resend_interval,
+    SiemExporterConfig, parse_siem_buffer_max_bytes, parse_siem_exporter_config,
+    parse_siem_long_failure_threshold, parse_siem_resend_interval,
 };

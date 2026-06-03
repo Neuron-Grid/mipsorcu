@@ -8,7 +8,10 @@
 use mipsorcu::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult, DecryptMetadata, RequestId,
 };
-use mipsorcu::siem::{OtlpSiemSink, SiemEvent, SiemSink, SiemSinkError, SplunkHecSiemSink};
+use mipsorcu::siem::{
+    OtlpSiemSink, SIEM_MAX_BATCH_SIZE, SiemEvent, SiemExporterKind, SiemSink, SiemSinkError,
+    SplunkHecSiemSink,
+};
 use mipsorcu::types::{KeyVersion, OwnerUserId, SecretId, SourceEventAt};
 use wiremock::matchers::{header, header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -135,6 +138,67 @@ async fn splunk_hec_sink_posts_event_with_splunk_auth_header() {
     let event = make_siem_event();
 
     sink.send_event(&event).await.expect("splunk hec post ok");
+}
+
+#[tokio::test]
+async fn splunk_hec_sink_posts_max_batch_as_single_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/services/collector/event"))
+        .and(header("content-type", "application/json"))
+        .and(header("authorization", "Splunk batch-hec-token"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoint = format!("{}/services/collector/event", server.uri());
+    let token = mipsorcu::types::SecretString::new("batch-hec-token").expect("hec token");
+    let sink = SplunkHecSiemSink::new(http_client(), endpoint, token);
+    let batch = (0..SIEM_MAX_BATCH_SIZE)
+        .map(|_| make_siem_event())
+        .collect::<Vec<_>>();
+
+    let receipt = sink.send_batch(&batch).await.expect("batch post ok");
+
+    assert_eq!(receipt.exporter_kind(), SiemExporterKind::SplunkHec);
+    assert_eq!(receipt.batch_size(), SIEM_MAX_BATCH_SIZE);
+    let received = server.received_requests().await.expect("requests");
+    assert_eq!(received.len(), 1);
+    let body = String::from_utf8(received[0].body.clone()).expect("body is utf8");
+    assert_eq!(body.lines().count(), SIEM_MAX_BATCH_SIZE);
+    assert!(!body.contains("batch-hec-token"));
+}
+
+#[tokio::test]
+async fn splunk_hec_sink_rejects_batch_over_one_hundred() {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/services/collector/event", server.uri());
+    let token = mipsorcu::types::SecretString::new("batch-limit-token").expect("hec token");
+    let sink = SplunkHecSiemSink::new(http_client(), endpoint, token);
+    let batch = (0..=SIEM_MAX_BATCH_SIZE)
+        .map(|_| make_siem_event())
+        .collect::<Vec<_>>();
+
+    let error = sink
+        .send_batch(&batch)
+        .await
+        .expect_err("batch over 100 should be rejected locally");
+
+    match error {
+        SiemSinkError::InvalidResponse { reason } => {
+            assert_eq!(reason, "siem_batch_size_exceeded");
+        }
+        SiemSinkError::BackendFailed { code } => panic!("unexpected BackendFailed: {code}"),
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty(),
+        "oversized batch must not reach HEC"
+    );
 }
 
 #[tokio::test]

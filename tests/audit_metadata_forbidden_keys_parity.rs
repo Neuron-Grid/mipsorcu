@@ -7,9 +7,9 @@ use mipsorcu::{
 };
 
 const CURRENT_FORBIDDEN_KEY_MIGRATION_PATH: &str =
-    "supabase/migrations/1250_security_forbidden_key_parity.sql";
+    "supabase/migrations/1390_siem_production_actions_and_buffer_guards.sql";
 const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
-    "supabase/migrations/1380_scheduler_production_lock_and_actions.sql";
+    "supabase/migrations/1390_siem_production_actions_and_buffer_guards.sql";
 // allowlist 正本: 全 action を含む更新版の函数定義を持つ。
 // allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
 // 新 action を追加する場合は、このパスの migration を更新すること。
@@ -424,6 +424,89 @@ fn rust_allowlist_rejects_scheduler_lifecycle_invalid_values() {
     ));
 }
 
+#[test]
+fn rust_allowlist_accepts_siem_operational_metadata() {
+    let forwarded = AuditMetadata::new(serde_json::json!({
+        "exporter_kind": "splunk_hec",
+        "batch_size": 100,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    }))
+    .unwrap();
+    assert!(
+        forwarded
+            .validate_allowlist_for_action(AuditAction::SiemEventForwarded, AuditResult::Success)
+            .is_ok()
+    );
+
+    let failed = AuditMetadata::new(serde_json::json!({
+        "exporter_kind": "splunk_hec",
+        "error_code": "siem_splunk_http_503",
+        "buffered": true,
+        "batch_size": 3,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    }))
+    .unwrap();
+    assert!(
+        failed
+            .validate_allowlist_for_action(AuditAction::SiemEventFailed, AuditResult::Failure)
+            .is_ok()
+    );
+
+    let flushed = AuditMetadata::new(serde_json::json!({
+        "flushed_count": 3,
+        "buffer_remaining_bytes": 1048576,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    }))
+    .unwrap();
+    assert!(
+        flushed
+            .validate_allowlist_for_action(AuditAction::SiemBufferFlushed, AuditResult::Success)
+            .is_ok()
+    );
+}
+
+#[test]
+fn rust_allowlist_rejects_invalid_siem_operational_metadata() {
+    let exporter_kind = AuditMetadata::new(serde_json::json!({
+        "exporter_kind": "webhook",
+        "batch_size": 1,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    }))
+    .unwrap();
+    assert!(matches!(
+        exporter_kind
+            .validate_allowlist_for_action(AuditAction::SiemEventForwarded, AuditResult::Success),
+        Err(mipsorcu::AuditEventError::InvalidMetadataValue {
+            key: "exporter_kind"
+        })
+    ));
+
+    let buffered = AuditMetadata::new(serde_json::json!({
+        "exporter_kind": "splunk_hec",
+        "error_code": "siem_splunk_http_503",
+        "buffered": "true",
+        "batch_size": 1,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    }))
+    .unwrap();
+    assert!(matches!(
+        buffered.validate_allowlist_for_action(AuditAction::SiemEventFailed, AuditResult::Failure),
+        Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "buffered" })
+    ));
+
+    let batch_size = AuditMetadata::new(serde_json::json!({
+        "exporter_kind": "splunk_hec",
+        "batch_size": 0,
+        "source_event_at": "2026-04-08T12:00:00Z"
+    }))
+    .unwrap();
+    assert!(matches!(
+        batch_size
+            .validate_allowlist_for_action(AuditAction::SiemEventForwarded, AuditResult::Success),
+        Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "batch_size" })
+    ));
+}
+
 // ─── Parity: Rust ↔ SQL same case, same accept/reject ───
 
 #[test]
@@ -735,6 +818,9 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::ArchiveExport,
         AuditAction::DigestTimestamping,
         AuditAction::SiemForwardFailure,
+        AuditAction::SiemEventForwarded,
+        AuditAction::SiemEventFailed,
+        AuditAction::SiemBufferFlushed,
         AuditAction::AuditReportGenerate,
         AuditAction::AuditUiRead,
         AuditAction::SchedulerJob,
@@ -898,6 +984,21 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
         // SIEM forward failure（failure-only）
         AuditAction::SiemForwardFailure => {
             vec!["error_code", "event_count", "event_type", "source_event_at"]
+        }
+        AuditAction::SiemEventForwarded => {
+            vec!["exporter_kind", "batch_size", "source_event_at"]
+        }
+        AuditAction::SiemEventFailed => {
+            vec![
+                "exporter_kind",
+                "error_code",
+                "buffered",
+                "batch_size",
+                "source_event_at",
+            ]
+        }
+        AuditAction::SiemBufferFlushed => {
+            vec!["flushed_count", "buffer_remaining_bytes", "source_event_at"]
         }
         // audit report generation（成功・失敗両方を記録）
         AuditAction::AuditReportGenerate => {

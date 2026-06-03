@@ -10,6 +10,51 @@ use std::fmt;
 
 use super::event::SiemEvent;
 
+/// 1 回の SIEM 送信で扱う最大イベント数。
+pub const SIEM_MAX_BATCH_SIZE: usize = 100;
+
+/// runtime で選択される SIEM exporter の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SiemExporterKind {
+    InMemory,
+    Otlp,
+    SplunkHec,
+}
+
+impl SiemExporterKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InMemory => "in_memory",
+            Self::Otlp => "otlp",
+            Self::SplunkHec => "splunk_hec",
+        }
+    }
+}
+
+/// SIEM backend へ batch を渡せたことを示す非秘密 receipt。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardReceipt {
+    exporter_kind: SiemExporterKind,
+    batch_size: usize,
+}
+
+impl ForwardReceipt {
+    pub fn new(exporter_kind: SiemExporterKind, batch_size: usize) -> Self {
+        Self {
+            exporter_kind,
+            batch_size,
+        }
+    }
+
+    pub fn exporter_kind(self) -> SiemExporterKind {
+        self.exporter_kind
+    }
+
+    pub fn batch_size(self) -> usize {
+        self.batch_size
+    }
+}
+
 /// SIEM バックエンドのエラー型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SiemSinkError {
@@ -43,7 +88,25 @@ impl std::error::Error for SiemSinkError {}
 /// ことが構造的に不可能。
 #[allow(async_fn_in_trait)]
 pub trait SiemSink: Send + Sync + 'static {
-    async fn send_event(&self, event: &SiemEvent) -> Result<(), SiemSinkError>;
+    fn exporter_kind(&self) -> SiemExporterKind;
+
+    async fn send_batch(&self, batch: &[SiemEvent]) -> Result<ForwardReceipt, SiemSinkError>;
+
+    async fn send_event(&self, event: &SiemEvent) -> Result<(), SiemSinkError> {
+        self.send_batch(std::slice::from_ref(event))
+            .await
+            .map(|_| ())
+    }
+}
+
+pub(crate) fn validate_batch_size(batch_size: usize) -> Result<(), SiemSinkError> {
+    if batch_size <= SIEM_MAX_BATCH_SIZE {
+        return Ok(());
+    }
+
+    Err(SiemSinkError::InvalidResponse {
+        reason: "siem_batch_size_exceeded",
+    })
 }
 
 /// runtime で選択される SIEM exporter を 1 つの enum に閉じ込め、
@@ -59,20 +122,24 @@ pub enum AnySiemSink {
 impl AnySiemSink {
     /// runtime での経路名（log / audit metadata に使用）。
     pub fn kind_name(&self) -> &'static str {
-        match self {
-            Self::InMemory(_) => "in_memory",
-            Self::Otlp(_) => "otlp",
-            Self::SplunkHec(_) => "splunk_hec",
-        }
+        self.exporter_kind().as_str()
     }
 }
 
 impl SiemSink for AnySiemSink {
-    async fn send_event(&self, event: &SiemEvent) -> Result<(), SiemSinkError> {
+    fn exporter_kind(&self) -> SiemExporterKind {
         match self {
-            Self::InMemory(sink) => sink.send_event(event).await,
-            Self::Otlp(sink) => sink.send_event(event).await,
-            Self::SplunkHec(sink) => sink.send_event(event).await,
+            Self::InMemory(sink) => sink.exporter_kind(),
+            Self::Otlp(sink) => sink.exporter_kind(),
+            Self::SplunkHec(sink) => sink.exporter_kind(),
+        }
+    }
+
+    async fn send_batch(&self, batch: &[SiemEvent]) -> Result<ForwardReceipt, SiemSinkError> {
+        match self {
+            Self::InMemory(sink) => sink.send_batch(batch).await,
+            Self::Otlp(sink) => sink.send_batch(batch).await,
+            Self::SplunkHec(sink) => sink.send_batch(batch).await,
         }
     }
 }

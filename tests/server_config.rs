@@ -13,7 +13,8 @@ use mipsorcu::server::config::{
     parse_integrity_check_startup_delay, parse_jwks_refresh_interval,
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
-    parse_scheduler_enabled, parse_scheduler_startup_delay, scheduler_startup_delay_value,
+    parse_scheduler_enabled, parse_scheduler_startup_delay, parse_siem_buffer_max_bytes,
+    scheduler_startup_delay_value,
 };
 use mipsorcu::{
     AliasEncryptionKey, AliasFingerprintKey, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
@@ -121,6 +122,8 @@ fn load_config_from_sources_uses_dotenv_for_missing_process_vars() {
 
     assert_eq!(config.listen_addr, "127.0.0.1:3000".parse().unwrap());
     assert_eq!(config.supabase_url, "https://from-dotenv.supabase.co");
+    assert_eq!(config.siem_resend_interval, Duration::from_secs(300));
+    assert_eq!(config.siem_buffer_max_bytes, 100 * 1024 * 1024);
 }
 
 #[test]
@@ -348,6 +351,42 @@ fn audit_resend_interval_rejects_zero_empty_and_non_numeric_values() {
     ));
     assert!(matches!(
         parse_audit_resend_interval(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn siem_buffer_max_bytes_defaults_to_task13_limit() {
+    let max_bytes =
+        parse_siem_buffer_max_bytes(None).expect("default SIEM buffer limit should be valid");
+
+    assert_eq!(max_bytes, 100 * 1024 * 1024);
+}
+
+#[test]
+fn siem_buffer_max_bytes_accepts_positive_values() {
+    let max_bytes =
+        parse_siem_buffer_max_bytes(Some("4096".to_owned())).expect("value should parse");
+
+    assert_eq!(max_bytes, 4096);
+}
+
+#[test]
+fn siem_buffer_max_bytes_rejects_zero_empty_non_numeric_and_oversized_values() {
+    assert!(matches!(
+        parse_siem_buffer_max_bytes(Some("0".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_siem_buffer_max_bytes(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_siem_buffer_max_bytes(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_siem_buffer_max_bytes(Some((1024_u64 * 1024 * 1024 + 1).to_string())),
         Err(ConfigError::InvalidValue { .. })
     ));
 }
@@ -948,6 +987,7 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         http_rate_limit_window: Duration::from_secs(10),
         audit_fallback_path: PathBuf::from("/tmp/mipsorcu-audit.jsonl"),
         siem_buffer_path: PathBuf::from("/tmp/mipsorcu-siem.jsonl"),
+        siem_buffer_max_bytes: 4096,
         siem_exporter: mipsorcu::server::config::SiemExporterConfig::Disabled,
         incident_notifier: mipsorcu::server::config::IncidentNotifierConfig::Disabled,
         audit_resend_interval: Duration::from_secs(60),
@@ -980,6 +1020,8 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("audit_fallback_alert_threshold_bytes"));
     assert!(output.contains("4096"));
     assert!(output.contains("siem_buffer_path"));
+    assert!(output.contains("siem_buffer_max_bytes"));
+    assert!(output.contains("4096"));
     assert!(output.contains("siem_resend_interval_seconds"));
     assert!(output.contains("61"));
     assert!(output.contains("siem_long_failure_threshold_seconds"));
