@@ -8,7 +8,8 @@ use tracing_subscriber::{EnvFilter, fmt};
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
 use crate::auth::{JwksCache, JwtVerifier, JwtVerifierConfig, fetch_jwks};
 use crate::incident::{
-    AnyNotificationSink, DummyNotificationSink, IncidentRecorder, WebhookNotificationSink,
+    AnyNotificationSink, DummyNotificationSink, IncidentDetector, IncidentDispatcher,
+    IncidentRecorder, WebhookNotificationSink,
 };
 use crate::server::ledger_appender::LedgerAppender;
 use crate::server::siem_forwarding::SiemForwardingService;
@@ -263,8 +264,16 @@ async fn build_app_state(
     let (audit_recorder, fallback_store) = build_audit_recorder(&supabase_client, &config);
     let app_fallback_store = fallback_store.clone();
     let ledger_appender = build_ledger_appender(&supabase_client, &config).await;
-    let incident_recorder =
-        build_incident_recorder(&supabase_client, &ledger_appender, notification_sink);
+    let incident_recorder = build_incident_recorder(
+        &supabase_client,
+        &ledger_appender,
+        notification_sink.clone(),
+    );
+    let incident_dispatcher = Arc::new(IncidentDispatcher::new(
+        Arc::new(notification_sink),
+        audit_recorder.clone(),
+    ));
+    let incident_detector = IncidentDetector::new();
     let siem_forwarding =
         build_siem_forwarding(siem_sink, &config, &audit_recorder, &readiness_state);
 
@@ -303,6 +312,8 @@ async fn build_app_state(
         audit_recorder,
         ledger_appender,
         incident_recorder,
+        incident_dispatcher,
+        incident_detector,
         siem_forwarding,
         audit_fallback_store: app_fallback_store,
         readiness_state,

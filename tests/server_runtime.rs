@@ -546,11 +546,18 @@ fn test_app_state(
         supabase_client.clone(),
         ledger_signing_key,
     ));
+    let notification_sink =
+        mipsorcu::incident::AnyNotificationSink::Dummy(DummyNotificationSink::new());
     let incident_recorder = Arc::new(IncidentRecorder::new(
         supabase_client.clone(),
         ledger_appender.clone(),
-        mipsorcu::incident::AnyNotificationSink::Dummy(DummyNotificationSink::new()),
+        notification_sink.clone(),
     ));
+    let incident_dispatcher = Arc::new(mipsorcu::incident::IncidentDispatcher::new(
+        Arc::new(notification_sink),
+        audit_recorder.clone(),
+    ));
+    let incident_detector = mipsorcu::incident::IncidentDetector::new();
     let readiness_state = ReadinessState::new();
     let siem_forwarding = Arc::new(SiemForwardingService::new(
         SiemForwarder::new(
@@ -575,6 +582,8 @@ fn test_app_state(
         audit_recorder,
         ledger_appender,
         incident_recorder,
+        incident_dispatcher,
+        incident_detector,
         siem_forwarding,
         scheduler_status: mipsorcu::scheduler::SchedulerStatusState::default(),
         audit_fallback_store,

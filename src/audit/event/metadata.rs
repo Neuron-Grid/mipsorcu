@@ -11,7 +11,8 @@ pub use validate::INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST;
 pub use builders::{
     ArchiveExportMetadata, AuditReportGenerateMetadata, AuditUiReadMetadata, AuthFailureMetadata,
     DecryptMetadata, DigestTimestampingMetadata, EncryptCreateMetadata, EncryptRotateMetadata,
-    IncidentDetectedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
+    IncidentDetectedMetadata, IncidentNotificationFailedMetadata, IncidentNotificationSentMetadata,
+    IncidentNotificationSuppressedMetadata, IntegrityCheckMetadata, KeyRotationCompleteMetadata,
     KeyRotationEnvelopeFailedMetadata, KeyRotationEnvelopeMigratedMetadata,
     KeyRotationReencryptMetadata, KeyRotationStartMetadata, MonthlyDigestGenerateMetadata,
     MonthlyDigestVerifyMetadata, RestoreTestMetadata, SchedulerJobMetadata,

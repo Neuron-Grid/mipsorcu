@@ -279,6 +279,23 @@ async fn record_auth_failure(state: &AppState, request_id: &RequestId, error_cod
             "auth failure audit recording failed"
         );
     }
+
+    match state.incident_detector.record_auth_failure(error_code) {
+        Ok(Some(notification)) => {
+            let dispatcher = state.incident_dispatcher.clone();
+            tokio::spawn(async move {
+                let _ = dispatcher.dispatch(notification).await;
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                error = %error,
+                "auth failure incident detection failed"
+            );
+        }
+    }
 }
 
 fn parse_bearer_token(parts: &Parts) -> Result<RawJwt, AuthFailure> {

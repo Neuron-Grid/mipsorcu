@@ -54,6 +54,12 @@ pub enum AuditAction {
     SchedulerJobSkipped,
     /// インシデント検知（failure-only の監査）。
     IncidentDetected,
+    /// インシデント通知が外部 sink へ送信された。
+    IncidentNotificationSent,
+    /// インシデント通知の外部 sink 送信が失敗した。
+    IncidentNotificationFailed,
+    /// インシデント通知が rate limit window により抑制された。
+    IncidentNotificationSuppressed,
     /// 暗号化済み secret alias の作成。
     SecretAliasCreate,
     /// 暗号化済み secret alias の更新。
@@ -98,6 +104,9 @@ impl AuditAction {
             "scheduler_job_failed" => Ok(Self::SchedulerJobFailed),
             "scheduler_job_skipped" => Ok(Self::SchedulerJobSkipped),
             "incident_detected" => Ok(Self::IncidentDetected),
+            "incident_notification_sent" => Ok(Self::IncidentNotificationSent),
+            "incident_notification_failed" => Ok(Self::IncidentNotificationFailed),
+            "incident_notification_suppressed" => Ok(Self::IncidentNotificationSuppressed),
             "secret_alias_create" => Ok(Self::SecretAliasCreate),
             "secret_alias_update" => Ok(Self::SecretAliasUpdate),
             "secret_alias_delete" => Ok(Self::SecretAliasDelete),
@@ -141,6 +150,9 @@ impl AuditAction {
             Self::SchedulerJobFailed => "scheduler_job_failed",
             Self::SchedulerJobSkipped => "scheduler_job_skipped",
             Self::IncidentDetected => "incident_detected",
+            Self::IncidentNotificationSent => "incident_notification_sent",
+            Self::IncidentNotificationFailed => "incident_notification_failed",
+            Self::IncidentNotificationSuppressed => "incident_notification_suppressed",
             Self::SecretAliasCreate => "secret_alias_create",
             Self::SecretAliasUpdate => "secret_alias_update",
             Self::SecretAliasDelete => "secret_alias_delete",
@@ -162,6 +174,7 @@ impl AuditAction {
                 | Self::SiemForwardFailure
                 | Self::SiemEventFailed
                 | Self::IncidentDetected
+                | Self::IncidentNotificationFailed
                 | Self::KeyRotationEnvelopeFailed
                 | Self::SchedulerJobFailed
         )
@@ -175,6 +188,8 @@ impl AuditAction {
                 | Self::SchedulerJobStarted
                 | Self::SchedulerJobCompleted
                 | Self::SchedulerJobSkipped
+                | Self::IncidentNotificationSent
+                | Self::IncidentNotificationSuppressed
         )
     }
 }

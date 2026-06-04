@@ -27,7 +27,8 @@ pub use key_rotation::{
     KeyRotationEnvelopeMigratedMetadata, KeyRotationReencryptMetadata, KeyRotationStartMetadata,
 };
 pub use monitoring::{
-    IncidentDetectedMetadata, SiemBufferFlushedMetadata, SiemEventFailedMetadata,
+    IncidentDetectedMetadata, IncidentNotificationFailedMetadata, IncidentNotificationSentMetadata,
+    IncidentNotificationSuppressedMetadata, SiemBufferFlushedMetadata, SiemEventFailedMetadata,
     SiemEventForwardedMetadata, SiemForwardFailureMetadata,
 };
 pub use report::{AuditReportGenerateMetadata, AuditUiReadMetadata};

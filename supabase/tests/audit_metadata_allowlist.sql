@@ -2528,6 +2528,47 @@ values
         ]
     ),
     (
+        'incident_notification_sent success',
+        'incident_notification_sent',
+        'success',
+        jsonb_build_object(
+            'incident_id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            'category', 'scheduler_failure',
+            'notifier_kind', 'webhook',
+            'duration_ms', 25,
+            'source_event_at', '2026-06-01T02:00:00Z'
+        ),
+        array['incident_id', 'category', 'notifier_kind', 'duration_ms', 'source_event_at']
+    ),
+    (
+        'incident_notification_failed failure',
+        'incident_notification_failed',
+        'failure',
+        jsonb_build_object(
+            'incident_id', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            'category', 'ledger_anomaly',
+            'notifier_kind', 'webhook',
+            'error_code', 'incident_webhook_transport',
+            'retry_count', 3,
+            'source_event_at', '2026-06-01T02:00:01Z'
+        ),
+        array['incident_id', 'category', 'notifier_kind', 'error_code', 'retry_count', 'source_event_at']
+    ),
+    (
+        'incident_notification_suppressed success',
+        'incident_notification_suppressed',
+        'success',
+        jsonb_build_object(
+            'incident_id', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+            'category', 'scheduler_failure',
+            'reason', 'rate_limited',
+            'suppressed_count', 1,
+            'window_remaining_sec', 299,
+            'source_event_at', '2026-06-01T02:00:02Z'
+        ),
+        array['incident_id', 'category', 'reason', 'suppressed_count', 'window_remaining_sec', 'source_event_at']
+    ),
+    (
         'secret_alias_create success',
         'secret_alias_create',
         'success',

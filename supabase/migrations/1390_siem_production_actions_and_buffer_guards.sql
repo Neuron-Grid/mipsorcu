@@ -224,6 +224,9 @@ alter table public.audit_events
             'scheduler_job_failed',
             'scheduler_job_skipped',
             'incident_detected',
+            'incident_notification_sent',
+            'incident_notification_failed',
+            'incident_notification_suppressed',
             'secret_alias_create',
             'secret_alias_update',
             'secret_alias_delete',
@@ -241,6 +244,18 @@ alter table public.audit_events
     drop constraint if exists audit_events_siem_buffer_flushed_success_only,
     add constraint audit_events_siem_buffer_flushed_success_only check (
         action <> 'siem_buffer_flushed' or result = 'success'
+    ),
+    drop constraint if exists audit_events_incident_notification_sent_success_only,
+    add constraint audit_events_incident_notification_sent_success_only check (
+        action <> 'incident_notification_sent' or result = 'success'
+    ),
+    drop constraint if exists audit_events_incident_notification_failed_failure_only,
+    add constraint audit_events_incident_notification_failed_failure_only check (
+        action <> 'incident_notification_failed' or result = 'failure'
+    ),
+    drop constraint if exists audit_events_incident_notification_suppressed_success_only,
+    add constraint audit_events_incident_notification_suppressed_success_only check (
+        action <> 'incident_notification_suppressed' or result = 'success'
     );
 
 comment on constraint audit_events_siem_event_forwarded_success_only on public.audit_events is
@@ -249,6 +264,12 @@ comment on constraint audit_events_siem_event_failed_failure_only on public.audi
     'siem_event_failed records final SIEM batch delivery failures only.';
 comment on constraint audit_events_siem_buffer_flushed_success_only on public.audit_events is
     'siem_buffer_flushed records successful pending-buffer flush progress only.';
+comment on constraint audit_events_incident_notification_sent_success_only on public.audit_events is
+    'incident_notification_sent records successful incident notification delivery only.';
+comment on constraint audit_events_incident_notification_failed_failure_only on public.audit_events is
+    'incident_notification_failed records final incident notification delivery failures only.';
+comment on constraint audit_events_incident_notification_suppressed_success_only on public.audit_events is
+    'incident_notification_suppressed records rate-limit suppression decisions only.';
 
 create or replace function public.audit_metadata_has_unknown_key_for_action(
     p_action text,
@@ -334,6 +355,12 @@ begin
             v_allowed_keys := array['job_name', 'reason', 'skipped_at', 'source_event_at'];
         when 'incident_detected' then
             v_allowed_keys := array['incident_type', 'severity', 'detection_source', 'dedupe_key', 'notification_sink', 'notification_result', 'error_code', 'source_event_at', 'source_event_id', 'target_sequence_no', 'target_year_month'];
+        when 'incident_notification_sent' then
+            v_allowed_keys := array['incident_id', 'category', 'notifier_kind', 'duration_ms', 'source_event_at'];
+        when 'incident_notification_failed' then
+            v_allowed_keys := array['incident_id', 'category', 'notifier_kind', 'error_code', 'retry_count', 'source_event_at'];
+        when 'incident_notification_suppressed' then
+            v_allowed_keys := array['incident_id', 'category', 'reason', 'suppressed_count', 'window_remaining_sec', 'source_event_at'];
         when 'secret_alias_create' then
             v_allowed_keys := array['alias_fingerprint', 'alias_fingerprint_key_version', 'alias_fingerprint_schema_version', 'error_code', 'source_event_at'];
         when 'secret_alias_update' then
@@ -402,6 +429,12 @@ begin
             v_required_keys := array['exporter_kind', 'error_code', 'buffered', 'batch_size'];
         when 'siem_buffer_flushed' then
             v_required_keys := array['flushed_count', 'buffer_remaining_bytes'];
+        when 'incident_notification_sent' then
+            v_required_keys := array['incident_id', 'category', 'notifier_kind', 'duration_ms'];
+        when 'incident_notification_failed' then
+            v_required_keys := array['incident_id', 'category', 'notifier_kind', 'error_code', 'retry_count'];
+        when 'incident_notification_suppressed' then
+            v_required_keys := array['incident_id', 'category', 'reason', 'suppressed_count', 'window_remaining_sec'];
         else
             return public.audit_metadata_has_missing_required_key_for_action_before_1390(
                 p_action,
@@ -444,7 +477,14 @@ begin
         return true;
     end if;
 
-    if p_action not in ('siem_event_forwarded', 'siem_event_failed', 'siem_buffer_flushed') then
+    if p_action not in (
+        'siem_event_forwarded',
+        'siem_event_failed',
+        'siem_buffer_flushed',
+        'incident_notification_sent',
+        'incident_notification_failed',
+        'incident_notification_suppressed'
+    ) then
         return public.audit_metadata_has_invalid_value_for_action_before_1390(
             p_action,
             p_result,
@@ -457,6 +497,14 @@ begin
     end if;
 
     if p_action = 'siem_event_failed' and p_result <> 'failure' then
+        return true;
+    end if;
+
+    if p_action in ('incident_notification_sent', 'incident_notification_suppressed') and p_result <> 'success' then
+        return true;
+    end if;
+
+    if p_action = 'incident_notification_failed' and p_result <> 'failure' then
         return true;
     end if;
 
@@ -503,6 +551,89 @@ begin
 
     if p_action = 'siem_buffer_flushed' then
         foreach v_key in array array['flushed_count', 'buffer_remaining_bytes']
+        loop
+            v_value := p_metadata_json -> v_key;
+            if jsonb_typeof(v_value) <> 'number'
+                or (v_value #>> '{}') !~ '^[0-9]+$'
+            then
+                return true;
+            end if;
+        end loop;
+    end if;
+
+    if p_action in (
+        'incident_notification_sent',
+        'incident_notification_failed',
+        'incident_notification_suppressed'
+    ) then
+        v_value := p_metadata_json -> 'incident_id';
+        if jsonb_typeof(v_value) <> 'string'
+            or (v_value #>> '{}') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        then
+            return true;
+        end if;
+
+        v_value := p_metadata_json -> 'category';
+        if jsonb_typeof(v_value) <> 'string'
+            or (v_value #>> '{}') not in (
+                'ledger_anomaly',
+                'scheduler_failure',
+                'archive_failure_persistent',
+                'timestamping_failure_persistent',
+                'siem_buffer_threshold',
+                'envelope_migration_failure_burst',
+                'auth_failure_burst',
+                'key_rotation_failure'
+            )
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_action in ('incident_notification_sent', 'incident_notification_failed') then
+        v_value := p_metadata_json -> 'notifier_kind';
+        if jsonb_typeof(v_value) <> 'string'
+            or (v_value #>> '{}') not in ('dummy', 'webhook')
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_action = 'incident_notification_sent' then
+        v_value := p_metadata_json -> 'duration_ms';
+        if jsonb_typeof(v_value) <> 'number'
+            or (v_value #>> '{}') !~ '^[0-9]+$'
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_action = 'incident_notification_failed' then
+        v_value := p_metadata_json -> 'error_code';
+        if jsonb_typeof(v_value) <> 'string'
+            or btrim(v_value #>> '{}') = ''
+            or length(v_value #>> '{}') > 64
+        then
+            return true;
+        end if;
+
+        v_value := p_metadata_json -> 'retry_count';
+        if jsonb_typeof(v_value) <> 'number'
+            or (v_value #>> '{}') !~ '^[0-9]+$'
+        then
+            return true;
+        end if;
+    end if;
+
+    if p_action = 'incident_notification_suppressed' then
+        v_value := p_metadata_json -> 'reason';
+        if jsonb_typeof(v_value) <> 'string'
+            or (v_value #>> '{}') <> 'rate_limited'
+        then
+            return true;
+        end if;
+
+        foreach v_key in array array['suppressed_count', 'window_remaining_sec']
         loop
             v_value := p_metadata_json -> v_key;
             if jsonb_typeof(v_value) <> 'number'
@@ -584,6 +715,9 @@ begin
         'scheduler_job_failed',
         'scheduler_job_skipped',
         'incident_detected',
+        'incident_notification_sent',
+        'incident_notification_failed',
+        'incident_notification_suppressed',
         'secret_alias_create',
         'secret_alias_update',
         'secret_alias_delete',
@@ -607,6 +741,7 @@ begin
         'siem_forward_failure',
         'siem_event_failed',
         'incident_detected',
+        'incident_notification_failed',
         'key_rotation_envelope_failed',
         'scheduler_job_failed'
     )
@@ -621,7 +756,9 @@ begin
         'scheduler_job_completed',
         'scheduler_job_skipped',
         'siem_event_forwarded',
-        'siem_buffer_flushed'
+        'siem_buffer_flushed',
+        'incident_notification_sent',
+        'incident_notification_suppressed'
     )
         and p_result <> 'success'
     then

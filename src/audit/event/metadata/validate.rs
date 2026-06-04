@@ -145,16 +145,13 @@ fn validate_numeric_metadata_values(
         "failure_count",
         "flushed_count",
         "buffer_remaining_bytes",
+        "retry_count",
+        "suppressed_count",
+        "window_remaining_sec",
     ] {
         if let Some(value) = object.get(key) {
             validate_u64_value(key, value)?;
         }
-    }
-
-    if let Some(value) = object.get("retry_count")
-        && value.as_u64() != Some(0)
-    {
-        return Err(AuditEventError::InvalidMetadataValue { key: "retry_count" });
     }
 
     for key in [
@@ -215,6 +212,14 @@ fn validate_id_metadata_values(
         AuditEventId::parse(text).map_err(|_| AuditEventError::InvalidMetadataValue {
             key: "source_event_id",
         })?;
+    }
+
+    if let Some(value) = object.get("incident_id") {
+        let text = value
+            .as_str()
+            .ok_or(AuditEventError::InvalidMetadataValue { key: "incident_id" })?;
+        crate::incident::IncidentId::parse(text)
+            .map_err(|_| AuditEventError::InvalidMetadataValue { key: "incident_id" })?;
     }
 
     if object.contains_key("source_event_id") && action != AuditAction::IncidentDetected {
@@ -320,6 +325,27 @@ fn validate_string_metadata_values(
         validate_enum_metadata_value("severity", value, &["critical", "high", "medium", "low"])?;
     }
 
+    if let Some(value) = object.get("category") {
+        validate_enum_metadata_value(
+            "category",
+            value,
+            &[
+                "ledger_anomaly",
+                "scheduler_failure",
+                "archive_failure_persistent",
+                "timestamping_failure_persistent",
+                "siem_buffer_threshold",
+                "envelope_migration_failure_burst",
+                "auth_failure_burst",
+                "key_rotation_failure",
+            ],
+        )?;
+    }
+
+    if let Some(value) = object.get("notifier_kind") {
+        validate_enum_metadata_value("notifier_kind", value, &["dummy", "webhook"])?;
+    }
+
     if let Some(value) = object.get("notification_result") {
         validate_enum_metadata_value(
             "notification_result",
@@ -354,6 +380,8 @@ fn validate_string_metadata_values(
     if let Some(value) = object.get("reason") {
         if action == AuditAction::SchedulerJobSkipped {
             validate_enum_metadata_value("reason", value, &["lock_not_acquired"])?;
+        } else if action == AuditAction::IncidentNotificationSuppressed {
+            validate_enum_metadata_value("reason", value, &["rate_limited"])?;
         } else {
             validate_exact_string("reason", value, "no_current_secret_versions")?;
         }

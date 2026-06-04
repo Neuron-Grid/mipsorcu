@@ -214,6 +214,20 @@ impl LocalSiemFallbackBuffer {
         Ok(self.max_bytes.saturating_sub(size))
     }
 
+    pub fn current_size_bytes(&self) -> Result<u64, LocalSiemBufferError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| LocalSiemBufferError::LockPoisoned)?;
+
+        match fs::metadata(&self.path) {
+            Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+            Ok(_) => Ok(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn append_record(&self, record: &LocalSiemFallbackRecord) -> Result<(), LocalSiemBufferError> {
         let _guard = self
             .operation_lock

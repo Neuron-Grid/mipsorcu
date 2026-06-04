@@ -218,6 +218,29 @@ pub(super) fn allowed_metadata_keys(
             "target_sequence_no",
             "target_year_month",
         ],
+        AuditAction::IncidentNotificationSent => &[
+            "incident_id",
+            "category",
+            "notifier_kind",
+            "duration_ms",
+            SOURCE_EVENT_AT_KEY,
+        ],
+        AuditAction::IncidentNotificationFailed => &[
+            "incident_id",
+            "category",
+            "notifier_kind",
+            "error_code",
+            "retry_count",
+            SOURCE_EVENT_AT_KEY,
+        ],
+        AuditAction::IncidentNotificationSuppressed => &[
+            "incident_id",
+            "category",
+            "reason",
+            "suppressed_count",
+            "window_remaining_sec",
+            SOURCE_EVENT_AT_KEY,
+        ],
         AuditAction::SecretAliasCreate => &[
             "alias_fingerprint",
             "alias_fingerprint_key_version",
@@ -357,6 +380,23 @@ pub(super) fn required_metadata_keys(
             "notification_sink",
             "notification_result",
             "error_code",
+        ],
+        AuditAction::IncidentNotificationSent => {
+            &["incident_id", "category", "notifier_kind", "duration_ms"]
+        }
+        AuditAction::IncidentNotificationFailed => &[
+            "incident_id",
+            "category",
+            "notifier_kind",
+            "error_code",
+            "retry_count",
+        ],
+        AuditAction::IncidentNotificationSuppressed => &[
+            "incident_id",
+            "category",
+            "reason",
+            "suppressed_count",
+            "window_remaining_sec",
         ],
         AuditAction::SecretAliasCreate => {
             if result == AuditResult::Success {

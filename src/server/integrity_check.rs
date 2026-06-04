@@ -269,11 +269,18 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         supabase_client.clone(),
         config.ledger_signing_key.clone(),
     ));
+    let notification_sink =
+        crate::incident::AnyNotificationSink::Dummy(DummyNotificationSink::new());
     let incident_recorder = Arc::new(IncidentRecorder::new(
         supabase_client.clone(),
         ledger_appender.clone(),
-        crate::incident::AnyNotificationSink::Dummy(DummyNotificationSink::new()),
+        notification_sink.clone(),
     ));
+    let incident_dispatcher = Arc::new(crate::incident::IncidentDispatcher::new(
+        Arc::new(notification_sink),
+        audit_recorder.clone(),
+    ));
+    let incident_detector = crate::incident::IncidentDetector::new();
     let readiness_state = ReadinessState::new();
     let siem_forwarder = SiemForwarder::new(
         AnySiemSink::InMemory(InMemorySiemSink::new()),
@@ -300,6 +307,8 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         audit_recorder,
         ledger_appender,
         incident_recorder,
+        incident_dispatcher,
+        incident_detector,
         siem_forwarding,
         scheduler_status,
         audit_fallback_store,

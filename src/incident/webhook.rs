@@ -11,12 +11,17 @@
 //! 経由した漏洩を構造的に防ぐ。TLS 検証は呼び出し側の `reqwest::Client` が
 //! 保持する。
 
+use std::time::Instant;
+
 use hmac::{Hmac, KeyInit, Mac};
 use sha3::Sha3_256;
 
 use crate::types::SecretString;
+use crate::types::SourceEventAt;
 
-use super::sink::{NotificationSink, NotificationSinkError};
+use super::IncidentNotification;
+use super::dto::{IncidentNotifierKind, NotificationReceipt};
+use super::sink::{IncidentError, IncidentNotifier, NotificationSink, NotificationSinkError};
 use super::types::IncidentNotificationPayload;
 
 type HmacSha3_256 = Hmac<Sha3_256>;
@@ -24,6 +29,7 @@ type HmacSha3_256 = Hmac<Sha3_256>;
 const SIGNATURE_HEADER: &str = "X-Mipsorcu-Signature";
 
 /// HMAC-SHA3-256 署名つきの webhook 通知 sink。
+#[derive(Clone)]
 pub struct WebhookNotificationSink {
     client: reqwest::Client,
     endpoint: String,
@@ -53,6 +59,44 @@ impl NotificationSink for WebhookNotificationSink {
             serde_json::to_vec(payload).map_err(|_| NotificationSinkError::BackendFailed {
                 code: "incident_webhook_serialize_failed".to_owned(),
             })?;
+        self.post_body(body).await
+    }
+}
+
+impl IncidentNotifier for WebhookNotificationSink {
+    fn notifier_kind(&self) -> IncidentNotifierKind {
+        IncidentNotifierKind::Webhook
+    }
+
+    async fn notify(
+        &self,
+        notification: &IncidentNotification,
+    ) -> Result<NotificationReceipt, IncidentError> {
+        let started_at = Instant::now();
+        let body =
+            notification
+                .canonical_json_bytes()
+                .map_err(|_| IncidentError::InvalidPayload {
+                    code: "incident_webhook_serialize_failed".to_owned(),
+                })?;
+        self.post_body(body).await.map_err(IncidentError::from)?;
+        let delivered_at = SourceEventAt::now_utc().map_err(|_| IncidentError::BackendFailed {
+            code: "incident_webhook_timestamp_failed".to_owned(),
+        })?;
+        Ok(NotificationReceipt::new(
+            IncidentNotifierKind::Webhook,
+            delivered_at,
+            started_at
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        ))
+    }
+}
+
+impl WebhookNotificationSink {
+    async fn post_body(&self, body: Vec<u8>) -> Result<(), NotificationSinkError> {
         let signature_hex = compute_signature_hex(self.secret.as_bytes(), &body)?;
         let response = self
             .client
@@ -91,6 +135,7 @@ fn compute_signature_hex(secret: &[u8], body: &[u8]) -> Result<String, Notificat
 /// runtime で選択される通知 sink を 1 つの enum に閉じ込め、
 /// `IncidentRecorder<S: NotificationSink>` のジェネリック境界を維持したまま
 /// 動的選択を可能にする dispatcher。
+#[derive(Clone)]
 pub enum AnyNotificationSink {
     Dummy(super::dummy::DummyNotificationSink),
     Webhook(WebhookNotificationSink),
@@ -118,11 +163,32 @@ impl NotificationSink for AnyNotificationSink {
         payload: &IncidentNotificationPayload,
     ) -> Result<(), NotificationSinkError> {
         match self {
-            Self::Dummy(sink) => sink.notify(payload).await,
-            Self::Webhook(sink) => sink.notify(payload).await,
+            Self::Dummy(sink) => NotificationSink::notify(sink, payload).await,
+            Self::Webhook(sink) => NotificationSink::notify(sink, payload).await,
         }
     }
 }
+
+impl IncidentNotifier for AnyNotificationSink {
+    fn notifier_kind(&self) -> IncidentNotifierKind {
+        match self {
+            Self::Dummy(sink) => sink.notifier_kind(),
+            Self::Webhook(sink) => sink.notifier_kind(),
+        }
+    }
+
+    async fn notify(
+        &self,
+        notification: &IncidentNotification,
+    ) -> Result<NotificationReceipt, IncidentError> {
+        match self {
+            Self::Dummy(sink) => IncidentNotifier::notify(sink, notification).await,
+            Self::Webhook(sink) => IncidentNotifier::notify(sink, notification).await,
+        }
+    }
+}
+
+pub type WebhookIncidentNotifier = WebhookNotificationSink;
 
 #[cfg(test)]
 #[path = "../../tests/unit/incident/webhook/tests.rs"]

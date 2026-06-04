@@ -48,6 +48,7 @@ pub struct SchedulerJobStatus {
     pub last_failed_at: Option<String>,
     pub last_skipped_at: Option<String>,
     pub failure_streak: u32,
+    pub failure_streak_started_at: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -158,6 +159,7 @@ impl SchedulerJobStatus {
             last_failed_at: None,
             last_skipped_at: None,
             failure_streak: 0,
+            failure_streak_started_at: None,
         }
     }
 
@@ -173,11 +175,15 @@ impl SchedulerJobStatus {
                 self.last_status = Some("completed");
                 self.last_completed_at = Some(timestamp_string(completed_at));
                 self.failure_streak = 0;
+                self.failure_streak_started_at = None;
             }
             SchedulerJobTransition::Failed(failed_at) => {
                 self.running = false;
                 self.last_status = Some("failed");
                 self.last_failed_at = Some(timestamp_string(failed_at));
+                if self.failure_streak == 0 {
+                    self.failure_streak_started_at = Some(timestamp_string(failed_at));
+                }
                 self.failure_streak = self.failure_streak.saturating_add(1);
             }
             SchedulerJobTransition::Skipped(skipped_at) => {

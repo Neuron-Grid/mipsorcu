@@ -401,7 +401,7 @@ fn rust_allowlist_rejects_scheduler_lifecycle_invalid_values() {
         "started_at": "2026-04-08T12:00:01Z",
         "failed_at": "2026-04-08T12:00:02Z",
         "error_code": "scheduler_job_failed",
-        "retry_count": 1,
+        "retry_count": "one",
         "source_event_at": "2026-04-08T12:00:02Z"
     }))
     .unwrap();
@@ -829,6 +829,9 @@ fn all_actions() -> Vec<AuditAction> {
         AuditAction::SchedulerJobFailed,
         AuditAction::SchedulerJobSkipped,
         AuditAction::IncidentDetected,
+        AuditAction::IncidentNotificationSent,
+        AuditAction::IncidentNotificationFailed,
+        AuditAction::IncidentNotificationSuppressed,
         AuditAction::SecretAliasCreate,
         AuditAction::SecretAliasUpdate,
         AuditAction::SecretAliasDelete,
@@ -1059,6 +1062,35 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
                 "target_sequence_no",
                 "target_year_month",
                 "severity",
+            ]
+        }
+        AuditAction::IncidentNotificationSent => {
+            vec![
+                "category",
+                "duration_ms",
+                "incident_id",
+                "notifier_kind",
+                "source_event_at",
+            ]
+        }
+        AuditAction::IncidentNotificationFailed => {
+            vec![
+                "category",
+                "error_code",
+                "incident_id",
+                "notifier_kind",
+                "retry_count",
+                "source_event_at",
+            ]
+        }
+        AuditAction::IncidentNotificationSuppressed => {
+            vec![
+                "category",
+                "incident_id",
+                "reason",
+                "source_event_at",
+                "suppressed_count",
+                "window_remaining_sec",
             ]
         }
         AuditAction::SecretAliasCreate => {

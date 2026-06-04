@@ -1,5 +1,6 @@
 use serde_json::{Map, Value};
 
+use crate::incident::{IncidentCategory, IncidentId, IncidentNotifierKind};
 use crate::ledger::MonthlyDigestPeriod;
 use crate::types::SourceEventAt;
 
@@ -199,6 +200,171 @@ impl SiemBufferFlushedMetadata {
         );
         AuditMetadata::new(Value::Object(object))
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 14 incident notification operational audit metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct IncidentNotificationSentMetadata {
+    incident_id: IncidentId,
+    category: IncidentCategory,
+    notifier_kind: IncidentNotifierKind,
+    duration_ms: u64,
+    source_event_at: SourceEventAt,
+}
+
+impl IncidentNotificationSentMetadata {
+    pub fn new(
+        incident_id: IncidentId,
+        category: IncidentCategory,
+        notifier_kind: IncidentNotifierKind,
+        duration_ms: u64,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            incident_id,
+            category,
+            notifier_kind,
+            duration_ms,
+            source_event_at,
+        }
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = incident_notification_base_object(
+            &self.incident_id,
+            self.category,
+            self.source_event_at,
+        );
+        object.insert(
+            "notifier_kind".to_owned(),
+            Value::String(self.notifier_kind.as_str().to_owned()),
+        );
+        object.insert(
+            "duration_ms".to_owned(),
+            Value::Number(self.duration_ms.into()),
+        );
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IncidentNotificationFailedMetadata {
+    incident_id: IncidentId,
+    category: IncidentCategory,
+    notifier_kind: IncidentNotifierKind,
+    error_code: String,
+    retry_count: u64,
+    source_event_at: SourceEventAt,
+}
+
+impl IncidentNotificationFailedMetadata {
+    pub fn new(
+        incident_id: IncidentId,
+        category: IncidentCategory,
+        notifier_kind: IncidentNotifierKind,
+        error_code: impl Into<String>,
+        retry_count: u64,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            incident_id,
+            category,
+            notifier_kind,
+            error_code: error_code.into(),
+            retry_count,
+            source_event_at,
+        }
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = incident_notification_base_object(
+            &self.incident_id,
+            self.category,
+            self.source_event_at,
+        );
+        object.insert(
+            "notifier_kind".to_owned(),
+            Value::String(self.notifier_kind.as_str().to_owned()),
+        );
+        object.insert("error_code".to_owned(), Value::String(self.error_code));
+        object.insert(
+            "retry_count".to_owned(),
+            Value::Number(self.retry_count.into()),
+        );
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IncidentNotificationSuppressedMetadata {
+    incident_id: IncidentId,
+    category: IncidentCategory,
+    suppressed_count: u64,
+    window_remaining_sec: u64,
+    source_event_at: SourceEventAt,
+}
+
+impl IncidentNotificationSuppressedMetadata {
+    pub fn new(
+        incident_id: IncidentId,
+        category: IncidentCategory,
+        suppressed_count: u64,
+        window_remaining_sec: u64,
+        source_event_at: SourceEventAt,
+    ) -> Self {
+        Self {
+            incident_id,
+            category,
+            suppressed_count,
+            window_remaining_sec,
+            source_event_at,
+        }
+    }
+
+    pub fn build(self) -> Result<AuditMetadata, AuditEventError> {
+        let mut object = incident_notification_base_object(
+            &self.incident_id,
+            self.category,
+            self.source_event_at,
+        );
+        object.insert(
+            "reason".to_owned(),
+            Value::String("rate_limited".to_owned()),
+        );
+        object.insert(
+            "suppressed_count".to_owned(),
+            Value::Number(self.suppressed_count.into()),
+        );
+        object.insert(
+            "window_remaining_sec".to_owned(),
+            Value::Number(self.window_remaining_sec.into()),
+        );
+        AuditMetadata::new(Value::Object(object))
+    }
+}
+
+fn incident_notification_base_object(
+    incident_id: &IncidentId,
+    category: IncidentCategory,
+    source_event_at: SourceEventAt,
+) -> Map<String, Value> {
+    let mut object = Map::new();
+    object.insert(
+        "incident_id".to_owned(),
+        Value::String(incident_id.as_str().to_owned()),
+    );
+    object.insert(
+        "category".to_owned(),
+        Value::String(category.as_str().to_owned()),
+    );
+    object.insert(
+        SOURCE_EVENT_AT_KEY.to_owned(),
+        Value::String(source_event_at.as_str().to_owned()),
+    );
+    object
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

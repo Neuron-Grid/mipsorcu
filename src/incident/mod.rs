@@ -1,9 +1,18 @@
+mod detector;
+mod dispatcher;
+mod dto;
 mod dummy;
 mod recorder;
 mod sink;
 mod types;
 mod webhook;
 
+pub use detector::{IncidentDetector, IncidentDetectorError};
+pub use dispatcher::{IncidentDispatchOutcome, IncidentDispatcher, IncidentRetryPolicy};
+pub use dto::{
+    ComponentName, IncidentCategory, IncidentDtoError, IncidentId, IncidentNotification,
+    IncidentNotifierKind, IncidentSummary, NotificationReceipt, TriageUrl,
+};
 pub use dummy::{DummyNotificationSink, FailingNotificationSink};
 pub use recorder::{
     IncidentRecordError, IncidentRecordResult, IncidentRecorder, archive_incident_input,
@@ -14,9 +23,9 @@ pub use recorder::{
     record_audit_ui_forbidden_operation, record_ledger_secret_leak_suspected,
     record_non_auditor_ledger_read, scheduler_incident_type, severity_for_incident,
 };
-pub use sink::{NotificationSink, NotificationSinkError};
+pub use sink::{IncidentError, IncidentNotifier, NotificationSink, NotificationSinkError};
 pub use types::{
     IncidentNotificationPayload, IncidentRecordInput, IncidentSeverity, IncidentType,
     NotificationResult,
 };
-pub use webhook::{AnyNotificationSink, WebhookNotificationSink};
+pub use webhook::{AnyNotificationSink, WebhookIncidentNotifier, WebhookNotificationSink};
