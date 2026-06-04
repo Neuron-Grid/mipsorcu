@@ -282,9 +282,15 @@ async fn record_auth_failure(state: &AppState, request_id: &RequestId, error_cod
 
     match state.incident_detector.record_auth_failure(error_code) {
         Ok(Some(notification)) => {
-            let dispatcher = state.incident_dispatcher.clone();
+            let incident_state = state.clone();
+            let detected = crate::server::incident::DetectedIncident::from_notification(
+                notification,
+                "auth_middleware",
+                error_code,
+            );
             tokio::spawn(async move {
-                let _ = dispatcher.dispatch(notification).await;
+                crate::server::incident::record_and_dispatch_incident(&incident_state, detected)
+                    .await;
             });
         }
         Ok(None) => {}

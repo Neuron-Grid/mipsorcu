@@ -25,7 +25,9 @@ pub use http::{
     parse_http_rate_limit_requests, parse_http_rate_limit_window, parse_jwks_refresh_interval,
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
 };
-pub use incident::{IncidentNotifierConfig, parse_incident_notifier_config};
+pub use incident::{
+    IncidentNotifierConfig, parse_incident_notifier_config, parse_incident_webhook_request_timeout,
+};
 pub use load::{load_config, load_config_from_sources};
 pub use model::AppConfig;
 pub use operational_checks::{

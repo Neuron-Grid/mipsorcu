@@ -16,10 +16,7 @@ use crate::server::ledger_appender::{
 use crate::server::supabase::{SupabaseClient, SupabaseRpcError};
 use crate::types::SourceEventAt;
 
-use super::{
-    IncidentNotificationPayload, IncidentRecordInput, IncidentSeverity, IncidentType,
-    NotificationResult, NotificationSink,
-};
+use super::{IncidentRecordInput, IncidentSeverity, IncidentType, NotificationResult};
 
 const MAX_RECORD_RETRIES: u8 = 2;
 
@@ -65,23 +62,27 @@ pub struct IncidentRecordResult {
     pub suppressed: bool,
 }
 
-pub struct IncidentRecorder<S> {
+pub struct IncidentRecorder {
     supabase_client: Arc<SupabaseClient>,
     ledger_appender: Arc<LedgerAppender>,
-    notification_sink: S,
+    notification_sink_name: String,
 }
 
-impl<S: NotificationSink> IncidentRecorder<S> {
+impl IncidentRecorder {
     pub fn new(
         supabase_client: Arc<SupabaseClient>,
         ledger_appender: Arc<LedgerAppender>,
-        notification_sink: S,
+        notification_sink_name: impl Into<String>,
     ) -> Self {
         Self {
             supabase_client,
             ledger_appender,
-            notification_sink,
+            notification_sink_name: notification_sink_name.into(),
         }
+    }
+
+    pub fn notification_sink_name(&self) -> &str {
+        &self.notification_sink_name
     }
 
     pub async fn record(
@@ -104,7 +105,7 @@ impl<S: NotificationSink> IncidentRecorder<S> {
             });
         }
 
-        let notification_result = deliver_notification(&self.notification_sink, &input).await;
+        let notification_result = NotificationResult::NotConfigured;
 
         self.record_after_notification(input, source_event_at, notification_result)
             .await
@@ -123,7 +124,7 @@ impl<S: NotificationSink> IncidentRecorder<S> {
         let metadata = build_incident_metadata(
             &input,
             notification_result,
-            self.notification_sink.sink_name(),
+            &self.notification_sink_name,
             &source_event_at,
         )?;
         let event =
@@ -135,7 +136,7 @@ impl<S: NotificationSink> IncidentRecorder<S> {
             source_event_at,
             request_id,
             notification_result,
-            self.notification_sink.sink_name(),
+            &self.notification_sink_name,
         )?;
 
         self.record_incident_with_retry(&input, &event, &draft, notification_result)
@@ -239,11 +240,12 @@ fn build_incident_ledger_draft(
     .map_err(IncidentRecordError::InvalidLedgerDraft)
 }
 
-async fn deliver_notification<S: NotificationSink>(
+#[cfg(test)]
+async fn deliver_notification<S: super::NotificationSink>(
     notification_sink: &S,
     input: &IncidentRecordInput,
 ) -> NotificationResult {
-    let notification_payload = IncidentNotificationPayload::from_input(input);
+    let notification_payload = super::IncidentNotificationPayload::from_input(input);
     match notification_sink.notify(&notification_payload).await {
         Ok(()) => NotificationResult::Sent,
         Err(error) => {
@@ -532,8 +534,8 @@ pub fn ledger_payload_contains_forbidden_key(value: &Value) -> bool {
     }
 }
 
-pub async fn record_non_auditor_ledger_read<S: NotificationSink>(
-    recorder: &IncidentRecorder<S>,
+pub async fn record_non_auditor_ledger_read(
+    recorder: &IncidentRecorder,
     detection_source: &str,
 ) -> Result<IncidentRecordResult, IncidentRecordError> {
     recorder
@@ -541,8 +543,8 @@ pub async fn record_non_auditor_ledger_read<S: NotificationSink>(
         .await
 }
 
-pub async fn record_audit_ui_forbidden_operation<S: NotificationSink>(
-    recorder: &IncidentRecorder<S>,
+pub async fn record_audit_ui_forbidden_operation(
+    recorder: &IncidentRecorder,
     detection_source: &str,
     operation: &str,
 ) -> Result<IncidentRecordResult, IncidentRecordError> {
@@ -554,8 +556,8 @@ pub async fn record_audit_ui_forbidden_operation<S: NotificationSink>(
         .await
 }
 
-pub async fn record_ledger_secret_leak_suspected<S: NotificationSink>(
-    recorder: &IncidentRecorder<S>,
+pub async fn record_ledger_secret_leak_suspected(
+    recorder: &IncidentRecorder,
     detection_source: &str,
     sequence_no: Option<u64>,
 ) -> Result<IncidentRecordResult, IncidentRecordError> {
@@ -601,10 +603,18 @@ pub fn severity_for_incident(incident_type: IncidentType) -> IncidentSeverity {
         | IncidentType::DigestTimestampingMismatch
         | IncidentType::ArchiveExportMismatch
         | IncidentType::SequenceGap
-        | IncidentType::SchedulerFailure => IncidentSeverity::High,
+        | IncidentType::SchedulerFailure
+        | IncidentType::ArchiveFailurePersistent
+        | IncidentType::TimestampingFailurePersistent => IncidentSeverity::High,
+        IncidentType::LedgerAnomaly | IncidentType::KeyRotationFailure => {
+            IncidentSeverity::Critical
+        }
         IncidentType::NonAuditorLedgerRead
         | IncidentType::SiemLongFailure
-        | IncidentType::AuditUiForbiddenOperation => IncidentSeverity::Medium,
+        | IncidentType::AuditUiForbiddenOperation
+        | IncidentType::SiemBufferThreshold
+        | IncidentType::EnvelopeMigrationFailureBurst
+        | IncidentType::AuthFailureBurst => IncidentSeverity::Medium,
     }
 }
 

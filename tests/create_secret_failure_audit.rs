@@ -316,7 +316,7 @@ fn test_app_state_with_fallback(
     let incident_recorder = Arc::new(IncidentRecorder::new(
         supabase_client.clone(),
         ledger_appender.clone(),
-        notification_sink.clone(),
+        "dummy",
     ));
     let incident_dispatcher = Arc::new(mipsorcu::incident::IncidentDispatcher::new(
         Arc::new(notification_sink),
@@ -347,7 +347,7 @@ fn test_app_state_with_fallback(
         audit_recorder,
         ledger_appender,
         incident_recorder,
-        incident_dispatcher,
+        incident_dispatcher: Some(incident_dispatcher),
         incident_detector,
         siem_forwarding,
         scheduler_status: mipsorcu::scheduler::SchedulerStatusState::default(),

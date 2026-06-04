@@ -1176,6 +1176,31 @@ select is(
 
 select is(
     test_helpers.try_append_audit_event(
+        '10000000-0000-4000-8000-000000000247',
+        '00000000-0000-4000-8000-000000000247',
+        null,
+        null,
+        'incident_detected',
+        null,
+        'failure',
+        null,
+        jsonb_build_object(
+            'incident_type', 'auth_failure_burst',
+            'severity', 'medium',
+            'detection_source', 'auth_middleware',
+            'dedupe_key', 'auth_failure_burst:auth_middleware:global',
+            'notification_sink', 'webhook',
+            'notification_result', 'not_configured',
+            'error_code', 'jwt_verification_failed',
+            'source_event_at', '2026-06-01T03:00:00Z'
+        )
+    ),
+    'ok',
+    'incident_detected accepts Task 14 notification incident types'
+);
+
+select is(
+    test_helpers.try_append_audit_event(
         '10000000-0000-4000-8000-000000000148',
         '00000000-0000-4000-8000-000000000148',
         null,

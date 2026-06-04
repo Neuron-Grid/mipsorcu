@@ -64,6 +64,14 @@ fn siem_buffer_threshold_is_80_mib() {
             .siem_buffer_threshold(80 * 1024 * 1024)
             .unwrap()
             .unwrap()
+            .severity,
+        IncidentSeverity::Medium
+    );
+    assert_eq!(
+        detector
+            .siem_buffer_threshold(80 * 1024 * 1024)
+            .unwrap()
+            .unwrap()
             .category,
         IncidentCategory::SiemBufferThreshold
     );
@@ -80,16 +88,17 @@ fn envelope_and_auth_failure_bursts_are_process_local_global_windows() {
                 .is_none()
         );
     }
+    let envelope_notification = detector
+        .record_envelope_migration_failure("aad_context_mismatch")
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        detector
-            .record_envelope_migration_failure("aad_context_mismatch")
-            .unwrap()
-            .unwrap()
-            .category,
+        envelope_notification.category,
         IncidentCategory::EnvelopeMigrationFailureBurst
     );
+    assert_eq!(envelope_notification.severity, IncidentSeverity::Medium);
 
-    for _ in 0..9 {
+    for _ in 0..49 {
         assert!(
             detector
                 .record_auth_failure("jwt_verification_failed")
@@ -106,4 +115,14 @@ fn envelope_and_auth_failure_bursts_are_process_local_global_windows() {
         IncidentCategory::AuthFailureBurst
     );
     assert_eq!(auth_notification.severity, IncidentSeverity::Medium);
+}
+
+#[test]
+fn key_rotation_failure_is_critical() {
+    let detector = IncidentDetector::new();
+    let notification = detector
+        .key_rotation_failure("key_rotation_reencrypt_failed")
+        .unwrap();
+    assert_eq!(notification.category, IncidentCategory::KeyRotationFailure);
+    assert_eq!(notification.severity, IncidentSeverity::Critical);
 }

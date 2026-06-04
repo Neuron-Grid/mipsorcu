@@ -20,6 +20,13 @@ pub enum IncidentType {
     SiemLongFailure,
     AuditUiForbiddenOperation,
     SchedulerFailure,
+    LedgerAnomaly,
+    ArchiveFailurePersistent,
+    TimestampingFailurePersistent,
+    SiemBufferThreshold,
+    EnvelopeMigrationFailureBurst,
+    AuthFailureBurst,
+    KeyRotationFailure,
 }
 
 impl IncidentType {
@@ -37,6 +44,13 @@ impl IncidentType {
             Self::SiemLongFailure => "siem_long_failure",
             Self::AuditUiForbiddenOperation => "audit_ui_forbidden_operation",
             Self::SchedulerFailure => "scheduler_failure",
+            Self::LedgerAnomaly => "ledger_anomaly",
+            Self::ArchiveFailurePersistent => "archive_failure_persistent",
+            Self::TimestampingFailurePersistent => "timestamping_failure_persistent",
+            Self::SiemBufferThreshold => "siem_buffer_threshold",
+            Self::EnvelopeMigrationFailureBurst => "envelope_migration_failure_burst",
+            Self::AuthFailureBurst => "auth_failure_burst",
+            Self::KeyRotationFailure => "key_rotation_failure",
         }
     }
 }
@@ -103,6 +117,7 @@ pub struct IncidentNotificationPayload {
 }
 
 impl IncidentNotificationPayload {
+    #[cfg(test)]
     pub(crate) fn from_input(input: &IncidentRecordInput) -> Self {
         Self {
             incident_type: input.incident_type,

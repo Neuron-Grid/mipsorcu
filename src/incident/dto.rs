@@ -7,39 +7,12 @@ use crate::audit::{AuditEventError, AuditEventId};
 use crate::types::SourceEventAt;
 
 use super::IncidentSeverity;
+use super::text_guard::validate_non_secret_text;
 
 const SUMMARY_MAX_LEN: usize = 240;
 const COMPONENT_MAX_LEN: usize = 64;
 const CORRELATION_ID_MAX_LEN: usize = 128;
 const TRIAGE_URL_MAX_LEN: usize = 512;
-
-const FORBIDDEN_NOTIFICATION_TEXT: &[&str] = &[
-    "alias_decryption_key",
-    "alias_encryption_key",
-    "authorization",
-    "bearer_token",
-    "ciphertext",
-    "data_key",
-    "decrypted",
-    "encrypted_data_key",
-    "jwt",
-    "kek_value",
-    "master_key",
-    "nonce",
-    "passphrase",
-    "password",
-    "plain_text",
-    "plaintext",
-    "raw_jwt",
-    "request_body",
-    "response_body",
-    "secret_key",
-    "secret_value",
-    "service_role",
-    "signature_private_key",
-    "token",
-    "wrapped_dek",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncidentDtoError {
@@ -355,25 +328,4 @@ fn normalize_components(
     components.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     components.dedup_by(|left, right| left.as_str() == right.as_str());
     Ok(components)
-}
-
-fn validate_non_secret_text(value: &str, max_len: usize) -> Result<(), ()> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() != value.len() || value.len() > max_len {
-        return Err(());
-    }
-    if !value
-        .chars()
-        .all(|character| character.is_ascii_graphic() || character == ' ')
-    {
-        return Err(());
-    }
-    let lower = value.to_ascii_lowercase();
-    if FORBIDDEN_NOTIFICATION_TEXT
-        .iter()
-        .any(|forbidden| lower.contains(forbidden))
-    {
-        return Err(());
-    }
-    Ok(())
 }

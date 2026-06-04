@@ -133,8 +133,7 @@ fn compute_signature_hex(secret: &[u8], body: &[u8]) -> Result<String, Notificat
 }
 
 /// runtime で選択される通知 sink を 1 つの enum に閉じ込め、
-/// `IncidentRecorder<S: NotificationSink>` のジェネリック境界を維持したまま
-/// 動的選択を可能にする dispatcher。
+/// `IncidentDispatcher` で `dummy` / `webhook` の動的選択を可能にする。
 #[derive(Clone)]
 pub enum AnyNotificationSink {
     Dummy(super::dummy::DummyNotificationSink),

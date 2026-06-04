@@ -19,7 +19,7 @@ use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder, AuditResult,
     DigestTimestampingMetadata, RequestId,
 };
-use crate::incident::{IncidentRecorder, NotificationSink, digest_timestamping_incident_input};
+use crate::incident::{IncidentRecorder, digest_timestamping_incident_input};
 use crate::ledger::{
     LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
     SignedMonthlyDigest,
@@ -158,18 +158,17 @@ pub async fn request_timestamping_for_digest<S: TimestampingService>(
     }
 }
 
-pub async fn request_timestamping_for_digest_with_incident<T, S>(
+pub async fn request_timestamping_for_digest_with_incident<T>(
     service: &T,
     audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     ledger_appender: &Arc<LedgerAppender>,
-    incident_recorder: &IncidentRecorder<S>,
+    incident_recorder: &IncidentRecorder,
     digest: &SignedMonthlyDigest,
     request_id: RequestId,
     requested_at: SourceEventAt,
 ) -> Result<TimestampingToken, RequestTimestampingError>
 where
     T: TimestampingService,
-    S: NotificationSink,
 {
     let result = request_timestamping_for_digest(
         service,

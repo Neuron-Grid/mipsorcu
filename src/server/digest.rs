@@ -13,8 +13,8 @@ use serde::Serialize;
 
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore, RequestId};
 use crate::incident::{
-    DummyNotificationSink, IncidentRecordInput, IncidentRecorder, dedupe_key,
-    monthly_digest_incident_type, severity_for_incident,
+    IncidentRecordInput, IncidentRecorder, dedupe_key, monthly_digest_incident_type,
+    severity_for_incident,
 };
 use crate::ledger::{LedgerSignatureKeyVersion, MonthlyDigestPeriod};
 use crate::server::config::AppConfig;
@@ -397,11 +397,7 @@ async fn record_monthly_digest_verify_incident(
         supabase_client.clone(),
         signing_key,
     ));
-    let incident_recorder = IncidentRecorder::new(
-        supabase_client,
-        ledger_appender,
-        DummyNotificationSink::new(),
-    );
+    let incident_recorder = IncidentRecorder::new(supabase_client, ledger_appender, "none");
     let detection_source = "monthly_digest_verify";
     let input = IncidentRecordInput::new(
         incident_type,

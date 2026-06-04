@@ -3,10 +3,10 @@ use serde_json::json;
 use crate::audit::{
     AuditAction, AuditEvent, AuditEventId, AuditMetadata, AuditResult, AuditTrigger, RequestId,
 };
-use crate::incident::{IncidentRecordInput, IncidentType, dedupe_key, severity_for_incident};
 use crate::ledger::{
     LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
 };
+use crate::server::incident::{DetectedIncident, record_and_dispatch_incident};
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts};
 use crate::server::state::AppState;
 use crate::types::SourceEventAt;
@@ -128,21 +128,26 @@ pub(crate) async fn record_scheduler_skipped(
 pub(crate) async fn record_scheduler_failure_incident(
     state: &AppState,
     spec: ScheduledJobSpec,
+    failure_streak: u32,
     error_code: &'static str,
 ) {
-    let input = IncidentRecordInput::new(
-        IncidentType::SchedulerFailure,
-        severity_for_incident(IncidentType::SchedulerFailure),
-        spec.name.as_str(),
-        dedupe_key(IncidentType::SchedulerFailure, spec.name.as_str(), None),
-        error_code,
-    );
-    if let Err(error) = state.incident_recorder.record(input).await {
-        tracing::error!(
-            job_name = spec.name.as_str(),
-            error = %error,
-            "scheduler failure incident recording failed"
-        );
+    match state
+        .incident_detector
+        .scheduler_failure(spec.name.as_str(), failure_streak, error_code)
+    {
+        Ok(Some(notification)) => {
+            let detected =
+                DetectedIncident::from_notification(notification, spec.name.as_str(), error_code);
+            record_and_dispatch_incident(state, detected).await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                job_name = spec.name.as_str(),
+                error = %error,
+                "scheduler failure incident detection failed"
+            );
+        }
     }
 }
 

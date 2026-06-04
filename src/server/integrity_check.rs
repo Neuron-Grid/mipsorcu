@@ -274,7 +274,7 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
     let incident_recorder = Arc::new(IncidentRecorder::new(
         supabase_client.clone(),
         ledger_appender.clone(),
-        notification_sink.clone(),
+        "dummy",
     ));
     let incident_dispatcher = Arc::new(crate::incident::IncidentDispatcher::new(
         Arc::new(notification_sink),
@@ -307,7 +307,7 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
         audit_recorder,
         ledger_appender,
         incident_recorder,
-        incident_dispatcher,
+        incident_dispatcher: Some(incident_dispatcher),
         incident_detector,
         siem_forwarding,
         scheduler_status,

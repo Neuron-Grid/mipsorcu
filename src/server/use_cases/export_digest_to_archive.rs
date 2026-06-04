@@ -20,7 +20,7 @@ use crate::audit::{
     ArchiveExportMetadata, AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder,
     AuditResult, RequestId,
 };
-use crate::incident::{IncidentRecorder, NotificationSink, archive_incident_input};
+use crate::incident::{IncidentRecorder, archive_incident_input};
 use crate::ledger::{
     LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
     SignedMonthlyDigest,
@@ -220,18 +220,17 @@ async fn verify_archived_object<B: ArchiveBackend>(
     }
 }
 
-pub async fn export_digest_to_archive_with_incident<B, S>(
+pub async fn export_digest_to_archive_with_incident<B>(
     backend: &B,
     audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     ledger_appender: &Arc<LedgerAppender>,
-    incident_recorder: &IncidentRecorder<S>,
+    incident_recorder: &IncidentRecorder,
     digest: &SignedMonthlyDigest,
     request_id: RequestId,
     exported_at: SourceEventAt,
 ) -> Result<ArchiveObjectKey, ExportDigestToArchiveError>
 where
     B: ArchiveBackend,
-    S: NotificationSink,
 {
     let result = export_digest_to_archive(
         backend,

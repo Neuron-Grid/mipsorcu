@@ -27,8 +27,9 @@ pub struct AppState {
     pub supabase_client: Arc<SupabaseClient>,
     pub audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
     pub ledger_appender: Arc<LedgerAppender>,
-    pub incident_recorder: Arc<IncidentRecorder<AnyNotificationSink>>,
-    pub incident_dispatcher: Arc<IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>,
+    pub incident_recorder: Arc<IncidentRecorder>,
+    pub incident_dispatcher:
+        Option<Arc<IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>>,
     pub incident_detector: IncidentDetector,
     pub siem_forwarding: Arc<SiemForwardingService<AnySiemSink>>,
     pub audit_fallback_store: LocalAuditFallbackStore,

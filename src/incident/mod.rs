@@ -4,6 +4,7 @@ mod dto;
 mod dummy;
 mod recorder;
 mod sink;
+mod text_guard;
 mod types;
 mod webhook;
 

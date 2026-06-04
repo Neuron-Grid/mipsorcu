@@ -21,9 +21,7 @@ use serde::Serialize;
 
 use crate::archive::{ArchiveBackend, ArchiveObjectKey, ArchiveOpaqueObject};
 use crate::audit::RequestId;
-use crate::incident::{
-    DummyNotificationSink, IncidentRecorder, digest_timestamping_incident_input,
-};
+use crate::incident::{IncidentRecorder, digest_timestamping_incident_input};
 use crate::ledger::MonthlyDigestPeriod;
 use crate::server::archive::{
     ArchiveCliError, build_audit_recorder, build_backend, build_ledger_appender,
@@ -511,11 +509,7 @@ async fn record_timestamping_verify_incident(
 
     let signing_key = config.ledger_signing_key.clone();
     let ledger_appender = Arc::new(LedgerAppender::new(supabase_client.clone(), signing_key));
-    let incident_recorder = IncidentRecorder::new(
-        supabase_client,
-        ledger_appender,
-        DummyNotificationSink::new(),
-    );
+    let incident_recorder = IncidentRecorder::new(supabase_client, ledger_appender, "none");
 
     match incident_recorder.record(input).await {
         Ok(result) => {

@@ -28,7 +28,7 @@ use crate::archive::{
     S3ImmutableArchiveBackend,
 };
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore, RequestId};
-use crate::incident::{DummyNotificationSink, IncidentRecorder, archive_incident_input};
+use crate::incident::{IncidentRecorder, archive_incident_input};
 use crate::ledger::{
     DigestHash, MonthlyDigestPeriod, SignedMonthlyDigest, build_monthly_digest_canonical_form,
 };
@@ -420,11 +420,7 @@ async fn record_archive_verify_incident(
 
     let signing_key = config.ledger_signing_key.clone();
     let ledger_appender = Arc::new(LedgerAppender::new(supabase_client.clone(), signing_key));
-    let incident_recorder = IncidentRecorder::new(
-        supabase_client,
-        ledger_appender,
-        DummyNotificationSink::new(),
-    );
+    let incident_recorder = IncidentRecorder::new(supabase_client, ledger_appender, "none");
 
     match incident_recorder.record(input).await {
         Ok(result) => {

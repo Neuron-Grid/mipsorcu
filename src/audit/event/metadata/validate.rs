@@ -584,6 +584,13 @@ fn incident_type_allowed(value: &str) -> bool {
             | "siem_long_failure"
             | "audit_ui_forbidden_operation"
             | "scheduler_failure"
+            | "ledger_anomaly"
+            | "archive_failure_persistent"
+            | "timestamping_failure_persistent"
+            | "siem_buffer_threshold"
+            | "envelope_migration_failure_burst"
+            | "auth_failure_burst"
+            | "key_rotation_failure"
     )
 }
 

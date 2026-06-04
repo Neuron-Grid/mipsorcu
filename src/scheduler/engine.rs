@@ -289,7 +289,7 @@ async fn record_job_failed(
     let failure_streak = state.scheduler_status.mark_failed(spec, failed_at);
     let _ = record_scheduler_failed(state, spec, started_at, failed_at, error_code).await;
     if failure_streak >= 3 {
-        record_scheduler_failure_incident(state, spec, error_code).await;
+        record_scheduler_failure_incident(state, spec, failure_streak, error_code).await;
     }
 }
 

@@ -8,6 +8,7 @@ pub mod digest;
 pub mod dto;
 pub mod errors;
 pub mod handlers;
+pub(crate) mod incident;
 pub mod integrity_check;
 pub(crate) mod key_rotation;
 pub mod ledger_appender;

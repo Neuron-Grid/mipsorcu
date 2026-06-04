@@ -15,7 +15,7 @@ mod rotation_row;
 
 pub use error::KeyRotationCliError;
 
-pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), KeyRotationCliError> {
+pub async fn run_cli(config: &AppConfig, args: &[String]) -> Result<(), KeyRotationCliError> {
     let Some((command, command_args)) = args.split_first() else {
         return Err(KeyRotationCliError::Usage(usage()));
     };
@@ -24,7 +24,7 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), KeyRotati
         return Err(KeyRotationCliError::Usage(usage()));
     }
 
-    let http_client = crate::server::config::build_outbound_http_client(&config)
+    let http_client = crate::server::config::build_outbound_http_client(config)
         .map_err(|error| KeyRotationCliError::Config(error.to_string()))?;
     let supabase_client = Arc::new(SupabaseClient::new(
         http_client,
@@ -43,14 +43,13 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), KeyRotati
 
     match command.as_str() {
         "--migrate-envelope" => {
-            envelope_migration::run(supabase_client, ledger_appender, &config, args).await
+            envelope_migration::run(supabase_client, ledger_appender, config, args).await
         }
         "status" => command::status(supabase_client, command_args).await,
         "start" => {
-            command::start_with_ledger(supabase_client, ledger_appender, &config, command_args)
-                .await
+            command::start_with_ledger(supabase_client, ledger_appender, config, command_args).await
         }
-        "rewrap" => command::rewrap(supabase_client, ledger_appender, &config, command_args).await,
+        "rewrap" => command::rewrap(supabase_client, ledger_appender, config, command_args).await,
         "complete" => command::complete(supabase_client, ledger_appender, command_args).await,
         _ => Err(KeyRotationCliError::Usage(usage())),
     }

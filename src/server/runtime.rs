@@ -42,7 +42,8 @@ pub async fn run_entrypoint() {
                 std::process::exit(1);
             });
 
-            if let Err(error) = key_rotation::run_cli(config, command_args).await {
+            if let Err(error) = key_rotation::run_cli(&config, command_args).await {
+                record_key_rotation_failure_incident(&config, &error).await;
                 eprintln!("{error}");
                 std::process::exit(2);
             }
@@ -264,15 +265,18 @@ async fn build_app_state(
     let (audit_recorder, fallback_store) = build_audit_recorder(&supabase_client, &config);
     let app_fallback_store = fallback_store.clone();
     let ledger_appender = build_ledger_appender(&supabase_client, &config).await;
-    let incident_recorder = build_incident_recorder(
-        &supabase_client,
-        &ledger_appender,
-        notification_sink.clone(),
+    let notification_sink_name = notification_sink.as_ref().map_or(
+        config.incident_notifier.kind_name(),
+        AnyNotificationSink::kind_name,
     );
-    let incident_dispatcher = Arc::new(IncidentDispatcher::new(
-        Arc::new(notification_sink),
-        audit_recorder.clone(),
-    ));
+    let incident_recorder =
+        build_incident_recorder(&supabase_client, &ledger_appender, notification_sink_name);
+    let incident_dispatcher = notification_sink.map(|sink| {
+        Arc::new(IncidentDispatcher::new(
+            Arc::new(sink),
+            audit_recorder.clone(),
+        ))
+    });
     let incident_detector = IncidentDetector::new();
     let siem_forwarding =
         build_siem_forwarding(siem_sink, &config, &audit_recorder, &readiness_state);
@@ -450,12 +454,12 @@ async fn build_ledger_appender(
 fn build_incident_recorder(
     supabase_client: &Arc<SupabaseClient>,
     ledger_appender: &Arc<LedgerAppender>,
-    notification_sink: AnyNotificationSink,
-) -> Arc<IncidentRecorder<AnyNotificationSink>> {
+    notification_sink_name: &str,
+) -> Arc<IncidentRecorder> {
     Arc::new(IncidentRecorder::new(
         supabase_client.clone(),
         ledger_appender.clone(),
-        notification_sink,
+        notification_sink_name,
     ))
 }
 
@@ -559,7 +563,7 @@ fn spawn_background_loops(
     } else {
         tokio::spawn(background::run_siem_resend_loop(
             state.siem_forwarding.clone(),
-            state.incident_recorder.clone(),
+            state.clone(),
             siem_resend_interval,
             siem_long_failure_threshold,
             shutdown_sender.subscribe(),
@@ -569,17 +573,24 @@ fn spawn_background_loops(
 
 fn build_notification_sink(
     config: &config::AppConfig,
-    http_client: reqwest::Client,
-) -> Result<AnyNotificationSink, &'static str> {
+    _http_client: reqwest::Client,
+) -> Result<Option<AnyNotificationSink>, &'static str> {
     match &config.incident_notifier {
-        config::IncidentNotifierConfig::Disabled => {
-            Ok(AnyNotificationSink::Dummy(DummyNotificationSink::new()))
-        }
-        config::IncidentNotifierConfig::Webhook { endpoint, secret } => {
-            Ok(AnyNotificationSink::Webhook(WebhookNotificationSink::new(
-                http_client,
-                endpoint.clone(),
-                secret.clone(),
+        config::IncidentNotifierConfig::None => Ok(None),
+        config::IncidentNotifierConfig::Dummy => Ok(Some(AnyNotificationSink::Dummy(
+            DummyNotificationSink::new(),
+        ))),
+        config::IncidentNotifierConfig::Webhook {
+            endpoint,
+            secret,
+            request_timeout,
+        } => {
+            let client = reqwest::Client::builder()
+                .timeout(*request_timeout)
+                .build()
+                .map_err(|_| "incident_webhook_client_init_failed")?;
+            Ok(Some(AnyNotificationSink::Webhook(
+                WebhookNotificationSink::new(client, endpoint.clone(), secret.clone()),
             )))
         }
     }
@@ -602,6 +613,79 @@ fn build_siem_sink(
         config::SiemExporterConfig::SplunkHec { endpoint, token } => Ok(AnySiemSink::SplunkHec(
             SplunkHecSiemSink::new(http_client, endpoint.clone(), token.clone()),
         )),
+    }
+}
+
+async fn record_key_rotation_failure_incident(
+    config: &config::AppConfig,
+    error: &key_rotation::KeyRotationCliError,
+) {
+    let Some(error_code) = error.incident_error_code() else {
+        return;
+    };
+    let http_client = match config::build_outbound_http_client(config) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                error_code = "key_rotation_incident_http_client_failed",
+                "key rotation incident notification setup failed"
+            );
+            return;
+        }
+    };
+    let supabase_client = build_supabase_client(http_client.clone(), config);
+    let (audit_recorder, _fallback_store) = build_audit_recorder(&supabase_client, config);
+    let ledger_appender = Arc::new(LedgerAppender::new(
+        supabase_client.clone(),
+        config.ledger_signing_key.clone(),
+    ));
+    let notification_sink = match build_notification_sink(config, http_client) {
+        Ok(sink) => sink,
+        Err(error) => {
+            tracing::error!(
+                error,
+                error_code = "key_rotation_incident_notifier_setup_failed",
+                "key rotation incident notifier setup failed"
+            );
+            None
+        }
+    };
+    let notification_sink_name = notification_sink.as_ref().map_or(
+        config.incident_notifier.kind_name(),
+        AnyNotificationSink::kind_name,
+    );
+    let incident_recorder =
+        IncidentRecorder::new(supabase_client, ledger_appender, notification_sink_name);
+    let incident_dispatcher =
+        notification_sink.map(|sink| IncidentDispatcher::new(Arc::new(sink), audit_recorder));
+    let detector = IncidentDetector::new();
+    let notification = match detector.key_rotation_failure(error_code) {
+        Ok(notification) => notification,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                error_code = "key_rotation_incident_detection_failed",
+                "key rotation incident detection failed"
+            );
+            return;
+        }
+    };
+    let detected = crate::server::incident::DetectedIncident::from_notification(
+        notification,
+        "key_rotation_cli",
+        error_code,
+    );
+    let (record_input, notification) = detected.into_parts();
+    if let Err(error) = incident_recorder.record(record_input).await {
+        tracing::error!(
+            error = %error,
+            error_code = "key_rotation_incident_record_failed",
+            "key rotation incident recording failed"
+        );
+    }
+    if let Some(dispatcher) = incident_dispatcher {
+        let _ = dispatcher.dispatch(notification).await;
     }
 }
 

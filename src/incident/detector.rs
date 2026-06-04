@@ -15,8 +15,9 @@ const SCHEDULER_FAILURE_STREAK_THRESHOLD: u32 = 3;
 const PERSISTENT_FAILURE_THRESHOLD: Duration = Duration::from_secs(24 * 60 * 60);
 const SIEM_BUFFER_THRESHOLD_BYTES: u64 = 80 * 1024 * 1024;
 const ENVELOPE_FAILURE_BURST_THRESHOLD: usize = 10;
-const AUTH_FAILURE_BURST_THRESHOLD: usize = 10;
-const BURST_WINDOW: Duration = Duration::from_secs(60 * 60);
+const AUTH_FAILURE_BURST_THRESHOLD: usize = 50;
+const ENVELOPE_FAILURE_BURST_WINDOW: Duration = Duration::from_secs(60 * 60);
+const AUTH_FAILURE_BURST_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub enum IncidentDetectorError {
@@ -55,6 +56,8 @@ impl From<IncidentDtoError> for IncidentDetectorError {
 pub struct IncidentDetector {
     envelope_failures: Arc<Mutex<VecDeque<Instant>>>,
     auth_failures: Arc<Mutex<VecDeque<Instant>>>,
+    archive_failure_started_at: Arc<Mutex<Option<Instant>>>,
+    timestamping_failure_started_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl IncidentDetector {
@@ -140,7 +143,7 @@ impl IncidentDetector {
         }
         build_notification(
             IncidentCategory::SiemBufferThreshold,
-            IncidentSeverity::High,
+            IncidentSeverity::Medium,
             "siem fallback buffer reached notification threshold",
             vec![ComponentName::siem()],
             format!("siem:buffer:{current_size_bytes}"),
@@ -153,13 +156,13 @@ impl IncidentDetector {
         error_code: &str,
     ) -> Result<Option<IncidentNotification>, IncidentDetectorError> {
         let now = Instant::now();
-        let count = record_burst_event(&self.envelope_failures, now, BURST_WINDOW);
+        let count = record_burst_event(&self.envelope_failures, now, ENVELOPE_FAILURE_BURST_WINDOW);
         if count < ENVELOPE_FAILURE_BURST_THRESHOLD {
             return Ok(None);
         }
         build_notification(
             IncidentCategory::EnvelopeMigrationFailureBurst,
-            IncidentSeverity::High,
+            IncidentSeverity::Medium,
             format!("envelope migration failure burst reached {count} events"),
             vec![
                 ComponentName::envelope_migration(),
@@ -175,7 +178,7 @@ impl IncidentDetector {
         _error_code: &str,
     ) -> Result<Option<IncidentNotification>, IncidentDetectorError> {
         let now = Instant::now();
-        let count = record_burst_event(&self.auth_failures, now, BURST_WINDOW);
+        let count = record_burst_event(&self.auth_failures, now, AUTH_FAILURE_BURST_WINDOW);
         if count < AUTH_FAILURE_BURST_THRESHOLD {
             return Ok(None);
         }
@@ -195,11 +198,35 @@ impl IncidentDetector {
     ) -> Result<IncidentNotification, IncidentDetectorError> {
         build_notification(
             IncidentCategory::KeyRotationFailure,
-            IncidentSeverity::High,
+            IncidentSeverity::Critical,
             "key rotation failure detected",
             vec![ComponentName::key_rotation()],
             format!("key_rotation:{error_code}"),
         )
+    }
+
+    pub fn record_archive_failure(
+        &self,
+        error_code: &str,
+    ) -> Result<Option<IncidentNotification>, IncidentDetectorError> {
+        let failed_for = record_persistent_failure(&self.archive_failure_started_at);
+        self.persistent_archive_failure(failed_for, error_code)
+    }
+
+    pub fn clear_archive_failure(&self) {
+        clear_persistent_failure(&self.archive_failure_started_at);
+    }
+
+    pub fn record_timestamping_failure(
+        &self,
+        error_code: &str,
+    ) -> Result<Option<IncidentNotification>, IncidentDetectorError> {
+        let failed_for = record_persistent_failure(&self.timestamping_failure_started_at);
+        self.persistent_timestamping_failure(failed_for, error_code)
+    }
+
+    pub fn clear_timestamping_failure(&self) {
+        clear_persistent_failure(&self.timestamping_failure_started_at);
     }
 }
 
@@ -220,6 +247,24 @@ fn record_burst_event(
         let _ = guard.pop_front();
     }
     guard.len()
+}
+
+fn record_persistent_failure(started_at: &Arc<Mutex<Option<Instant>>>) -> Duration {
+    let now = Instant::now();
+    let mut guard = match started_at.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let first_failure_at = guard.get_or_insert(now);
+    now.duration_since(*first_failure_at)
+}
+
+fn clear_persistent_failure(started_at: &Arc<Mutex<Option<Instant>>>) {
+    let mut guard = match started_at.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = None;
 }
 
 fn build_notification(

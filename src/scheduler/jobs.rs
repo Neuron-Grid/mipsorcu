@@ -12,6 +12,7 @@ use crate::ledger::{
     DigestHash, LedgerChainHead, LedgerHash, LedgerSequenceNo, MonthlyDigestPeriod,
     SignedLedgerEntry, SignedMonthlyDigest, build_monthly_digest_canonical_form,
 };
+use crate::server::incident::{DetectedIncident, record_and_dispatch_incident};
 use crate::server::key_rotation::{
     KeyRotationCliError, envelope_migration::run_scheduled_envelope_migration,
 };
@@ -88,6 +89,14 @@ async fn run_hash_chain_verify_job(
     started: Instant,
 ) -> Result<JobExecutionSummary, &'static str> {
     let summary = verify_full_ledger_hash_chain(state.supabase_client.as_ref()).await?;
+    if !summary.valid {
+        record_ledger_anomaly_incident(
+            state,
+            "monthly_hash_chain_verify",
+            summary.error_code.unwrap_or("ledger_verification_failed"),
+        )
+        .await;
+    }
     ledger_verification_job_summary(summary, "ledger_verification_failed", started)
 }
 
@@ -96,6 +105,16 @@ async fn run_signature_verify_job(
     started: Instant,
 ) -> Result<JobExecutionSummary, &'static str> {
     let summary = verify_full_ledger_signatures(state.supabase_client.as_ref()).await?;
+    if !summary.valid {
+        record_ledger_anomaly_incident(
+            state,
+            "monthly_signature_verify",
+            summary
+                .error_code
+                .unwrap_or("ledger_signature_verification_failed"),
+        )
+        .await;
+    }
     ledger_verification_job_summary(summary, "ledger_signature_verification_failed", started)
 }
 
@@ -158,6 +177,27 @@ async fn run_siem_buffer_flush_job(
         .siem_forwarding
         .resend_pending_batch(SIEM_MAX_BATCH_SIZE)
         .await;
+    match state.siem_forwarding.current_buffer_size_bytes() {
+        Ok(current_size_bytes) => {
+            if let Ok(Some(notification)) = state
+                .incident_detector
+                .siem_buffer_threshold(current_size_bytes)
+            {
+                let detected = DetectedIncident::from_notification(
+                    notification,
+                    "siem_buffer_flush",
+                    "siem_buffer_threshold",
+                );
+                record_and_dispatch_incident(state, detected).await;
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to read SIEM buffer size for scheduler incident detection"
+            );
+        }
+    }
     Ok(siem_buffer_flush_summary(summary, started))
 }
 
@@ -353,9 +393,16 @@ pub(crate) async fn run_archive_export_job(
         .await
     };
 
-    export_result
-        .map(|_| ())
-        .map_err(|_| "archive_export_failed")
+    match export_result {
+        Ok(_) => {
+            state.incident_detector.clear_archive_failure();
+            Ok(())
+        }
+        Err(error) => {
+            record_archive_persistent_incident(state, error.as_error_code()).await;
+            Err("archive_export_failed")
+        }
+    }
 }
 
 pub(crate) async fn run_monthly_timestamping_obtain_job(
@@ -392,6 +439,7 @@ pub(crate) async fn run_monthly_timestamping_obtain_job(
     };
     match outcome {
         Ok(token) => {
+            state.incident_detector.clear_timestamping_failure();
             if let Some(backend) = config.archive_backend.as_deref() {
                 let object_key = ArchiveObjectKey::for_timestamping_token(&period)
                     .map_err(|_| "timestamping_token_archive_key_failed")?;
@@ -403,7 +451,10 @@ pub(crate) async fn run_monthly_timestamping_obtain_job(
             }
             Ok(token)
         }
-        Err(_) => Err("monthly_timestamping_obtain_failed"),
+        Err(error) => {
+            record_timestamping_persistent_incident(state, error.as_error_code()).await;
+            Err("monthly_timestamping_obtain_failed")
+        }
     }
 }
 
@@ -434,6 +485,11 @@ pub(crate) async fn run_daily_envelope_lazy_migration_job(
             if summary.failure_count == 0 {
                 Ok(())
             } else {
+                record_envelope_migration_failure_incident(
+                    state,
+                    "envelope_migration_partial_failure",
+                )
+                .await;
                 Err("envelope_migration_partial_failure")
             }
         }
@@ -443,7 +499,99 @@ pub(crate) async fn run_daily_envelope_lazy_migration_job(
                 error = %error,
                 "daily envelope lazy migration failed"
             );
-            Err(map_envelope_migration_error(error))
+            let error_code = map_envelope_migration_error(error);
+            record_envelope_migration_failure_incident(state, error_code).await;
+            Err(error_code)
+        }
+    }
+}
+
+async fn record_ledger_anomaly_incident(
+    state: &AppState,
+    detection_source: &'static str,
+    error_code: &'static str,
+) {
+    match state
+        .incident_detector
+        .ledger_anomaly(detection_source, error_code)
+    {
+        Ok(notification) => {
+            let detected =
+                DetectedIncident::from_notification(notification, detection_source, error_code);
+            record_and_dispatch_incident(state, detected).await;
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                detection_source,
+                "ledger anomaly incident detection failed"
+            );
+        }
+    }
+}
+
+async fn record_archive_persistent_incident(state: &AppState, error_code: &str) {
+    match state.incident_detector.record_archive_failure(error_code) {
+        Ok(Some(notification)) => {
+            let detected = DetectedIncident::from_notification(
+                notification,
+                "monthly_archive_upload",
+                error_code,
+            );
+            record_and_dispatch_incident(state, detected).await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "archive persistent incident detection failed"
+            );
+        }
+    }
+}
+
+async fn record_timestamping_persistent_incident(state: &AppState, error_code: &str) {
+    match state
+        .incident_detector
+        .record_timestamping_failure(error_code)
+    {
+        Ok(Some(notification)) => {
+            let detected = DetectedIncident::from_notification(
+                notification,
+                "monthly_timestamping_obtain",
+                error_code,
+            );
+            record_and_dispatch_incident(state, detected).await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "timestamping persistent incident detection failed"
+            );
+        }
+    }
+}
+
+async fn record_envelope_migration_failure_incident(state: &AppState, error_code: &str) {
+    match state
+        .incident_detector
+        .record_envelope_migration_failure(error_code)
+    {
+        Ok(Some(notification)) => {
+            let detected = DetectedIncident::from_notification(
+                notification,
+                "daily_envelope_lazy_migration",
+                error_code,
+            );
+            record_and_dispatch_incident(state, detected).await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "envelope migration incident detection failed"
+            );
         }
     }
 }

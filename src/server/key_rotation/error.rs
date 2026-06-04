@@ -27,6 +27,18 @@ impl fmt::Display for KeyRotationCliError {
 
 impl std::error::Error for KeyRotationCliError {}
 
+impl KeyRotationCliError {
+    pub(crate) fn incident_error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Usage(_) => None,
+            Self::Config(_) => Some("key_rotation_config_failed"),
+            Self::Audit(_) => Some("key_rotation_audit_failed"),
+            Self::Crypto(_) => Some("key_rotation_crypto_failed"),
+            Self::Supabase(_) => Some("key_rotation_supabase_failed"),
+        }
+    }
+}
+
 impl From<SupabaseRpcError> for KeyRotationCliError {
     fn from(error: SupabaseRpcError) -> Self {
         Self::Supabase(error)

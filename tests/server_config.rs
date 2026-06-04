@@ -9,7 +9,8 @@ use mipsorcu::server::config::{
     parse_audit_fallback_archive_auto_delete_enabled, parse_audit_fallback_archive_retention_days,
     parse_audit_fallback_rotate_size, parse_audit_resend_interval, parse_dotenv_contents,
     parse_health_readiness_poll_interval, parse_http_handler_timeout,
-    parse_http_rate_limit_requests, parse_http_rate_limit_window, parse_integrity_check_interval,
+    parse_http_rate_limit_requests, parse_http_rate_limit_window, parse_incident_notifier_config,
+    parse_incident_webhook_request_timeout, parse_integrity_check_interval,
     parse_integrity_check_startup_delay, parse_jwks_refresh_interval,
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
@@ -145,6 +146,113 @@ fn load_config_from_sources_prefers_process_env_over_dotenv() {
 
     assert_eq!(config.listen_addr, "127.0.0.1:4000".parse().unwrap());
     assert_eq!(config.supabase_url, "https://from-process.supabase.co");
+}
+
+#[test]
+fn incident_notifier_config_distinguishes_none_dummy_and_webhook() {
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+    let dotenv = HashMap::<String, String>::new();
+
+    assert!(matches!(
+        parse_incident_notifier_config(&dotenv, &get_process_var)
+            .expect("unset notifier defaults to none"),
+        mipsorcu::server::config::IncidentNotifierConfig::None
+    ));
+
+    let dotenv = HashMap::from([("MIPSORCU_INCIDENT_NOTIFIER".to_owned(), "dummy".to_owned())]);
+    assert!(matches!(
+        parse_incident_notifier_config(&dotenv, &get_process_var)
+            .expect("dummy notifier should parse"),
+        mipsorcu::server::config::IncidentNotifierConfig::Dummy
+    ));
+
+    let dotenv = HashMap::from([
+        (
+            "MIPSORCU_INCIDENT_NOTIFIER".to_owned(),
+            "webhook".to_owned(),
+        ),
+        (
+            "MIPSORCU_INCIDENT_WEBHOOK_URL".to_owned(),
+            "https://incident.example.test/hook".to_owned(),
+        ),
+        (
+            "MIPSORCU_INCIDENT_WEBHOOK_SECRET".to_owned(),
+            "hmac-secret-must-be-at-least-32b".to_owned(),
+        ),
+    ]);
+    match parse_incident_notifier_config(&dotenv, &get_process_var)
+        .expect("webhook notifier should parse")
+    {
+        mipsorcu::server::config::IncidentNotifierConfig::Webhook {
+            endpoint,
+            request_timeout,
+            ..
+        } => {
+            assert_eq!(endpoint, "https://incident.example.test/hook");
+            assert_eq!(request_timeout, Duration::from_secs(5));
+        }
+        other => panic!("expected webhook config, got {other:?}"),
+    }
+}
+
+#[test]
+fn incident_webhook_config_allows_only_https_or_local_http() {
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+    let base = [
+        (
+            "MIPSORCU_INCIDENT_NOTIFIER".to_owned(),
+            "webhook".to_owned(),
+        ),
+        (
+            "MIPSORCU_INCIDENT_WEBHOOK_SECRET".to_owned(),
+            "hmac-secret-must-be-at-least-32b".to_owned(),
+        ),
+    ];
+
+    for endpoint in [
+        "http://localhost:8080/incident",
+        "http://127.0.0.1:8080/incident",
+        "http://[::1]:8080/incident",
+    ] {
+        let mut dotenv = HashMap::from(base.clone());
+        dotenv.insert(
+            "MIPSORCU_INCIDENT_WEBHOOK_URL".to_owned(),
+            endpoint.to_owned(),
+        );
+        parse_incident_notifier_config(&dotenv, &get_process_var)
+            .expect("local http endpoint should be allowed");
+    }
+
+    let mut dotenv = HashMap::from(base);
+    dotenv.insert(
+        "MIPSORCU_INCIDENT_WEBHOOK_URL".to_owned(),
+        "http://incident.example.test/hook".to_owned(),
+    );
+    assert!(matches!(
+        parse_incident_notifier_config(&dotenv, &get_process_var),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn incident_webhook_request_timeout_defaults_and_validates_range() {
+    assert_eq!(
+        parse_incident_webhook_request_timeout(None).expect("default should parse"),
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        parse_incident_webhook_request_timeout(Some("9".to_owned()))
+            .expect("positive timeout should parse"),
+        Duration::from_secs(9)
+    );
+    for value in ["0", "31", "", "not-a-number"] {
+        assert!(matches!(
+            parse_incident_webhook_request_timeout(Some(value.to_owned())),
+            Err(ConfigError::InvalidValue { .. })
+        ));
+    }
 }
 
 #[test]
@@ -989,7 +1097,7 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         siem_buffer_path: PathBuf::from("/tmp/mipsorcu-siem.jsonl"),
         siem_buffer_max_bytes: 4096,
         siem_exporter: mipsorcu::server::config::SiemExporterConfig::Disabled,
-        incident_notifier: mipsorcu::server::config::IncidentNotifierConfig::Disabled,
+        incident_notifier: mipsorcu::server::config::IncidentNotifierConfig::None,
         audit_resend_interval: Duration::from_secs(60),
         siem_resend_interval: Duration::from_secs(61),
         siem_long_failure_threshold: Duration::from_secs(900),

@@ -5,10 +5,11 @@
 
 use hmac::{Hmac, KeyInit, Mac};
 use mipsorcu::incident::{
-    IncidentNotificationPayload, IncidentSeverity, IncidentType, NotificationSink,
+    ComponentName, IncidentCategory, IncidentId, IncidentNotification, IncidentNotificationPayload,
+    IncidentNotifier, IncidentSeverity, IncidentSummary, IncidentType, NotificationSink,
     NotificationSinkError, WebhookNotificationSink,
 };
-use mipsorcu::types::SecretString;
+use mipsorcu::types::{SecretString, SourceEventAt};
 use sha3::Sha3_256;
 use wiremock::matchers::{body_bytes, header, header_exists, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -36,10 +37,68 @@ fn make_payload() -> IncidentNotificationPayload {
     }
 }
 
+fn timestamp(value: &str) -> SourceEventAt {
+    SourceEventAt::parse(value).expect("test timestamp must be valid")
+}
+
+fn make_notification() -> IncidentNotification {
+    IncidentNotification::new(
+        IncidentId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .expect("test incident id must be valid"),
+        timestamp("2026-06-01T03:00:00Z"),
+        IncidentCategory::SchedulerFailure,
+        IncidentSeverity::High,
+        IncidentSummary::new("scheduler job failed three consecutive times")
+            .expect("summary must be valid"),
+        vec![ComponentName::scheduler()],
+        timestamp("2026-06-01T03:00:00Z"),
+    )
+    .expect("notification must be valid")
+}
+
 fn compute_expected_signature(secret: &[u8], body: &[u8]) -> String {
     let mut mac = HmacSha3_256::new_from_slice(secret).expect("hmac");
     mac.update(body);
     hex::encode(mac.finalize().into_bytes())
+}
+
+#[tokio::test]
+async fn webhook_notifier_signs_incident_notification_body_with_hmac_sha3_256() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/incident"))
+        .and(header("content-type", "application/json"))
+        .and(header_exists(HMAC_HEADER_NAME))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoint = format!("{}/incident", server.uri());
+    let secret_bytes = b"hmac-secret-must-be-at-least-32b";
+    let secret =
+        SecretString::new(std::str::from_utf8(secret_bytes).expect("utf8")).expect("secret string");
+    let sink = WebhookNotificationSink::new(http_client(), endpoint, secret);
+    let notification = make_notification();
+
+    IncidentNotifier::notify(&sink, &notification)
+        .await
+        .expect("webhook post succeeds");
+
+    let received = server.received_requests().await.expect("requests");
+    assert_eq!(received.len(), 1);
+    let request: &Request = &received[0];
+    let signature_header = request
+        .headers
+        .get(HMAC_HEADER_NAME)
+        .expect("X-Mipsorcu-Signature must be present");
+    let signature_value = signature_header.to_str().expect("ascii signature");
+    let expected = compute_expected_signature(secret_bytes, &request.body);
+    assert_eq!(signature_value, expected);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&request.body).expect("body must be json")["category"],
+        serde_json::json!("scheduler_failure")
+    );
 }
 
 #[tokio::test]
@@ -61,7 +120,9 @@ async fn webhook_sink_signs_body_with_hmac_sha3_256() {
     let sink = WebhookNotificationSink::new(http_client(), endpoint, secret);
     let payload = make_payload();
 
-    sink.notify(&payload).await.expect("webhook post succeeds");
+    NotificationSink::notify(&sink, &payload)
+        .await
+        .expect("webhook post succeeds");
 
     // 検査: wiremock の受信記録からヘッダを取り出し、HMAC を再計算して一致を検証する。
     let received = server.received_requests().await.expect("requests");
@@ -96,8 +157,7 @@ async fn webhook_sink_returns_backend_failed_on_4xx() {
     let sink = WebhookNotificationSink::new(http_client(), endpoint, secret);
     let payload = make_payload();
 
-    let error = sink
-        .notify(&payload)
+    let error = NotificationSink::notify(&sink, &payload)
         .await
         .expect_err("401 should map to BackendFailed");
     match error {
@@ -114,8 +174,7 @@ async fn webhook_sink_returns_transport_failure_when_endpoint_unreachable() {
     let sink = WebhookNotificationSink::new(http_client(), endpoint, secret);
     let payload = make_payload();
 
-    let error = sink
-        .notify(&payload)
+    let error = NotificationSink::notify(&sink, &payload)
         .await
         .expect_err("unreachable endpoint should fail");
     match error {
@@ -139,7 +198,9 @@ async fn webhook_payload_body_does_not_contain_forbidden_secret_keys() {
     let sink = WebhookNotificationSink::new(http_client(), endpoint, secret);
     let payload = make_payload();
 
-    sink.notify(&payload).await.expect("webhook post succeeds");
+    NotificationSink::notify(&sink, &payload)
+        .await
+        .expect("webhook post succeeds");
     let received = server.received_requests().await.expect("requests");
     let body_text = String::from_utf8(received[0].body.clone()).expect("body utf8");
 

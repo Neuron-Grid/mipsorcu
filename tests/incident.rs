@@ -67,6 +67,29 @@ fn incident_detected_metadata_accepts_required_and_optional_keys() -> TestResult
 }
 
 #[test]
+fn incident_detected_metadata_accepts_task14_incident_types() -> TestResult {
+    let metadata = IncidentDetectedMetadata::new(
+        "auth_failure_burst",
+        "medium",
+        "auth_middleware",
+        "auth_failure_burst:auth_middleware:global",
+        "webhook",
+        "not_configured",
+        "jwt_verification_failed",
+        SourceEventAt::parse(SOURCE_EVENT_AT)?,
+    )
+    .build()?;
+
+    metadata.validate_allowlist_for_action(AuditAction::IncidentDetected, AuditResult::Failure)?;
+    assert_eq!(
+        metadata.as_value()["incident_type"],
+        json!("auth_failure_burst")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn incident_detected_metadata_rejects_missing_and_invalid_values() -> TestResult {
     let missing_required = AuditMetadata::new(json!({
         "severity": "critical",
