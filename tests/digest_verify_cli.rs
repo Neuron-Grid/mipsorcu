@@ -427,10 +427,11 @@ fn digest_fetch_rpc_error_exit_2() -> Result<(), Box<dyn std::error::Error>> {
 fn valid_digest_exit_0() -> Result<(), Box<dyn std::error::Error>> {
     let m = make_valid_test_materials()?;
 
-    let (url, _receiver, server) = spawn_scripted_server(vec![
+    let (url, receiver, server) = spawn_scripted_server(vec![
         (200, digest_materials_body(&m)),
         (200, chain_export_body(&m)),
         (200, range_body(&m)),
+        (200, r#""ok""#.to_owned()),
     ])?;
 
     let run = run_digest_verify(&url, "valid", TEST_YEAR_MONTH)?;
@@ -451,6 +452,29 @@ fn valid_digest_exit_0() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(parsed["end_sequence_no"], 1);
     assert_eq!(parsed["entry_count"], 1);
     assert_eq!(parsed["error"], Value::Null);
+
+    let requests: Vec<CapturedRequest> = receiver.try_iter().collect();
+    let audit_request = requests
+        .iter()
+        .find(|request| request.path.contains("rpc_append_audit_event"))
+        .expect("monthly_digest_verify success should be audited");
+    let body = audit_request
+        .body
+        .as_ref()
+        .expect("audit request should carry a JSON body");
+    assert_eq!(body["p_action"], "monthly_digest_verify");
+    assert_eq!(body["p_result"], "success");
+    assert_eq!(
+        body["p_metadata_json"]["target_year_month"],
+        TEST_YEAR_MONTH
+    );
+    assert_eq!(body["p_metadata_json"]["verify_result"], "valid");
+    assert!(
+        body["p_metadata_json"]["source_event_at"]
+            .as_str()
+            .is_some(),
+        "source_event_at should be present on verify success audit"
+    );
 
     fs::remove_dir_all(run.temp_dir)?;
     Ok(())
@@ -505,6 +529,7 @@ fn no_secret_material_in_output() -> Result<(), Box<dyn std::error::Error>> {
         (200, digest_materials_body(&m)),
         (200, chain_export_body(&m)),
         (200, range_body(&m)),
+        (200, r#""ok""#.to_owned()),
     ])?;
 
     let run = run_digest_verify(&url, "no-secrets", TEST_YEAR_MONTH)?;

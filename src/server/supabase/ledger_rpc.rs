@@ -13,6 +13,7 @@ use super::{SupabaseClient, SupabaseRpcError};
 const LEDGER_CHAIN_STATE_READ_COLUMNS: &str = "last_sequence_no,last_entry_hash";
 const LEDGER_ENTRY_ID_CONFLICT_MARKER: &str = "ledger_entry_id_conflict";
 const LEDGER_ENTRY_HASH_CONFLICT_MARKER: &str = "ledger_entry_hash_conflict";
+const LEDGER_MONTHLY_DIGEST_DUPLICATE_MARKER: &str = "monthly_digest_already_exists";
 const LEDGER_SEQUENCE_MISMATCH_MARKER: &str = "ledger_sequence_mismatch";
 const LEDGER_PREVIOUS_HASH_MISMATCH_MARKER: &str = "ledger_previous_hash_mismatch";
 const LEDGER_CHAIN_STATE_MISSING_MARKER: &str = "ledger_chain_state_missing";
@@ -237,6 +238,8 @@ pub fn classify_append_ledger_error(error: &SupabaseRpcError) -> LedgerAppendRpc
         LedgerAppendRpcFailure::EntryIdConflict
     } else if response_contains_marker(body, LEDGER_ENTRY_HASH_CONFLICT_MARKER) {
         LedgerAppendRpcFailure::EntryHashConflict
+    } else if response_contains_marker(body, LEDGER_MONTHLY_DIGEST_DUPLICATE_MARKER) {
+        LedgerAppendRpcFailure::MonthlyDigestDuplicate
     } else if response_contains_marker(body, LEDGER_SEQUENCE_MISMATCH_MARKER) {
         LedgerAppendRpcFailure::SequenceMismatch
     } else if response_contains_marker(body, LEDGER_PREVIOUS_HASH_MISMATCH_MARKER) {

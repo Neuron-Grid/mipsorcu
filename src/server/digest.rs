@@ -25,7 +25,7 @@ use crate::server::use_cases::generate_monthly_digest::{
 };
 use crate::server::use_cases::verify_monthly_digest::{
     VerifyMonthlyDigestError, VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit,
-    verify_monthly_digest,
+    record_monthly_digest_verify_success_audit, verify_monthly_digest,
 };
 use crate::types::SourceEventAt;
 
@@ -276,15 +276,26 @@ async fn run_verify_command(
     };
 
     match verify_monthly_digest(&supabase_client, &input).await {
-        Ok(info) => Ok(DigestVerifyOutput {
-            period: period.as_str().to_owned(),
-            valid: true,
-            start_sequence_no: Some(info.start_sequence_no.get()),
-            end_sequence_no: Some(info.end_sequence_no.get()),
-            entry_count: Some(info.entry_count),
-            error: None,
-            error_variant: None,
-        }),
+        Ok(info) => {
+            // 検証成功を audit_events に同期記録する
+            record_monthly_digest_verify_success_audit(
+                &audit_recorder,
+                &request_id,
+                &period,
+                &verified_at,
+            )
+            .await;
+
+            Ok(DigestVerifyOutput {
+                period: period.as_str().to_owned(),
+                valid: true,
+                start_sequence_no: Some(info.start_sequence_no.get()),
+                end_sequence_no: Some(info.end_sequence_no.get()),
+                entry_count: Some(info.entry_count),
+                error: None,
+                error_variant: None,
+            })
+        }
         Err(error) => {
             // 検証失敗を audit_events に同期記録する
             record_monthly_digest_verify_failure_audit(

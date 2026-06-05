@@ -315,6 +315,8 @@ fn send_success_responses(m: &ValidTestMaterials) -> Vec<(u16, String)> {
         (200, digest_materials_body(m)),
         (200, chain_export_body(m)),
         (200, range_body(m)),
+        // monthly_digest_verify 成功 audit
+        (200, r#""ok""#.to_owned()),
         // 再構成のための再 fetch
         (200, digest_materials_body(m)),
         // ledger append: chain head GET -> append POST
@@ -333,8 +335,8 @@ fn send_then_verify_match() -> Result<(), Box<dyn std::error::Error>> {
     let local_dir = temp_dir("shared-local");
     fs::create_dir_all(&local_dir)?;
 
-    // 1. send（7 RPC）
-    let (send_url, _send_rx, send_server) = spawn_scripted_server(send_success_responses(&m))?;
+    // 1. send（8 RPC）
+    let (send_url, send_rx, send_server) = spawn_scripted_server(send_success_responses(&m))?;
     let send = run_archive(
         &send_url,
         "send",
@@ -363,6 +365,51 @@ fn send_then_verify_match() -> Result<(), Box<dyn std::error::Error>> {
         local_dir.join(EXPECTED_OBJECT_KEY).exists(),
         "archive object should be written to the shared local dir"
     );
+
+    let send_requests: Vec<CapturedRequest> = send_rx.try_iter().collect();
+    let verify_audit = send_requests
+        .iter()
+        .find(|request| {
+            request
+                .path
+                .ends_with("/rest/v1/rpc/rpc_append_audit_event")
+                && request
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body["p_action"] == "monthly_digest_verify")
+        })
+        .expect("archive send should audit successful monthly digest verification");
+    let verify_audit_body = verify_audit
+        .body
+        .as_ref()
+        .expect("verify audit request should carry a JSON body");
+    assert_eq!(verify_audit_body["p_result"], "success");
+    assert_eq!(
+        verify_audit_body["p_metadata_json"]["target_year_month"],
+        TEST_YEAR_MONTH
+    );
+    assert_eq!(
+        verify_audit_body["p_metadata_json"]["verify_result"],
+        "valid"
+    );
+
+    let archive_audit = send_requests
+        .iter()
+        .find(|request| {
+            request
+                .path
+                .ends_with("/rest/v1/rpc/rpc_append_audit_event")
+                && request
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body["p_action"] == "archive_export")
+        })
+        .expect("archive send should audit archive_export success");
+    let archive_audit_body = archive_audit
+        .body
+        .as_ref()
+        .expect("archive audit request should carry a JSON body");
+    assert_eq!(archive_audit_body["p_result"], "success");
 
     // 2. verify（1 RPC）— 同じ local dir を見て一致
     let (verify_url, _verify_rx, verify_server) =
@@ -485,7 +532,7 @@ fn verify_not_found_exit_2() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn send_requires_backend_selection_exit_2() -> Result<(), Box<dyn std::error::Error>> {
-    // MIPSORCU_ARCHIVE_BACKEND 未設定 → verify と再 fetch 後に build_backend で失敗
+    // MIPSORCU_ARCHIVE_BACKEND 未設定 → verify と成功監査、再 fetch 後に build_backend で失敗
     let m = make_valid_test_materials()?;
     let local_dir = temp_dir("no-backend-local");
     fs::create_dir_all(&local_dir)?;
@@ -494,6 +541,7 @@ fn send_requires_backend_selection_exit_2() -> Result<(), Box<dyn std::error::Er
         (200, digest_materials_body(&m)),
         (200, chain_export_body(&m)),
         (200, range_body(&m)),
+        (200, r#""ok""#.to_owned()),
         (200, digest_materials_body(&m)),
     ])?;
 

@@ -9,10 +9,10 @@
 //! 6. canonical bytes を再構築し hash を再計算して比較
 //! 7. Ed25519 署名を検証
 //! 8. 現在の range と digest の range を比較（生成後の変更検知）
-//! 9. 失敗時は audit_events に記録
+//! 9. 成功・失敗どちらも audit_events に記録
 //!
 //! 信頼境界ノート: 検証は read-only。ledger_entries には書き込まない。
-//! audit_events への失敗記録のみ副作用として許容される。
+//! audit_events への検証結果記録のみ副作用として許容される。
 
 use std::sync::Arc;
 
@@ -465,6 +465,80 @@ async fn detect_range_modification(
             Err(VerifyMonthlyDigestError::FetchFailed {
                 code: "monthly_digest_range_fetch_failed",
             })
+        }
+    }
+}
+
+/// 月次 digest 検証成功を `audit_events` に同期記録するヘルパー。
+///
+/// 成功時は `monthly_digest_verify` / `success` として記録する。
+/// 監査記録自体の失敗はログに記録するが、検証成功そのものは覆さない。
+pub async fn record_monthly_digest_verify_success_audit(
+    audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
+    request_id: &RequestId,
+    period: &MonthlyDigestPeriod,
+    verified_at: &SourceEventAt,
+) {
+    let audit_event_id = match AuditEventId::generate() {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "failed to generate audit event id for monthly_digest_verify success audit"
+            );
+            return;
+        }
+    };
+
+    let metadata = match MonthlyDigestVerifyMetadata::success(period, verified_at.clone()).build() {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "failed to build audit metadata for monthly_digest_verify success audit"
+            );
+            return;
+        }
+    };
+
+    let event = match AuditEvent::new(AuditEventParts {
+        audit_event_id,
+        request_id: request_id.clone(),
+        actor_user_id: None,
+        actor_device_id: None,
+        action: AuditAction::MonthlyDigestVerify,
+        target_secret_id: None,
+        result: AuditResult::Success,
+        key_version: None,
+        metadata_json: metadata,
+    }) {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "failed to build audit event for monthly_digest_verify success audit"
+            );
+            return;
+        }
+    };
+
+    match audit_recorder.record(&event).await {
+        Ok(outcome) => {
+            tracing::info!(
+                request_id = %request_id.as_canonical_string(),
+                period = period.as_str(),
+                audit_record_outcome = ?outcome,
+                "monthly digest verification success audit recorded"
+            );
+        }
+        Err(record_error) => {
+            tracing::error!(
+                request_id = %request_id.as_canonical_string(),
+                period = period.as_str(),
+                error = %record_error,
+                error_code = "monthly_digest_verify_success_audit_record_failed",
+                "monthly digest verify success audit primary and fallback recording failed"
+            );
         }
     }
 }

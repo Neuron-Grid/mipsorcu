@@ -42,7 +42,7 @@ use crate::server::use_cases::export_digest_to_archive::{
 };
 use crate::server::use_cases::verify_monthly_digest::{
     VerifyMonthlyDigestError, VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit,
-    verify_monthly_digest,
+    record_monthly_digest_verify_success_audit, verify_monthly_digest,
 };
 use crate::types::SourceEventAt;
 
@@ -213,6 +213,8 @@ async fn run_send_command(
         .await;
         return Err(ArchiveCliError::VerifyDigestFailed(error));
     }
+    record_monthly_digest_verify_success_audit(&audit_recorder, &request_id, &period, &verified_at)
+        .await;
 
     // 2. 再構成のため検証マテリアルを取得し `SignedMonthlyDigest` を復元する。
     let materials = fetch_materials(&supabase_client, &period).await?;

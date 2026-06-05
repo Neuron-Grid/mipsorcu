@@ -34,7 +34,8 @@ use crate::server::use_cases::request_timestamping_for_digest::{
     RequestTimestampingError, request_timestamping_for_digest,
 };
 use crate::server::use_cases::verify_monthly_digest::{
-    VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit, verify_monthly_digest,
+    VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit,
+    record_monthly_digest_verify_success_audit, verify_monthly_digest,
 };
 use crate::timestamping::{
     AnyTimestampingProvider, InMemoryTimestampingService, RetryingTimestampingService,
@@ -232,6 +233,8 @@ async fn run_send_command(
         .await;
         return Err(TimestampingCliError::VerifyDigestFailed(error.to_string()));
     }
+    record_monthly_digest_verify_success_audit(&audit_recorder, &request_id, &period, &verified_at)
+        .await;
 
     // 2. 検証マテリアルから SignedMonthlyDigest を決定的に再構成する（digest_hash を得る）。
     let materials = fetch_materials(&supabase_client, &period).await?;

@@ -409,6 +409,7 @@ fn classify_appender_error(
     match failure {
         LedgerAppendRpcFailure::EntryIdConflict
         | LedgerAppendRpcFailure::EntryHashConflict
+        | LedgerAppendRpcFailure::MonthlyDigestDuplicate
         | LedgerAppendRpcFailure::SequenceMismatch
         | LedgerAppendRpcFailure::PreviousHashMismatch => {
             LedgerAppendError::Conflict { failure, attempts }

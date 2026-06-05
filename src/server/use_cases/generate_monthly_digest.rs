@@ -302,6 +302,15 @@ async fn append_digest_ledger_entry(
     })?;
 
     ledger_appender.append(&draft).await.map_err(|error| {
+        if error.as_error_code() == "monthly_digest_already_exists" {
+            tracing::warn!(
+                request_id = %input.request_id.as_canonical_string(),
+                period = input.period.as_str(),
+                "monthly digest already exists for period during ledger append"
+            );
+            return GenerateMonthlyDigestError::DuplicateDigest;
+        }
+
         tracing::error!(
             request_id = %input.request_id.as_canonical_string(),
             period = input.period.as_str(),

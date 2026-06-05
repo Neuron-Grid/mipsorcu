@@ -441,6 +441,7 @@ impl AppendLedgerEntryOutcome {
 pub enum LedgerAppendRpcFailure {
     EntryIdConflict,
     EntryHashConflict,
+    MonthlyDigestDuplicate,
     SequenceMismatch,
     PreviousHashMismatch,
     PayloadSchemaViolation,
@@ -454,6 +455,7 @@ impl LedgerAppendRpcFailure {
         match self {
             Self::EntryIdConflict => "ledger_entry_id_conflict",
             Self::EntryHashConflict => "ledger_entry_hash_conflict",
+            Self::MonthlyDigestDuplicate => "monthly_digest_already_exists",
             Self::SequenceMismatch => "ledger_sequence_mismatch",
             Self::PreviousHashMismatch => "ledger_previous_hash_mismatch",
             Self::PayloadSchemaViolation => "ledger_payload_schema_violation",

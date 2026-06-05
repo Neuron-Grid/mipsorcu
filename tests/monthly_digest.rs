@@ -333,6 +333,73 @@ fn generate_duplicate_month_exit_2() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn generate_append_time_duplicate_month_exit_2() -> Result<(), Box<dyn std::error::Error>> {
+    let public_key_hex = configured_public_key_hex()?;
+    let hash_hex = "ab".repeat(32);
+    let range_body = json!([{
+        "start_sequence_no": 1i64,
+        "end_sequence_no": 40i64,
+        "start_entry_hash": format!("\\x{hash_hex}"),
+        "end_entry_hash": format!("\\x{hash_hex}"),
+        "entry_count": 40i64,
+    }])
+    .to_string();
+    let chain_state_body = json!([{
+        "last_sequence_no": 40i64,
+        "last_entry_hash": format!("\\x{hash_hex}"),
+    }])
+    .to_string();
+
+    // 事前チェックは exists=false だが、append 時点で DB invariant が同一月重複を拒否する。
+    let (url, receiver, server) = spawn_scripted_server(vec![
+        (200, active_key_status_body(&public_key_hex)),
+        (200, r#"[{"exists":false}]"#.to_owned()),
+        (200, range_body),
+        (200, chain_state_body),
+        (
+            409,
+            r#"{"message":"monthly_digest_already_exists"}"#.to_owned(),
+        ),
+        (200, r#""ok""#.to_owned()),
+    ])?;
+
+    let run = run_digest(
+        &url,
+        "generate-append-duplicate",
+        &["generate", "--year-month", "2026-05", "--format", "json"],
+    )?;
+    server
+        .join()
+        .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+    assert!(
+        !run.output.status.success(),
+        "expected non-zero exit when append rejects duplicate month"
+    );
+    assert_eq!(run.output.status.code(), Some(2));
+
+    let requests: Vec<CapturedRequest> = receiver.try_iter().collect();
+    let audit_request = requests
+        .iter()
+        .find(|request| request.path.contains("rpc_append_audit_event"))
+        .expect("append-time duplicate should record failure audit");
+    let body = audit_request
+        .body
+        .as_ref()
+        .expect("audit request should carry a JSON body");
+    assert_eq!(body["p_action"], "monthly_digest_generate");
+    assert_eq!(body["p_result"], "failure");
+    assert_eq!(body["p_metadata_json"]["target_year_month"], "2026-05");
+    assert_eq!(
+        body["p_metadata_json"]["error_code"],
+        "monthly_digest_duplicate"
+    );
+
+    fs::remove_dir_all(run.temp_dir)?;
+    Ok(())
+}
+
+#[test]
 fn generate_success_records_success_audit_without_poison() -> Result<(), Box<dyn std::error::Error>>
 {
     let public_key_hex = configured_public_key_hex()?;

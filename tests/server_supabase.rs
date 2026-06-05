@@ -801,6 +801,21 @@ fn ledger_append_error_classification_uses_body_without_exposing_it() {
     assert!(!error.to_string().contains("with upstream details"));
 }
 
+#[test]
+fn ledger_append_error_classification_maps_monthly_digest_duplicate_marker() {
+    let body = r#"{"message":"monthly_digest_already_exists"}"#.to_owned();
+    let error = SupabaseRpcError::NonSuccessStatus { status: 409, body };
+
+    assert_eq!(
+        classify_append_ledger_error(&error),
+        LedgerAppendRpcFailure::MonthlyDigestDuplicate
+    );
+    assert_eq!(
+        classify_append_ledger_error(&error).as_error_code(),
+        "monthly_digest_already_exists"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn readiness_probe_retries_with_publishable_key_after_unauthorized_head() {
     let (base_url, receiver, server_thread) =

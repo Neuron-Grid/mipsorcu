@@ -46,6 +46,22 @@ as $$
     ));
 $$;
 
+-- ─── 0. monthly_digest target month uniqueness invariant exists ─────────────
+
+select ok(
+    exists (
+        select 1
+        from pg_indexes
+        where schemaname = 'public'
+          and tablename = 'ledger_entries'
+          and indexname = 'ledger_entries_monthly_digest_target_year_month_unique'
+          and indexdef like 'CREATE UNIQUE INDEX%'
+          and indexdef like '%target_year_month%'
+          and indexdef like '%monthly_digest%'
+    ),
+    'ledger_entries has a partial unique index for monthly_digest target_year_month'
+);
+
 -- ─── 1. RPC returns 0 rows when no monthly_digest exists for year_month ───────
 
 select is(
@@ -92,6 +108,7 @@ select test_helpers.append_test_ledger_entry(
         'digest_hash',       repeat('ab', 32),
         'end_sequence_no',   2,
         'entry_count',       2,
+        'sbc_signature',     repeat('aa', 64),
         'start_sequence_no', 1,
         'target_year_month', '2026-04'
     ),
@@ -233,6 +250,80 @@ select is(
 
 -- 非秘密のみ: RETURNS TABLE 署名に digest_hash / sbc_signature / entry_hash は
 -- 含まれないため、list は hash・署名を返さない（署名で構造的に保証）。
+
+-- ─── 3c. same-month monthly_digest duplicates are rejected at append time ────
+
+select ok(
+    test_helpers.try_append_ledger_entry(
+        'a0000000-0000-4000-8000-0000000000d1',
+        4,
+        'monthly_digest',
+        '2026-04-30T23:59:59Z',
+        '00000000-0000-4000-8000-aaaaaaaaaaaa',
+        null,
+        null,
+        null,
+        null,
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'digest_hash',       repeat('ac', 32),
+            'end_sequence_no',   2,
+            'entry_count',       2,
+            'sbc_signature',     repeat('aa', 64),
+            'start_sequence_no', 1,
+            'target_year_month', '2026-04'
+        ),
+        1,
+        decode(repeat('33', 32), 'hex'),
+        decode(repeat('44', 32), 'hex'),
+        'sha3-256',
+        decode(repeat('aa', 64), 'hex'),
+        'ed25519',
+        1
+    ) like '%monthly_digest_already_exists%',
+    'rpc_append_ledger_entry rejects duplicate monthly_digest target_year_month'
+);
+
+savepoint monthly_digest_different_month_allowed;
+
+select is(
+    test_helpers.try_append_ledger_entry(
+        'a0000000-0000-4000-8000-0000000000d2',
+        4,
+        'monthly_digest',
+        '2026-05-31T23:59:59Z',
+        '00000000-0000-4000-8000-aaaaaaaaaaaa',
+        null,
+        null,
+        null,
+        null,
+        null,
+        'success',
+        null,
+        jsonb_build_object(
+            'digest_hash',       repeat('ad', 32),
+            'end_sequence_no',   2,
+            'entry_count',       2,
+            'sbc_signature',     repeat('aa', 64),
+            'start_sequence_no', 1,
+            'target_year_month', '2026-05'
+        ),
+        1,
+        decode(repeat('33', 32), 'hex'),
+        decode(repeat('44', 32), 'hex'),
+        'sha3-256',
+        decode(repeat('aa', 64), 'hex'),
+        'ed25519',
+        1
+    ),
+    'ok',
+    'rpc_append_ledger_entry allows monthly_digest for a different target_year_month'
+);
+
+rollback to savepoint monthly_digest_different_month_allowed;
+release savepoint monthly_digest_different_month_allowed;
 
 -- ─── 4. public_key is null when no key is registered for key_version ──────────
 

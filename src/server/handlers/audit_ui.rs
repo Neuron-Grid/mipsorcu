@@ -23,7 +23,8 @@ use crate::server::supabase::{
     AuditUiVerificationFailuresParams, SupabaseRpcError,
 };
 use crate::server::use_cases::verify_monthly_digest::{
-    VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit, verify_monthly_digest,
+    VerifyMonthlyDigestInput, record_monthly_digest_verify_failure_audit,
+    record_monthly_digest_verify_success_audit, verify_monthly_digest,
 };
 use crate::types::{OwnerUserId, SourceEventAt};
 
@@ -433,14 +434,23 @@ async fn verify_monthly_digest_endpoint(
         request_id: request_id.clone(),
     };
     let response = match verify_monthly_digest(&state.supabase_client, &input).await {
-        Ok(info) => MonthlyDigestVerificationResponse {
-            valid: true,
-            target_year_month: period.as_str().to_owned(),
-            start_sequence_no: Some(info.start_sequence_no.get()),
-            end_sequence_no: Some(info.end_sequence_no.get()),
-            entry_count: Some(info.entry_count),
-            error_code: None,
-        },
+        Ok(info) => {
+            record_monthly_digest_verify_success_audit(
+                &state.audit_recorder,
+                &request_id,
+                &period,
+                &verified_at,
+            )
+            .await;
+            MonthlyDigestVerificationResponse {
+                valid: true,
+                target_year_month: period.as_str().to_owned(),
+                start_sequence_no: Some(info.start_sequence_no.get()),
+                end_sequence_no: Some(info.end_sequence_no.get()),
+                entry_count: Some(info.entry_count),
+                error_code: None,
+            }
+        }
         Err(error) => {
             record_monthly_digest_verify_failure_audit(
                 &state.audit_recorder,
