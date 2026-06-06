@@ -317,6 +317,25 @@ impl<S: SiemSink> SiemForwarder<S> {
             }
         }
 
+        if sent > 0 {
+            let buffer = self.buffer.clone();
+            match tokio::task::spawn_blocking(move || buffer.compact()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        error = %error,
+                        "siem forwarder: buffer compaction failed after resend"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "siem forwarder: spawn_blocking join failed during buffer compaction"
+                    );
+                }
+            }
+        }
+
         if failed == 0 && attempted > 0 {
             self.status.clear();
         }

@@ -470,9 +470,10 @@ fn build_siem_forwarding(
     audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
     readiness_state: &ReadinessState,
 ) -> Arc<SiemForwardingService<AnySiemSink>> {
-    let siem_buffer = LocalSiemFallbackBuffer::with_config(
+    let siem_buffer = LocalSiemFallbackBuffer::with_limits(
         config.siem_buffer_path.clone(),
         config.siem_buffer_max_bytes,
+        config.siem_buffer_total_max_bytes,
     );
     let siem_forwarder = SiemForwarder::new(siem_sink, siem_buffer);
     Arc::new(SiemForwardingService::new(

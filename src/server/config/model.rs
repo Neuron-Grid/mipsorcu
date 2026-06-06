@@ -34,6 +34,7 @@ pub struct AppConfig {
     pub audit_fallback_path: PathBuf,
     pub siem_buffer_path: PathBuf,
     pub siem_buffer_max_bytes: u64,
+    pub siem_buffer_total_max_bytes: u64,
     pub siem_exporter: SiemExporterConfig,
     pub incident_notifier: IncidentNotifierConfig,
     pub audit_resend_interval: Duration,
@@ -112,6 +113,10 @@ impl fmt::Debug for AppConfig {
             .field("audit_fallback_path", &self.audit_fallback_path)
             .field("siem_buffer_path", &self.siem_buffer_path)
             .field("siem_buffer_max_bytes", &self.siem_buffer_max_bytes)
+            .field(
+                "siem_buffer_total_max_bytes",
+                &self.siem_buffer_total_max_bytes,
+            )
             .field("siem_exporter", &self.siem_exporter)
             .field("incident_notifier", &self.incident_notifier)
             .field(

@@ -284,7 +284,11 @@ async fn build_cli_state(config: AppConfig) -> Result<AppState, IntegrityCheckEr
     let readiness_state = ReadinessState::new();
     let siem_forwarder = SiemForwarder::new(
         AnySiemSink::InMemory(InMemorySiemSink::new()),
-        LocalSiemFallbackBuffer::new(config.siem_buffer_path.clone()),
+        LocalSiemFallbackBuffer::with_limits(
+            config.siem_buffer_path.clone(),
+            config.siem_buffer_max_bytes,
+            config.siem_buffer_total_max_bytes,
+        ),
     );
     let siem_forwarding = Arc::new(crate::server::siem_forwarding::SiemForwardingService::new(
         siem_forwarder,

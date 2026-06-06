@@ -71,6 +71,10 @@ impl<S: SiemSink> SiemForwardingService<S> {
         self.forwarder.buffer().current_size_bytes()
     }
 
+    pub fn total_buffer_size_bytes(&self) -> Result<u64, crate::siem::LocalSiemBufferError> {
+        self.forwarder.buffer().total_size_bytes()
+    }
+
     pub async fn resend_pending(&self) -> SiemResendSummary {
         self.resend_pending_batch(crate::siem::SIEM_MAX_BATCH_SIZE)
             .await

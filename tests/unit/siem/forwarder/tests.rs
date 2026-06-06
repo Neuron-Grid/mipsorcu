@@ -137,6 +137,27 @@ async fn forward_preserves_backend_code_with_siem_prefix() {
 }
 
 #[tokio::test]
+async fn forward_returns_buffering_failed_when_local_buffer_capacity_is_exceeded() {
+    let path = tempfile_path("capacity_failed");
+    let sink = FailingSiemSink::new("siem_total_outage");
+    let buffer = LocalSiemFallbackBuffer::with_limits(&path, 1024 * 1024, 1);
+    let forwarder =
+        SiemForwarder::new_with_retry_policy(sink, buffer.clone(), SiemRetryPolicy::no_retry());
+    let event = build_siem_event();
+
+    let outcome = forwarder.forward(&event).await;
+
+    assert!(matches!(
+        outcome,
+        SiemForwardOutcome::BufferingFailed {
+            sink_error_code
+        } if sink_error_code == "siem_total_outage"
+    ));
+    assert!(buffer.pending_events().unwrap().is_empty());
+    assert!(forwarder.status().failure_since().is_some());
+}
+
+#[tokio::test]
 async fn resend_pending_drains_buffer_when_sink_recovers() {
     let path = tempfile_path("resend");
     let failing = FailingSiemSink::new("simulated_outage");
@@ -162,6 +183,33 @@ async fn resend_pending_drains_buffer_when_sink_recovers() {
     assert_eq!(healthy.event_count(), 1);
 
     let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn resend_pending_batch_compacts_sent_subset_and_keeps_remaining_pending() {
+    let path = tempfile_path("resend_subset_compact");
+    let buffer = LocalSiemFallbackBuffer::with_limits(&path, 1, 1024 * 1024);
+    let first = build_siem_event();
+    let second = build_siem_event();
+    buffer.append_pending(&first).unwrap();
+    buffer.append_pending(&second).unwrap();
+    let before_size = buffer.total_size_bytes().unwrap();
+    let healthy = InMemorySiemSink::new();
+    let forwarder = SiemForwarder::new(healthy.clone(), buffer.clone());
+
+    let summary = forwarder.resend_pending_batch(1).await;
+
+    assert_eq!(summary.attempted, 1);
+    assert_eq!(summary.sent, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(healthy.event_count(), 1);
+    let pending = buffer.pending_events().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].event_id(), second.event_id());
+    assert!(
+        buffer.total_size_bytes().unwrap() < before_size,
+        "compaction should remove the sent event history"
+    );
 }
 
 #[tokio::test]

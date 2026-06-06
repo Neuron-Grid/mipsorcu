@@ -213,6 +213,36 @@ async fn forward_failure_does_not_propagate_to_primary_operation() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[tokio::test]
+async fn buffer_capacity_failure_does_not_propagate_to_primary_operation() {
+    let path = tempfile_path("capacity_isolation");
+    let sink = FailingSiemSink::new("siem_total_outage");
+    let buffer = LocalSiemFallbackBuffer::with_limits(&path, 1024 * 1024, 1);
+    let forwarder =
+        SiemForwarder::new_with_retry_policy(sink, buffer.clone(), SiemRetryPolicy::no_retry());
+
+    async fn primary_with_siem_post_hook<S: SiemSink>(
+        forwarder: &SiemForwarder<S>,
+        event: &SiemEvent,
+    ) -> Result<&'static str, &'static str> {
+        let primary_outcome: Result<&'static str, &'static str> = Ok("primary_ok");
+        let _ = forwarder.forward(event).await;
+        primary_outcome
+    }
+
+    let audit_event = build_decrypt_failure_audit_event();
+    let siem_event = SiemEvent::from_audit_event(&audit_event);
+
+    let primary_result = primary_with_siem_post_hook(&forwarder, &siem_event).await;
+
+    assert_eq!(primary_result, Ok("primary_ok"));
+    assert!(
+        buffer.pending_events().unwrap().is_empty(),
+        "capacity-exceeded SIEM events must not be partially buffered"
+    );
+    assert!(forwarder.status().failure_since().is_some());
+}
+
 #[test]
 fn siem_event_top_level_keys_match_allowlist() {
     // 型レベル境界: SiemEvent の JSON 出力は allowlist 集合と完全一致する。

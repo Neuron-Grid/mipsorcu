@@ -177,11 +177,11 @@ async fn run_siem_buffer_flush_job(
         .siem_forwarding
         .resend_pending_batch(SIEM_MAX_BATCH_SIZE)
         .await;
-    match state.siem_forwarding.current_buffer_size_bytes() {
-        Ok(current_size_bytes) => {
+    match state.siem_forwarding.total_buffer_size_bytes() {
+        Ok(total_size_bytes) => {
             if let Ok(Some(notification)) = state
                 .incident_detector
-                .siem_buffer_threshold(current_size_bytes)
+                .siem_buffer_threshold(total_size_bytes)
             {
                 let detected = DetectedIncident::from_notification(
                     notification,
@@ -194,7 +194,7 @@ async fn run_siem_buffer_flush_job(
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "failed to read SIEM buffer size for scheduler incident detection"
+                "failed to read SIEM buffer total size for scheduler incident detection"
             );
         }
     }

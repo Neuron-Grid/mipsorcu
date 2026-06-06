@@ -3,8 +3,9 @@ use std::time::Duration;
 use crate::types::SecretString;
 
 use super::constants::{
-    DEFAULT_SIEM_BUFFER_MAX_BYTES, DEFAULT_SIEM_LONG_FAILURE_THRESHOLD_SECONDS,
-    DEFAULT_SIEM_RESEND_INTERVAL_SECONDS, ENV_SIEM_BUFFER_MAX_BYTES, ENV_SIEM_EXPORTER,
+    DEFAULT_SIEM_BUFFER_MAX_BYTES, DEFAULT_SIEM_BUFFER_TOTAL_MAX_BYTES,
+    DEFAULT_SIEM_LONG_FAILURE_THRESHOLD_SECONDS, DEFAULT_SIEM_RESEND_INTERVAL_SECONDS,
+    ENV_SIEM_BUFFER_MAX_BYTES, ENV_SIEM_BUFFER_TOTAL_MAX_BYTES, ENV_SIEM_EXPORTER,
     ENV_SIEM_LONG_FAILURE_THRESHOLD_SECONDS, ENV_SIEM_OTLP_AUTH_TOKEN, ENV_SIEM_OTLP_ENDPOINT,
     ENV_SIEM_RESEND_INTERVAL_SECONDS, ENV_SIEM_SPLUNK_HEC_TOKEN, ENV_SIEM_SPLUNK_HEC_URL,
     SIEM_BUFFER_MAX_BYTES_LIMIT,
@@ -40,6 +41,21 @@ pub fn parse_siem_buffer_max_bytes(value: Option<String>) -> Result<u64, ConfigE
     if parsed > SIEM_BUFFER_MAX_BYTES_LIMIT {
         return Err(ConfigError::InvalidValue {
             name: ENV_SIEM_BUFFER_MAX_BYTES,
+            reason: format!("value must be <= {SIEM_BUFFER_MAX_BYTES_LIMIT}"),
+        });
+    }
+    Ok(parsed)
+}
+
+pub fn parse_siem_buffer_total_max_bytes(value: Option<String>) -> Result<u64, ConfigError> {
+    let parsed = parse_positive_u64_config(
+        value,
+        ENV_SIEM_BUFFER_TOTAL_MAX_BYTES,
+        DEFAULT_SIEM_BUFFER_TOTAL_MAX_BYTES,
+    )?;
+    if parsed > SIEM_BUFFER_MAX_BYTES_LIMIT {
+        return Err(ConfigError::InvalidValue {
+            name: ENV_SIEM_BUFFER_TOTAL_MAX_BYTES,
             reason: format!("value must be <= {SIEM_BUFFER_MAX_BYTES_LIMIT}"),
         });
     }

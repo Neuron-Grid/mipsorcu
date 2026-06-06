@@ -15,7 +15,7 @@ use mipsorcu::server::config::{
     parse_outbound_http_connect_timeout, parse_outbound_http_request_timeout,
     parse_restore_test_interval, parse_restore_test_sample_limit, parse_restore_test_startup_delay,
     parse_scheduler_enabled, parse_scheduler_startup_delay, parse_siem_buffer_max_bytes,
-    scheduler_startup_delay_value,
+    parse_siem_buffer_total_max_bytes, scheduler_startup_delay_value,
 };
 use mipsorcu::{
     AliasEncryptionKey, AliasFingerprintKey, KeyVersion, LEDGER_ED25519_SECRET_KEY_LENGTH,
@@ -125,6 +125,7 @@ fn load_config_from_sources_uses_dotenv_for_missing_process_vars() {
     assert_eq!(config.supabase_url, "https://from-dotenv.supabase.co");
     assert_eq!(config.siem_resend_interval, Duration::from_secs(300));
     assert_eq!(config.siem_buffer_max_bytes, 100 * 1024 * 1024);
+    assert_eq!(config.siem_buffer_total_max_bytes, 100 * 1024 * 1024);
 }
 
 #[test]
@@ -496,6 +497,65 @@ fn siem_buffer_max_bytes_rejects_zero_empty_non_numeric_and_oversized_values() {
     assert!(matches!(
         parse_siem_buffer_max_bytes(Some((1024_u64 * 1024 * 1024 + 1).to_string())),
         Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn siem_buffer_total_max_bytes_defaults_to_task13_total_limit() {
+    let max_bytes = parse_siem_buffer_total_max_bytes(None)
+        .expect("default SIEM total buffer limit should be valid");
+
+    assert_eq!(max_bytes, 100 * 1024 * 1024);
+}
+
+#[test]
+fn siem_buffer_total_max_bytes_accepts_positive_values() {
+    let max_bytes =
+        parse_siem_buffer_total_max_bytes(Some("8192".to_owned())).expect("value should parse");
+
+    assert_eq!(max_bytes, 8192);
+}
+
+#[test]
+fn siem_buffer_total_max_bytes_rejects_zero_empty_non_numeric_and_oversized_values() {
+    assert!(matches!(
+        parse_siem_buffer_total_max_bytes(Some("0".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_siem_buffer_total_max_bytes(Some(String::new())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_siem_buffer_total_max_bytes(Some("not-a-number".to_owned())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse_siem_buffer_total_max_bytes(Some((1024_u64 * 1024 * 1024 + 1).to_string())),
+        Err(ConfigError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn load_config_rejects_siem_total_buffer_limit_smaller_than_rotate_limit() {
+    let process_env = HashMap::<String, String>::new();
+    let get_process_var = |name: &str| process_env.get(name).cloned();
+    let mut dotenv = base_dotenv();
+    dotenv.insert(
+        "MIPSORCU_SIEM_BUFFER_MAX_BYTES".to_owned(),
+        "4096".to_owned(),
+    );
+    dotenv.insert(
+        "MIPSORCU_SIEM_BUFFER_TOTAL_MAX_BYTES".to_owned(),
+        "2048".to_owned(),
+    );
+
+    assert!(matches!(
+        load_config_from_sources(&get_process_var, &dotenv),
+        Err(ConfigError::InvalidValue {
+            name: "MIPSORCU_SIEM_BUFFER_TOTAL_MAX_BYTES",
+            ..
+        })
     ));
 }
 
@@ -1096,6 +1156,7 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
         audit_fallback_path: PathBuf::from("/tmp/mipsorcu-audit.jsonl"),
         siem_buffer_path: PathBuf::from("/tmp/mipsorcu-siem.jsonl"),
         siem_buffer_max_bytes: 4096,
+        siem_buffer_total_max_bytes: 8192,
         siem_exporter: mipsorcu::server::config::SiemExporterConfig::Disabled,
         incident_notifier: mipsorcu::server::config::IncidentNotifierConfig::None,
         audit_resend_interval: Duration::from_secs(60),
@@ -1130,6 +1191,8 @@ fn app_config_debug_redacts_secrets_and_shows_audit_threshold() {
     assert!(output.contains("siem_buffer_path"));
     assert!(output.contains("siem_buffer_max_bytes"));
     assert!(output.contains("4096"));
+    assert!(output.contains("siem_buffer_total_max_bytes"));
+    assert!(output.contains("8192"));
     assert!(output.contains("siem_resend_interval_seconds"));
     assert!(output.contains("61"));
     assert!(output.contains("siem_long_failure_threshold_seconds"));

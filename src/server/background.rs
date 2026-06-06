@@ -308,11 +308,11 @@ async fn record_siem_resend_result(
         }
     }
 
-    match siem_forwarding.current_buffer_size_bytes() {
-        Ok(current_size_bytes) => {
+    match siem_forwarding.total_buffer_size_bytes() {
+        Ok(total_size_bytes) => {
             if let Ok(Some(notification)) = state
                 .incident_detector
-                .siem_buffer_threshold(current_size_bytes)
+                .siem_buffer_threshold(total_size_bytes)
             {
                 let detected = DetectedIncident::from_notification(
                     notification,
@@ -325,7 +325,7 @@ async fn record_siem_resend_result(
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "failed to read SIEM buffer size for incident detection"
+                "failed to read SIEM buffer total size for incident detection"
             );
         }
     }
