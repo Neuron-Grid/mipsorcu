@@ -11,14 +11,16 @@
 //! `pending_events` から除外される）。
 //!
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
+
+use crate::local_jsonl::{create_truncate_private, for_each_nonempty_line, open_append_private};
 
 use super::event::SiemEvent;
 
@@ -36,6 +38,12 @@ struct LocalSiemFallbackRecord {
     event_id: String,
     status: DeliveryStatus,
     event: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LocalSiemFallbackRecordHeader {
+    event_id: String,
+    status: DeliveryStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,18 +204,7 @@ impl LocalSiemFallbackBuffer {
             .lock()
             .map_err(|_| LocalSiemBufferError::LockPoisoned)?;
 
-        let states = self.latest_states_unlocked()?;
-        let mut pending = Vec::new();
-        for state in states {
-            if state.status == DeliveryStatus::Pending {
-                let event: SiemEvent = serde_json::from_value(state.event)?;
-                pending.push(event);
-                if pending.len() >= limit {
-                    break;
-                }
-            }
-        }
-        Ok(pending)
+        self.pending_batch_unlocked(limit)
     }
 
     pub fn remaining_bytes(&self) -> Result<u64, LocalSiemBufferError> {
@@ -358,6 +355,72 @@ impl LocalSiemFallbackBuffer {
         Ok(total)
     }
 
+    fn pending_batch_unlocked(&self, limit: usize) -> Result<Vec<SiemEvent>, LocalSiemBufferError> {
+        let paths = self.buffer_files_unlocked()?;
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pending_ids = Self::pending_ids_unlocked(&paths, limit)?;
+        if pending_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Self::read_pending_events_by_id_unlocked(&paths, &pending_ids)
+    }
+
+    fn pending_ids_unlocked(
+        paths: &[PathBuf],
+        limit: usize,
+    ) -> Result<Vec<String>, LocalSiemBufferError> {
+        let headers = latest_headers_unlocked(paths)?;
+        Ok(headers
+            .into_iter()
+            .filter_map(|header| {
+                (header.status == DeliveryStatus::Pending).then_some(header.event_id)
+            })
+            .take(limit)
+            .collect())
+    }
+
+    fn read_pending_events_by_id_unlocked(
+        paths: &[PathBuf],
+        pending_ids: &[String],
+    ) -> Result<Vec<SiemEvent>, LocalSiemBufferError> {
+        let pending_index = pending_ids
+            .iter()
+            .enumerate()
+            .map(|(index, event_id)| (event_id.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let mut event_values = vec![None; pending_ids.len()];
+
+        for path in paths {
+            for_each_nonempty_line(path, |_line_number, line| {
+                let header: LocalSiemFallbackRecordHeader = serde_json::from_str(line)?;
+                if let Some(index) = pending_index.get(&header.event_id)
+                    && header.status == DeliveryStatus::Pending
+                    && let Some(slot) = event_values.get_mut(*index)
+                {
+                    let record: LocalSiemFallbackRecord = serde_json::from_str(line)?;
+                    *slot = Some(record.event);
+                }
+                Ok::<(), LocalSiemBufferError>(())
+            })?;
+        }
+
+        let mut pending_events = Vec::with_capacity(pending_ids.len());
+        for event_value in event_values {
+            let value = event_value.ok_or_else(|| {
+                LocalSiemBufferError::Io(std::io::Error::other(
+                    "pending SIEM buffer record disappeared during replay",
+                ))
+            })?;
+            pending_events.push(serde_json::from_value(value)?);
+        }
+
+        Ok(pending_events)
+    }
+
     fn latest_states_unlocked(&self) -> Result<Vec<LatestState>, LocalSiemBufferError> {
         let paths = self.buffer_files_unlocked()?;
         if paths.is_empty() {
@@ -408,7 +471,7 @@ impl LocalSiemFallbackBuffer {
             .collect::<Vec<_>>();
         let states = self.latest_states_unlocked()?;
         let temp_path = compaction_temp_path(&self.path);
-        let mut file = create_private_file(&temp_path)?;
+        let mut file = create_truncate_private(&temp_path)?;
 
         for state in states {
             if state.status != DeliveryStatus::Pending {
@@ -449,7 +512,7 @@ impl LocalSiemFallbackBuffer {
             fs::create_dir_all(parent)?;
         }
         fs::rename(&self.path, &archive_path)?;
-        let file = create_private_file(&self.path)?;
+        let file = create_truncate_private(&self.path)?;
         file.sync_data()?;
         Ok(())
     }
@@ -468,48 +531,16 @@ struct LatestState {
     order: usize,
 }
 
+struct LatestHeader {
+    event_id: String,
+    status: DeliveryStatus,
+    order: usize,
+}
+
 fn encode_record(record: &LocalSiemFallbackRecord) -> Result<Vec<u8>, LocalSiemBufferError> {
     let mut bytes = serde_json::to_vec(record)?;
     bytes.push(b'\n');
     Ok(bytes)
-}
-
-fn open_append_private(path: &Path) -> Result<File, std::io::Error> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut options = OpenOptions::new();
-    options.append(true).create(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    options.open(path)
-}
-
-fn create_private_file(path: &Path) -> Result<File, std::io::Error> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    options.open(path)
 }
 
 fn compaction_temp_path(current_path: &Path) -> PathBuf {
@@ -525,19 +556,54 @@ fn parse_records(
     path: &Path,
     mut handle: impl FnMut(LocalSiemFallbackRecord) -> Result<(), LocalSiemBufferError>,
 ) -> Result<(), LocalSiemBufferError> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let record: LocalSiemFallbackRecord = serde_json::from_str(&line)?;
+    for_each_nonempty_line(path, |_line_number, line| {
+        let record: LocalSiemFallbackRecord = serde_json::from_str(line)?;
         handle(record)?;
+        Ok::<(), LocalSiemBufferError>(())
+    })
+}
+
+fn parse_record_headers(
+    path: &Path,
+    mut handle: impl FnMut(LocalSiemFallbackRecordHeader) -> Result<(), LocalSiemBufferError>,
+) -> Result<(), LocalSiemBufferError> {
+    for_each_nonempty_line(path, |_line_number, line| {
+        let header: LocalSiemFallbackRecordHeader = serde_json::from_str(line)?;
+        handle(header)?;
+        Ok::<(), LocalSiemBufferError>(())
+    })
+}
+
+fn latest_headers_unlocked(paths: &[PathBuf]) -> Result<Vec<LatestHeader>, LocalSiemBufferError> {
+    let mut headers = HashMap::<String, LatestHeader>::new();
+    let mut next_order = 0usize;
+
+    for path in paths {
+        parse_record_headers(path, |header| {
+            let order = headers
+                .get(&header.event_id)
+                .map(|state| state.order)
+                .unwrap_or_else(|| {
+                    let order = next_order;
+                    next_order = next_order.saturating_add(1);
+                    order
+                });
+            let event_id = header.event_id;
+            headers.insert(
+                event_id.clone(),
+                LatestHeader {
+                    event_id,
+                    status: header.status,
+                    order,
+                },
+            );
+            Ok(())
+        })?;
     }
 
-    Ok(())
+    let mut headers = headers.into_values().collect::<Vec<_>>();
+    headers.sort_by_key(|header| header.order);
+    Ok(headers)
 }
 
 fn rotated_buffer_paths(current_path: &Path) -> Result<Vec<PathBuf>, LocalSiemBufferError> {

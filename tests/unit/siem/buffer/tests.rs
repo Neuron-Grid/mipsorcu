@@ -149,6 +149,58 @@ fn mark_sent_in_current_file_overrides_pending_record_in_rotated_file() {
 }
 
 #[test]
+fn pending_batch_deserializes_only_limited_pending_payloads() {
+    let path = tempfile_path("limit_deserialize");
+    let buffer = LocalSiemFallbackBuffer::new(&path);
+    let first = build_event();
+    buffer.append_pending(&first).unwrap();
+    append_raw_record(
+        &path,
+        serde_json::json!({
+            "event_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "status": "pending",
+            "event": {
+                "invalid": true
+            }
+        }),
+    );
+
+    let limited = buffer.pending_batch(1).unwrap();
+
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].event_id(), first.event_id());
+    assert!(matches!(
+        buffer
+            .pending_batch(2)
+            .expect_err("second pending payload is malformed"),
+        LocalSiemBufferError::Serialization(_)
+    ));
+}
+
+#[test]
+fn pending_batch_with_rotated_sent_marker_preserves_order_and_limit() {
+    let path = tempfile_path("rotate_sent_limit");
+    let buffer = LocalSiemFallbackBuffer::with_limits(&path, 1, 1024 * 1024);
+    let first = build_event();
+    let second = build_event();
+    let third = build_event();
+
+    buffer.append_pending(&first).unwrap();
+    buffer.append_pending(&second).unwrap();
+    buffer.append_pending(&third).unwrap();
+    buffer.mark_sent(&first).unwrap();
+
+    let limited = buffer.pending_batch(1).unwrap();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].event_id(), second.event_id());
+
+    let pending = buffer.pending_batch(2).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].event_id(), second.event_id());
+    assert_eq!(pending[1].event_id(), third.event_id());
+}
+
+#[test]
 fn compact_rewrites_latest_pending_only_and_removes_rotated_files() {
     let path = tempfile_path("compact_mixed");
     let buffer = LocalSiemFallbackBuffer::with_limits(&path, 1, 1024 * 1024);
@@ -399,6 +451,14 @@ fn read_current_lines(path: &Path) -> Vec<String> {
         .lines()
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn append_raw_record(path: &Path, record: serde_json::Value) {
+    use std::io::Write;
+
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    serde_json::to_writer(&mut file, &record).unwrap();
+    file.write_all(b"\n").unwrap();
 }
 
 fn file_size(path: &Path) -> u64 {

@@ -22,6 +22,8 @@ pub mod timestamping;
 pub mod types;
 pub mod write;
 
+mod local_jsonl;
+
 pub use aad::AadV1;
 pub use alias::{
     ALIAS_AAD_VERSION_V1, ALIAS_FINGERPRINT_LENGTH, ALIAS_FINGERPRINT_SCHEMA_VERSION_V1,

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,8 @@ use flate2::write::GzEncoder;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
+
+use crate::local_jsonl::{create_new_private, for_each_nonempty_line, open_append_private};
 
 use super::super::event::AuditEvent;
 use super::error::LocalAuditStoreError;
@@ -117,7 +119,7 @@ impl LocalAuditFallbackStore {
                 source,
             }
         })?;
-        let file = create_private_file(&self.path)?;
+        let file = create_new_private(&self.path)?;
         file.sync_data()?;
 
         Ok(RolloverOutcome::Sealed(RolloverArchive {
@@ -281,18 +283,8 @@ impl LocalAuditFallbackStore {
     where
         F: for<'a> FnMut(ParsedFallbackRecord<'a>) -> Result<(), LocalAuditStoreError>,
     {
-        let file = File::open(&self.path)?;
-        let reader = BufReader::new(file);
-
-        for (index, line) in reader.lines().enumerate() {
-            let line_number = index + 1;
-            let line = line?;
-
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let record: LocalAuditFallbackRecord = serde_json::from_str(&line)?;
+        for_each_nonempty_line(&self.path, |line_number, line| {
+            let record: LocalAuditFallbackRecord = serde_json::from_str(line)?;
             let event = record.to_event(line_number)?;
             let event_id = event.audit_event_id().as_canonical_string();
             handle_record(ParsedFallbackRecord {
@@ -301,9 +293,8 @@ impl LocalAuditFallbackStore {
                 delivery_status: record.delivery_status(),
                 occurred_at: record.non_empty_occurred_at(),
             })?;
-        }
-
-        Ok(())
+            Ok::<(), LocalAuditStoreError>(())
+        })
     }
 
     fn next_archive_path(&self) -> Result<PathBuf, LocalAuditStoreError> {
@@ -325,7 +316,7 @@ impl LocalAuditFallbackStore {
                 path: archive_path.to_path_buf(),
                 source,
             })?;
-        let archive_file = create_private_file(archive_path).map_err(|source| {
+        let archive_file = create_new_private(archive_path).map_err(|source| {
             LocalAuditStoreError::GzipWriteFailed {
                 path: archive_path.to_path_buf(),
                 source,
@@ -416,40 +407,6 @@ fn is_archive_file(path: &Path) -> bool {
         .is_some_and(|name| {
             name.starts_with(ARCHIVE_FILE_PREFIX) && name.ends_with(ARCHIVE_FILE_SUFFIX)
         })
-}
-
-fn open_append_private(path: &Path) -> Result<File, std::io::Error> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut options = OpenOptions::new();
-    options.append(true).create(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    options.open(path)
-}
-
-fn create_private_file(path: &Path) -> Result<File, std::io::Error> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    options.open(path)
 }
 
 fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
