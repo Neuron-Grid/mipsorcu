@@ -8,10 +8,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::audit::{AuditRecordError, AuditRecorder, LocalAuditFallbackStore};
+use crate::audit::{
+    AuditAppendError, AuditEvent, AuditEventAppender, AuditRecordError, AuditRecorder,
+    LocalAuditFallbackStore,
+};
 use crate::auth::{Jwk, Jwks, JwksCache, JwtVerifier, JwtVerifierConfig};
 use crate::crypto::MasterKeyRing;
-use crate::incident::{DummyNotificationSink, IncidentRecorder};
+use crate::incident::{
+    ComponentName, DummyNotificationSink, IncidentCategory, IncidentDispatchOutcome,
+    IncidentDispatcher, IncidentId, IncidentNotification, IncidentRecorder, IncidentRetryPolicy,
+    IncidentSeverity, IncidentSummary,
+};
 use crate::ledger::{
     LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerSignatureKeyVersion, LedgerSigningKey,
 };
@@ -27,6 +34,7 @@ use crate::siem::{
 };
 use crate::types::{
     AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
+    SourceEventAt,
 };
 
 const JWT_ISSUER: &str = "issuer";
@@ -43,6 +51,18 @@ type TestServerHandle = (
     mpsc::Receiver<CapturedRequest>,
     thread::JoinHandle<std::io::Result<()>>,
 );
+
+#[derive(Clone, Default)]
+struct NoopAuditAppender;
+
+impl AuditEventAppender for NoopAuditAppender {
+    async fn append_audit_event<'a>(
+        &'a self,
+        _event: &'a AuditEvent,
+    ) -> Result<(), AuditAppendError> {
+        Ok(())
+    }
+}
 
 async fn recv_captured_request(
     label: &str,
@@ -187,6 +207,52 @@ fn test_app_state(
         http_rate_limit_requests: 300,
         http_rate_limit_window: Duration::from_secs(60),
     })
+}
+
+fn incident_dispatcher_for_background_test(
+    audit_fallback_path: PathBuf,
+    sink: DummyNotificationSink,
+    window: Duration,
+) -> Arc<IncidentDispatcher<DummyNotificationSink, NoopAuditAppender>> {
+    let audit_recorder = Arc::new(AuditRecorder::new(
+        NoopAuditAppender,
+        LocalAuditFallbackStore::new(audit_fallback_path),
+    ));
+    Arc::new(
+        IncidentDispatcher::new(Arc::new(sink), audit_recorder)
+            .with_rate_limit_window(window)
+            .with_retry_policy(IncidentRetryPolicy {
+                max_attempts: 1,
+                initial_backoff: Duration::ZERO,
+                max_total_backoff: Duration::ZERO,
+            }),
+    )
+}
+
+fn incident_notification(incident_id: &str) -> IncidentNotification {
+    let timestamp =
+        SourceEventAt::parse("2026-06-01T02:00:00Z").expect("test timestamp must be valid");
+    IncidentNotification::new(
+        IncidentId::parse(incident_id).expect("test incident id must be valid"),
+        timestamp.clone(),
+        IncidentCategory::SchedulerFailure,
+        IncidentSeverity::High,
+        IncidentSummary::new("scheduler job failed three consecutive times")
+            .expect("test incident summary must be valid"),
+        vec![ComponentName::scheduler()],
+        timestamp,
+    )
+    .expect("test incident notification must be valid")
+}
+
+async fn notification_count_reaches(sink: &DummyNotificationSink, expected: usize) -> bool {
+    for _ in 0..100 {
+        if sink.notification_count() == expected {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    false
 }
 
 fn integrity_summary_json(violation_count: u64) -> Value {
@@ -496,6 +562,110 @@ async fn background_restore_and_integrity_startup_offsets_are_phased()
         .expect("background server thread should not panic")?;
 
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn incident_aggregate_flush_loop_sends_due_aggregate_without_later_dispatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let observed_sink = DummyNotificationSink::new();
+    let dispatcher = incident_dispatcher_for_background_test(
+        temp_path("incident-aggregate-loop"),
+        observed_sink.clone(),
+        Duration::from_secs(10),
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch(incident_notification(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            ))
+            .await,
+        IncidentDispatchOutcome::Sent
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch(incident_notification(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+            ))
+            .await,
+        IncidentDispatchOutcome::Suppressed
+    );
+    assert_eq!(observed_sink.notification_count(), 1);
+
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let handle = tokio::spawn(super::run_incident_aggregate_flush_loop(
+        dispatcher,
+        Duration::from_secs(10),
+        shutdown_receiver,
+    ));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_secs(9)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(observed_sink.notification_count(), 1);
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(
+        notification_count_reaches(&observed_sink, 2).await,
+        "aggregate notification should be flushed by the background loop"
+    );
+
+    shutdown_sender
+        .send(true)
+        .expect("shutdown signal should send");
+    handle
+        .await
+        .expect("incident aggregate flush loop should not panic");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn incident_aggregate_flush_loop_stops_on_shutdown_signal() {
+    let dispatcher = incident_dispatcher_for_background_test(
+        temp_path("incident-aggregate-shutdown"),
+        DummyNotificationSink::new(),
+        Duration::from_secs(60),
+    );
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let task = tokio::spawn(super::run_incident_aggregate_flush_loop(
+        dispatcher,
+        Duration::from_secs(60),
+        shutdown_receiver,
+    ));
+
+    shutdown_sender
+        .send(true)
+        .expect("shutdown signal should send");
+
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("incident aggregate flush loop should stop promptly")
+        .expect("incident aggregate flush loop should not panic");
+}
+
+#[tokio::test]
+async fn incident_aggregate_flush_loop_accepts_zero_interval() {
+    let dispatcher = incident_dispatcher_for_background_test(
+        temp_path("incident-aggregate-zero-interval"),
+        DummyNotificationSink::new(),
+        Duration::from_secs(60),
+    );
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let task = tokio::spawn(super::run_incident_aggregate_flush_loop(
+        dispatcher,
+        Duration::ZERO,
+        shutdown_receiver,
+    ));
+    tokio::task::yield_now().await;
+
+    shutdown_sender
+        .send(true)
+        .expect("shutdown signal should send");
+
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("incident aggregate flush loop should stop promptly")
+        .expect("incident aggregate flush loop should not panic");
 }
 
 #[test]

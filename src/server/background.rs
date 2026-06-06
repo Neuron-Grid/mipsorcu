@@ -5,10 +5,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::audit::{
-    ArchiveSweepOutcome, AuditRecordError, AuditRecorder, AuditTrigger, LocalAuditFallbackStore,
-    LocalAuditStoreError, ResendAuditSummary, RolloverOutcome,
+    ArchiveSweepOutcome, AuditEventAppender, AuditRecordError, AuditRecorder, AuditTrigger,
+    LocalAuditFallbackStore, LocalAuditStoreError, ResendAuditSummary, RolloverOutcome,
 };
 use crate::auth::{JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, fetch_jwks};
+use crate::incident::{IncidentDispatcher, IncidentNotifier};
 use crate::server::incident::{
     DetectedIncident, record_and_dispatch_incident, record_siem_long_failure_incident,
 };
@@ -19,6 +20,7 @@ use crate::server::{integrity_check, restore_test};
 use crate::siem::{AnySiemSink, SiemForwarderStatus, SiemResendSummary};
 
 const AUDIT_ARCHIVE_SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const MIN_INCIDENT_AGGREGATE_FLUSH_INTERVAL: Duration = Duration::from_millis(1);
 
 pub async fn initialize_jwt_verifier_from_jwks_url(
     http_client: &reqwest::Client,
@@ -123,6 +125,32 @@ pub(crate) async fn run_supabase_readiness_poll_loop(
     }
 }
 
+pub(crate) async fn run_incident_aggregate_flush_loop<N, A>(
+    dispatcher: Arc<IncidentDispatcher<N, A>>,
+    flush_interval: Duration,
+    mut shutdown_receiver: watch::Receiver<bool>,
+) where
+    N: IncidentNotifier,
+    A: AuditEventAppender,
+{
+    let mut interval = tokio::time::interval(incident_aggregate_flush_interval(flush_interval));
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            result = shutdown_receiver.changed() => {
+                if result.is_err() || *shutdown_receiver.borrow() {
+                    tracing::info!("incident aggregate flush loop stopped");
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                dispatcher.flush_due_aggregates().await;
+            }
+        }
+    }
+}
+
 pub(crate) async fn run_restore_test_loop(
     state: AppState,
     interval_duration: Duration,
@@ -151,6 +179,14 @@ pub(crate) async fn run_restore_test_loop(
                 restore_test::run_restore_test_once(&state, sample_limit, AuditTrigger::Background).await;
             }
         }
+    }
+}
+
+fn incident_aggregate_flush_interval(flush_interval: Duration) -> Duration {
+    if flush_interval.is_zero() {
+        MIN_INCIDENT_AGGREGATE_FLUSH_INTERVAL
+    } else {
+        flush_interval
     }
 }
 

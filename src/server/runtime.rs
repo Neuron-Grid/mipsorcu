@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use tokio::sync::watch;
+use tokio::{sync::watch, task::JoinHandle};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
@@ -202,9 +202,9 @@ async fn run_server_with_config(config: config::AppConfig) {
     let (state, deps) = build_app_state(config, http_client).await;
 
     let (shutdown_sender, _shutdown_receiver) = watch::channel(false);
-    spawn_background_loops(&state, deps, &shutdown_sender);
+    let background_handles = spawn_background_loops(&state, deps, &shutdown_sender);
 
-    serve_app(state, listen_addr, shutdown_sender).await;
+    serve_app(state, listen_addr, shutdown_sender, background_handles).await;
 }
 
 /// `build_app_state` がバックグラウンドループ起動側へ受け渡す依存一式。
@@ -231,6 +231,10 @@ struct BackgroundDeps {
     siem_long_failure_threshold: Duration,
     scheduler_enabled: bool,
     scheduler: scheduler::SchedulerConfig,
+}
+
+struct BackgroundLoopHandles {
+    incident_aggregate_flush: Option<JoinHandle<()>>,
 }
 
 /// 設定からインフラ（暗号鍵・各種クライアント・recorder・forwarder）を構築し、
@@ -502,7 +506,7 @@ fn spawn_background_loops(
     state: &AppState,
     deps: BackgroundDeps,
     shutdown_sender: &watch::Sender<bool>,
-) {
+) -> BackgroundLoopHandles {
     let BackgroundDeps {
         http_client,
         jwks_cache,
@@ -524,6 +528,9 @@ fn spawn_background_loops(
         scheduler_enabled,
         scheduler,
     } = deps;
+
+    let incident_aggregate_flush =
+        spawn_incident_aggregate_flush_loop(state.incident_dispatcher.as_ref(), shutdown_sender);
 
     tokio::spawn(background::run_jwks_refresh_loop(
         jwks_cache,
@@ -582,6 +589,25 @@ fn spawn_background_loops(
             shutdown_sender.subscribe(),
         ));
     }
+
+    BackgroundLoopHandles {
+        incident_aggregate_flush,
+    }
+}
+
+fn spawn_incident_aggregate_flush_loop(
+    incident_dispatcher: Option<
+        &Arc<IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>,
+    >,
+    shutdown_sender: &watch::Sender<bool>,
+) -> Option<JoinHandle<()>> {
+    let dispatcher = incident_dispatcher?.clone();
+    let flush_interval = dispatcher.rate_limit_window();
+    Some(tokio::spawn(background::run_incident_aggregate_flush_loop(
+        dispatcher,
+        flush_interval,
+        shutdown_sender.subscribe(),
+    )))
 }
 
 fn build_notification_sink(
@@ -753,7 +779,9 @@ async fn serve_app(
     state: AppState,
     listen_addr: std::net::SocketAddr,
     shutdown_sender: watch::Sender<bool>,
+    background_handles: BackgroundLoopHandles,
 ) {
+    let incident_dispatcher = state.incident_dispatcher.clone();
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(listen_addr)
@@ -772,6 +800,12 @@ async fn serve_app(
             tracing::error!(error = %error, "server error");
             std::process::exit(1);
         });
+
+    drain_incident_aggregate_flush(
+        incident_dispatcher,
+        background_handles.incident_aggregate_flush,
+    )
+    .await;
 }
 
 pub fn build_app(state: AppState) -> Router {
@@ -782,6 +816,26 @@ async fn shutdown_signal(shutdown_sender: watch::Sender<bool>) {
     let signal = wait_for_shutdown_signal().await;
     let _ = shutdown_sender.send(true);
     tracing::info!(signal, "shutdown signal received");
+}
+
+async fn drain_incident_aggregate_flush(
+    incident_dispatcher: Option<
+        Arc<IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>,
+    >,
+    incident_aggregate_flush: Option<JoinHandle<()>>,
+) {
+    if let Some(handle) = incident_aggregate_flush {
+        match handle.await {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::error!(error = %error, "incident aggregate flush loop task failed");
+            }
+        }
+    }
+
+    if let Some(dispatcher) = incident_dispatcher {
+        dispatcher.flush_due_aggregates().await;
+    }
 }
 
 #[cfg(unix)]

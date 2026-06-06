@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use crate::audit::{
     AuditAction, AuditEvent, AuditEventAppender, AuditRecordError, AuditRecorder, AuditResult,
@@ -101,6 +103,10 @@ where
         self
     }
 
+    pub fn rate_limit_window(&self) -> Duration {
+        self.rate_limit_window
+    }
+
     pub fn with_retry_policy(mut self, retry_policy: IncidentRetryPolicy) -> Self {
         self.retry_policy = retry_policy;
         self
@@ -172,9 +178,7 @@ where
         let keys = guard
             .iter()
             .filter_map(|(key, window)| {
-                if window.started_at.elapsed() >= self.rate_limit_window
-                    && window.suppressed_count > 0
-                {
+                if window.started_at.elapsed() >= self.rate_limit_window {
                     Some(key.clone())
                 } else {
                     None
@@ -185,6 +189,7 @@ where
         let mut aggregates = Vec::new();
         for key in keys {
             if let Some(window) = guard.remove(&key)
+                && window.suppressed_count > 0
                 && let Some(notification) = build_aggregate_notification(&window)
             {
                 aggregates.push(notification);
