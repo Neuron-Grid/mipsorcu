@@ -1,10 +1,253 @@
-use super::*;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::json;
 use time::{Date, Time};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use super::jobs::{persist_timestamping_token_to_archive, run_monthly_timestamping_obtain_job};
+use super::*;
+use crate::archive::{AnyArchiveBackend, LocalFileArchiveBackend};
+use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
+use crate::auth::{Jwk, Jwks, JwtVerifier, JwtVerifierConfig};
+use crate::crypto::MasterKeyRing;
+use crate::incident::{
+    AnyNotificationSink, DummyNotificationSink, IncidentDetector, IncidentDispatcher,
+    IncidentRecorder,
+};
+use crate::ledger::{
+    DigestHash, LEDGER_ED25519_SECRET_KEY_LENGTH, LedgerHash, LedgerSequenceNo, LedgerSignature,
+    LedgerSignatureKeyVersion, LedgerSigningKey, MonthlyDigestPeriod, SignedMonthlyDigest,
+    build_monthly_digest_canonical_form,
+};
+use crate::server::ledger_appender::LedgerAppender;
+use crate::server::siem_forwarding::SiemForwardingService;
+use crate::server::state::{AppState, ReadinessState};
+use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
+use crate::siem::{AnySiemSink, InMemorySiemSink, LocalSiemFallbackBuffer, SiemForwarder};
+use crate::timestamping::{
+    AnyTimestampingProvider, InMemoryTimestampingService, TimestampingToken,
+};
+use crate::types::{
+    AliasEncryptionKey, AliasFingerprintKey, KeyVersion, MASTER_KEY_LENGTH, MasterKey,
+    SourceEventAt,
+};
+
+const JWT_ISSUER: &str = "issuer";
+const JWT_AUDIENCE: &str = "audience";
 
 fn dt(year: i32, month: Month, day: u8, hour: u8) -> OffsetDateTime {
     let date = Date::from_calendar_date(year, month, day).expect("valid test date");
     let time = Time::from_hms(hour, 0, 0).expect("valid test time");
     date.with_time(time).assume_utc()
+}
+
+fn unique_temp_path(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after UNIX_EPOCH for tests")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "mipsorcu-scheduler-{label}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+fn token_path(base_dir: &Path, period: &MonthlyDigestPeriod) -> PathBuf {
+    base_dir
+        .join("timestamping")
+        .join(period.as_str())
+        .join("token.tsr")
+}
+
+fn test_scheduler_config(
+    local_archive_dir: PathBuf,
+    archive_backend: Option<Arc<AnyArchiveBackend>>,
+    timestamping_provider: Option<Arc<AnyTimestampingProvider>>,
+) -> SchedulerConfig {
+    SchedulerConfig {
+        startup_delay: Duration::from_secs(0),
+        poll_interval: Duration::from_secs(60),
+        monthly_day: 1,
+        monthly_hour_utc: 4,
+        quarterly_hour_utc: 5,
+        daily_hour_utc: 4,
+        envelope_migration_batch_size: 100,
+        envelope_migration_max_batches: 1,
+        restore_test_sample_limit: 10,
+        local_archive_dir,
+        archive_backend,
+        timestamping_provider,
+    }
+}
+
+fn test_period() -> MonthlyDigestPeriod {
+    MonthlyDigestPeriod::parse("2026-05").expect("valid test period")
+}
+
+fn test_token() -> TimestampingToken {
+    TimestampingToken::new(b"DUMMY-TST-V1:scheduler-regression".to_vec())
+        .expect("valid non-empty timestamping token")
+}
+
+fn sample_master_key() -> MasterKey {
+    MasterKey::from_bytes([11u8; MASTER_KEY_LENGTH])
+}
+
+fn test_signed_monthly_digest() -> SignedMonthlyDigest {
+    let period = test_period();
+    let start_hash = LedgerHash::from_bytes(&[0xaa; 32]).expect("valid hash");
+    let end_hash = LedgerHash::from_bytes(&[0xbb; 32]).expect("valid hash");
+    let generated_at = SourceEventAt::parse("2026-06-01T00:00:00Z").expect("valid timestamp");
+    let key_version = LedgerSignatureKeyVersion::new(1).expect("valid key version");
+    let start_seq = LedgerSequenceNo::new(1).expect("valid seq");
+    let end_seq = LedgerSequenceNo::new(42).expect("valid seq");
+
+    let canonical_bytes = build_monthly_digest_canonical_form(
+        &period,
+        start_seq,
+        end_seq,
+        start_hash,
+        end_hash,
+        42,
+        &generated_at,
+        key_version,
+    )
+    .expect("canonical form build must succeed");
+
+    let digest_hash = DigestHash::from_canonical_bytes(&canonical_bytes);
+    let sbc_signature = LedgerSignature::from_bytes(&[0u8; 64]).expect("valid signature");
+
+    SignedMonthlyDigest {
+        period,
+        start_sequence_no: start_seq,
+        end_sequence_no: end_seq,
+        start_entry_hash: start_hash,
+        end_entry_hash: end_hash,
+        entry_count: 42,
+        digest_generated_at: generated_at,
+        signature_key_version: key_version,
+        canonical_bytes,
+        digest_hash,
+        sbc_signature,
+    }
+}
+
+fn test_app_state(
+    supabase_url: &str,
+    audit_fallback_path: PathBuf,
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    let http_client = reqwest::Client::new();
+    let supabase_client = Arc::new(SupabaseClient::new(
+        http_client,
+        supabase_url.to_owned(),
+        "service-role-key",
+        "publishable-key",
+    ));
+    let audit_appender = SupabaseAuditAppender::new(supabase_client.clone());
+    let audit_fallback_store = LocalAuditFallbackStore::new(audit_fallback_path);
+    let audit_recorder = Arc::new(AuditRecorder::new(
+        audit_appender,
+        audit_fallback_store.clone(),
+    ));
+    let ledger_signing_key = LedgerSigningKey::from_secret_key_bytes(
+        LedgerSignatureKeyVersion::new(1)?,
+        &[9u8; LEDGER_ED25519_SECRET_KEY_LENGTH],
+    )?;
+    let ledger_appender = Arc::new(LedgerAppender::new(
+        supabase_client.clone(),
+        ledger_signing_key,
+    ));
+    let notification_sink = AnyNotificationSink::Dummy(DummyNotificationSink::new());
+    let incident_recorder = Arc::new(IncidentRecorder::new(
+        supabase_client.clone(),
+        ledger_appender.clone(),
+        "dummy",
+    ));
+    let incident_dispatcher = Arc::new(IncidentDispatcher::new(
+        Arc::new(notification_sink),
+        audit_recorder.clone(),
+    ));
+    let readiness_state = ReadinessState::new();
+    let siem_forwarding = Arc::new(SiemForwardingService::new(
+        SiemForwarder::new(
+            AnySiemSink::InMemory(InMemorySiemSink::new()),
+            LocalSiemFallbackBuffer::new(unique_temp_path("siem-buffer")),
+        ),
+        audit_recorder.clone(),
+        readiness_state.clone(),
+    ));
+    let jwt_verifier = JwtVerifier::new(
+        JwtVerifierConfig::new(JWT_ISSUER, JWT_AUDIENCE)?,
+        Jwks::new(vec![Jwk::new(
+            "RSA",
+            "test-key",
+            Some("RS256".to_owned()),
+            Some("sig".to_owned()),
+            "abc",
+            "AQAB",
+        )])?,
+    );
+
+    Ok(AppState {
+        master_key_ring: Arc::new(MasterKeyRing::single(
+            KeyVersion::new(1)?,
+            sample_master_key(),
+        )?),
+        alias_encryption_key: Arc::new(AliasEncryptionKey::from_bytes([11u8; MASTER_KEY_LENGTH])),
+        alias_encryption_key_version: KeyVersion::new(1)?,
+        alias_fingerprint_key: Arc::new(AliasFingerprintKey::from_bytes([12u8; MASTER_KEY_LENGTH])),
+        alias_fingerprint_key_version: KeyVersion::new(1)?,
+        jwt_verifier: Arc::new(jwt_verifier),
+        supabase_client,
+        audit_recorder,
+        ledger_appender,
+        incident_recorder,
+        incident_dispatcher: Some(incident_dispatcher),
+        incident_detector: IncidentDetector::new(),
+        siem_forwarding,
+        audit_fallback_store,
+        readiness_state,
+        health_readiness_poll_interval: Duration::from_secs(30),
+        siem_long_failure_threshold: Duration::from_secs(900),
+        http_handler_timeout: Duration::from_secs(75),
+        http_rate_limit_requests: 300,
+        http_rate_limit_window: Duration::from_secs(60),
+        scheduler_status: SchedulerStatusState::default(),
+    })
+}
+
+async fn mock_scheduler_supabase() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/v1/ledger_chain_state"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "last_sequence_no": 0,
+            "last_entry_hash": "\\x0000000000000000000000000000000000000000000000000000000000000000"
+        }])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/v1/rpc/rpc_append_ledger_entry"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "ledger_entry_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "sequence_no": 1,
+            "entry_hash": "\\x1111111111111111111111111111111111111111111111111111111111111111",
+            "chain_last_sequence_no": 1,
+            "chain_last_entry_hash": "\\x1111111111111111111111111111111111111111111111111111111111111111",
+            "replayed": false
+        }])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/v1/rpc/rpc_append_audit_event"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    server
 }
 
 #[test]
@@ -123,6 +366,117 @@ fn siem_buffer_flush_long_failure_incident_uses_scheduler_source() {
     assert_eq!(input.detection_source, "siem_buffer_flush");
     assert_eq!(input.dedupe_key, "siem-long-failure");
     assert_eq!(input.error_code, "siem_long_outage");
+}
+
+#[tokio::test]
+async fn archive_backend_none_persists_timestamping_token_to_local_file()
+-> Result<(), Box<dyn std::error::Error>> {
+    let local_archive_dir = unique_temp_path("local-token-fallback");
+    let config = test_scheduler_config(local_archive_dir.clone(), None, None);
+    let period = test_period();
+    let token = test_token();
+
+    persist_timestamping_token_to_archive(&config, &period, &token)
+        .await
+        .map_err(std::io::Error::other)?;
+
+    let stored = fs::read(token_path(&local_archive_dir, &period))?;
+    assert_eq!(stored, token.as_bytes());
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_archive_backend_takes_precedence_over_local_fallback()
+-> Result<(), Box<dyn std::error::Error>> {
+    let configured_archive_dir = unique_temp_path("configured-token-archive");
+    let fallback_archive_dir = unique_temp_path("fallback-token-archive");
+    let archive_backend =
+        AnyArchiveBackend::LocalFile(LocalFileArchiveBackend::new(configured_archive_dir.clone()));
+    let config = test_scheduler_config(
+        fallback_archive_dir.clone(),
+        Some(Arc::new(archive_backend)),
+        None,
+    );
+    let period = test_period();
+    let token = test_token();
+
+    persist_timestamping_token_to_archive(&config, &period, &token)
+        .await
+        .map_err(std::io::Error::other)?;
+
+    let configured_stored = fs::read(token_path(&configured_archive_dir, &period))?;
+    assert_eq!(configured_stored, token.as_bytes());
+    assert!(
+        !token_path(&fallback_archive_dir, &period).try_exists()?,
+        "fallback local archive must not be used when archive_backend is configured"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_fallback_persist_error_is_not_silent_success()
+-> Result<(), Box<dyn std::error::Error>> {
+    let parent = unique_temp_path("local-token-fallback-parent");
+    fs::create_dir_all(&parent)?;
+    let local_archive_file = parent.join("archive-file");
+    fs::write(&local_archive_file, b"not a directory")?;
+    let config = test_scheduler_config(local_archive_file, None, None);
+    let period = test_period();
+    let token = test_token();
+
+    let result = persist_timestamping_token_to_archive(&config, &period, &token).await;
+
+    assert_eq!(result, Err("timestamping_token_archive_persist_failed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn monthly_timestamping_job_with_no_archive_backend_persists_token_to_local_fallback()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supabase = mock_scheduler_supabase().await;
+    let state = test_app_state(&supabase.uri(), unique_temp_path("job-audit-fallback"))?;
+    let local_archive_dir = unique_temp_path("job-token-fallback");
+    let config = test_scheduler_config(
+        local_archive_dir.clone(),
+        None,
+        Some(Arc::new(AnyTimestampingProvider::LocalDummy(
+            InMemoryTimestampingService::new(),
+        ))),
+    );
+    let signed_digest = test_signed_monthly_digest();
+    let period = signed_digest.period.clone();
+
+    let token = run_monthly_timestamping_obtain_job(&state, &config, signed_digest)
+        .await
+        .map_err(std::io::Error::other)?;
+
+    let stored = fs::read(token_path(&local_archive_dir, &period))?;
+    assert_eq!(stored, token.as_bytes());
+    Ok(())
+}
+
+#[tokio::test]
+async fn monthly_timestamping_job_archive_persist_error_is_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supabase = mock_scheduler_supabase().await;
+    let state = test_app_state(&supabase.uri(), unique_temp_path("job-persist-fail-audit"))?;
+    let parent = unique_temp_path("job-persist-fail-parent");
+    fs::create_dir_all(&parent)?;
+    let local_archive_file = parent.join("archive-file");
+    fs::write(&local_archive_file, b"not a directory")?;
+    let config = test_scheduler_config(
+        local_archive_file,
+        None,
+        Some(Arc::new(AnyTimestampingProvider::LocalDummy(
+            InMemoryTimestampingService::new(),
+        ))),
+    );
+
+    let result =
+        run_monthly_timestamping_obtain_job(&state, &config, test_signed_monthly_digest()).await;
+
+    assert_eq!(result, Err("timestamping_token_archive_persist_failed"));
+    Ok(())
 }
 
 #[tokio::test]

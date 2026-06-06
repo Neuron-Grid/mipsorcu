@@ -449,22 +449,37 @@ pub(crate) async fn run_monthly_timestamping_obtain_job(
     };
     match outcome {
         Ok(token) => {
+            persist_timestamping_token_to_archive(config, &period, &token).await?;
             state.incident_detector.clear_timestamping_failure();
-            if let Some(backend) = config.archive_backend.as_deref() {
-                let object_key = ArchiveObjectKey::for_timestamping_token(&period)
-                    .map_err(|_| "timestamping_token_archive_key_failed")?;
-                let object = ArchiveOpaqueObject::from_timestamping_token(&token);
-                backend
-                    .put_opaque_object(&object_key, &object)
-                    .await
-                    .map_err(|_| "timestamping_token_archive_persist_failed")?;
-            }
             Ok(token)
         }
         Err(error) => {
             record_timestamping_persistent_incident(state, error.as_error_code()).await;
             Err("monthly_timestamping_obtain_failed")
         }
+    }
+}
+
+pub(crate) async fn persist_timestamping_token_to_archive(
+    config: &SchedulerConfig,
+    period: &MonthlyDigestPeriod,
+    token: &TimestampingToken,
+) -> Result<(), &'static str> {
+    let object_key = ArchiveObjectKey::for_timestamping_token(period)
+        .map_err(|_| "timestamping_token_archive_key_failed")?;
+    let object = ArchiveOpaqueObject::from_timestamping_token(token);
+
+    if let Some(backend) = config.archive_backend.as_deref() {
+        backend
+            .put_opaque_object(&object_key, &object)
+            .await
+            .map_err(|_| "timestamping_token_archive_persist_failed")
+    } else {
+        let backend = LocalFileArchiveBackend::new(config.local_archive_dir.clone());
+        backend
+            .put_opaque_object(&object_key, &object)
+            .await
+            .map_err(|_| "timestamping_token_archive_persist_failed")
     }
 }
 
