@@ -278,8 +278,14 @@ async fn build_app_state(
         ))
     });
     let incident_detector = IncidentDetector::new();
-    let siem_forwarding =
-        build_siem_forwarding(siem_sink, &config, &audit_recorder, &readiness_state);
+    let siem_forwarding = build_siem_forwarding(
+        siem_sink,
+        &config,
+        &audit_recorder,
+        &incident_recorder,
+        incident_dispatcher.as_ref(),
+        &readiness_state,
+    );
 
     // ── 5. バックグラウンド依存と AppState を組み立てる ──
     let deps = BackgroundDeps {
@@ -468,6 +474,10 @@ fn build_siem_forwarding(
     siem_sink: AnySiemSink,
     config: &config::AppConfig,
     audit_recorder: &Arc<AuditRecorder<SupabaseAuditAppender>>,
+    incident_recorder: &Arc<IncidentRecorder>,
+    incident_dispatcher: Option<
+        &Arc<IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>,
+    >,
     readiness_state: &ReadinessState,
 ) -> Arc<SiemForwardingService<AnySiemSink>> {
     let siem_buffer = LocalSiemFallbackBuffer::with_limits(
@@ -476,9 +486,11 @@ fn build_siem_forwarding(
         config.siem_buffer_total_max_bytes,
     );
     let siem_forwarder = SiemForwarder::new(siem_sink, siem_buffer);
-    Arc::new(SiemForwardingService::new(
+    Arc::new(SiemForwardingService::new_with_incident(
         siem_forwarder,
         audit_recorder.clone(),
+        incident_recorder.clone(),
+        incident_dispatcher.cloned(),
         readiness_state.clone(),
     ))
 }

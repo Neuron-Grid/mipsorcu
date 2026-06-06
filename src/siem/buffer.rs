@@ -153,6 +153,21 @@ impl LocalSiemFallbackBuffer {
         self.append_record(&record, CapacityPolicy::Enforce)
     }
 
+    pub(crate) fn append_pending_batch(
+        &self,
+        events: &[SiemEvent],
+    ) -> Result<(), LocalSiemBufferError> {
+        let mut records = Vec::with_capacity(events.len());
+        for event in events {
+            records.push(LocalSiemFallbackRecord {
+                event_id: event.event_id().to_owned(),
+                status: DeliveryStatus::Pending,
+                event: serde_json::to_value(event)?,
+            });
+        }
+        self.append_records(&records, CapacityPolicy::Enforce)
+    }
+
     /// `sent` 状態で event の completion を append する（再送成功時）。
     pub fn mark_sent(&self, event: &SiemEvent) -> Result<(), LocalSiemBufferError> {
         let value = serde_json::to_value(event)?;
@@ -257,6 +272,45 @@ impl LocalSiemFallbackBuffer {
         let mut file = open_append_private(&self.path)?;
         file.write_all(&bytes)?;
         file.sync_data()?;
+        Ok(())
+    }
+
+    fn append_records(
+        &self,
+        records: &[LocalSiemFallbackRecord],
+        capacity_policy: CapacityPolicy,
+    ) -> Result<(), LocalSiemBufferError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let mut encoded = Vec::with_capacity(records.len());
+        let mut additional_bytes = 0u64;
+        for record in records {
+            let bytes = encode_record(record)?;
+            let len = u64::try_from(bytes.len())
+                .map_err(|_| std::io::Error::other("record too large"))?;
+            additional_bytes = additional_bytes
+                .checked_add(len)
+                .ok_or_else(|| std::io::Error::other("siem buffer batch size overflow"))?;
+            encoded.push(bytes);
+        }
+
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| LocalSiemBufferError::LockPoisoned)?;
+
+        if capacity_policy == CapacityPolicy::Enforce {
+            self.ensure_capacity_unlocked(additional_bytes)?;
+        }
+
+        for bytes in encoded {
+            self.rotate_if_needed_unlocked()?;
+            let mut file = open_append_private(&self.path)?;
+            file.write_all(&bytes)?;
+            file.sync_data()?;
+        }
         Ok(())
     }
 

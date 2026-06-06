@@ -12,7 +12,9 @@ use crate::ledger::{
     DigestHash, LedgerChainHead, LedgerHash, LedgerSequenceNo, MonthlyDigestPeriod,
     SignedLedgerEntry, SignedMonthlyDigest, build_monthly_digest_canonical_form,
 };
-use crate::server::incident::{DetectedIncident, record_and_dispatch_incident};
+use crate::server::incident::{
+    DetectedIncident, record_and_dispatch_incident, record_siem_long_failure_incident,
+};
 use crate::server::key_rotation::{
     KeyRotationCliError, envelope_migration::run_scheduled_envelope_migration,
 };
@@ -177,6 +179,14 @@ async fn run_siem_buffer_flush_job(
         .siem_forwarding
         .resend_pending_batch(SIEM_MAX_BATCH_SIZE)
         .await;
+    let now = OffsetDateTime::now_utc();
+    if state
+        .siem_forwarding
+        .status()
+        .is_long_failure(now, state.siem_long_failure_threshold)
+    {
+        record_siem_long_failure_incident(state, "siem_buffer_flush").await;
+    }
     match state.siem_forwarding.total_buffer_size_bytes() {
         Ok(total_size_bytes) => {
             if let Ok(Some(notification)) = state

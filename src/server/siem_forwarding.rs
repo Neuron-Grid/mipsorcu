@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use crate::audit::{AuditEvent, AuditRecordError, AuditRecordOutcome, AuditRecorder, RequestId};
+use crate::incident::{AnyNotificationSink, IncidentDispatcher, IncidentRecorder};
 use crate::ledger::SignedLedgerEntry;
+use crate::server::incident::{DetectedIncident, record_and_dispatch_incident_parts};
 use crate::server::state::ReadinessState;
 use crate::server::supabase::SupabaseAuditAppender;
 use crate::siem::{
-    SiemEvent, SiemExporterKind, SiemForwardOutcome, SiemForwarder, SiemForwarderStatus,
-    SiemResendSummary, SiemSink, build_siem_buffer_flushed_audit_event,
+    SiemBufferFailureKind, SiemEvent, SiemExporterKind, SiemForwardOutcome, SiemForwarder,
+    SiemForwarderStatus, SiemResendSummary, SiemSink, build_siem_buffer_flushed_audit_event,
     build_siem_event_failed_audit_event, build_siem_event_forwarded_audit_event,
     build_siem_forward_failure_audit_event,
 };
@@ -24,6 +26,9 @@ use crate::siem::{
 pub struct SiemForwardingService<S: SiemSink> {
     forwarder: Arc<SiemForwarder<S>>,
     audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
+    incident_recorder: Option<Arc<IncidentRecorder>>,
+    incident_dispatcher:
+        Option<Arc<IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>>,
     readiness_state: ReadinessState,
 }
 
@@ -56,9 +61,41 @@ impl<S: SiemSink> SiemForwardingService<S> {
         audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
         readiness_state: ReadinessState,
     ) -> Self {
+        Self::with_incident_dependencies(forwarder, audit_recorder, None, None, readiness_state)
+    }
+
+    pub fn new_with_incident(
+        forwarder: SiemForwarder<S>,
+        audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
+        incident_recorder: Arc<IncidentRecorder>,
+        incident_dispatcher: Option<
+            Arc<IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>,
+        >,
+        readiness_state: ReadinessState,
+    ) -> Self {
+        Self::with_incident_dependencies(
+            forwarder,
+            audit_recorder,
+            Some(incident_recorder),
+            incident_dispatcher,
+            readiness_state,
+        )
+    }
+
+    fn with_incident_dependencies(
+        forwarder: SiemForwarder<S>,
+        audit_recorder: Arc<AuditRecorder<SupabaseAuditAppender>>,
+        incident_recorder: Option<Arc<IncidentRecorder>>,
+        incident_dispatcher: Option<
+            Arc<IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>,
+        >,
+        readiness_state: ReadinessState,
+    ) -> Self {
         Self {
             forwarder: Arc::new(forwarder),
             audit_recorder,
+            incident_recorder,
+            incident_dispatcher,
             readiness_state,
         }
     }
@@ -126,6 +163,9 @@ impl<S: SiemSink> SiemForwardingService<S> {
             self.record_forward_failure(&request_id, source_event_type, sink_error_code)
                 .await;
         }
+        if is_buffer_capacity_exceeded(&outcome) {
+            self.record_buffer_overflow_incident().await;
+        }
         outcome
     }
 
@@ -136,31 +176,12 @@ impl<S: SiemSink> SiemForwardingService<S> {
         outcome: &SiemForwardOutcome,
         batch_size: usize,
     ) {
-        let event = match outcome {
-            SiemForwardOutcome::SentDirect => build_siem_event_forwarded_audit_event(
-                request_id.clone(),
-                exporter_kind,
-                batch_size,
-            ),
-            SiemForwardOutcome::Buffered { sink_error_code } => {
-                build_siem_event_failed_audit_event(
-                    request_id.clone(),
-                    exporter_kind,
-                    sink_error_code,
-                    true,
-                    batch_size,
-                )
-            }
-            SiemForwardOutcome::BufferingFailed { sink_error_code } => {
-                build_siem_event_failed_audit_event(
-                    request_id.clone(),
-                    exporter_kind,
-                    sink_error_code,
-                    false,
-                    batch_size,
-                )
-            }
-        };
+        let event = build_forward_outcome_audit_event(
+            request_id.clone(),
+            exporter_kind,
+            outcome,
+            batch_size,
+        );
 
         let event = match event {
             Ok(event) => event,
@@ -267,6 +288,29 @@ impl<S: SiemSink> SiemForwardingService<S> {
         }
         log_failure_audit_record_result(request_id, sink_error_code, &record_result, effect);
     }
+
+    async fn record_buffer_overflow_incident(&self) {
+        let Some(incident_recorder) = self.incident_recorder.as_ref() else {
+            return;
+        };
+        let detected = match DetectedIncident::siem_buffer_overflow() {
+            Ok(detected) => detected,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    error_code = "siem_buffer_overflow_incident_build_failed",
+                    "failed to construct SIEM buffer overflow incident"
+                );
+                return;
+            }
+        };
+        record_and_dispatch_incident_parts(
+            incident_recorder.as_ref(),
+            self.incident_dispatcher.as_deref(),
+            detected,
+        )
+        .await;
+    }
 }
 
 fn is_siem_operational_action(action: crate::audit::AuditAction) -> bool {
@@ -287,8 +331,50 @@ fn forward_failure_sink_error_code(outcome: &SiemForwardOutcome) -> Option<&str>
     match outcome {
         SiemForwardOutcome::SentDirect => None,
         SiemForwardOutcome::Buffered { sink_error_code }
-        | SiemForwardOutcome::BufferingFailed { sink_error_code } => Some(sink_error_code.as_str()),
+        | SiemForwardOutcome::BufferingFailed {
+            sink_error_code, ..
+        } => Some(sink_error_code.as_str()),
     }
+}
+
+fn build_forward_outcome_audit_event(
+    request_id: RequestId,
+    exporter_kind: SiemExporterKind,
+    outcome: &SiemForwardOutcome,
+    batch_size: usize,
+) -> Result<AuditEvent, crate::audit::AuditEventError> {
+    match outcome {
+        SiemForwardOutcome::SentDirect => {
+            build_siem_event_forwarded_audit_event(request_id, exporter_kind, batch_size)
+        }
+        SiemForwardOutcome::Buffered { sink_error_code } => build_siem_event_failed_audit_event(
+            request_id,
+            exporter_kind,
+            sink_error_code,
+            true,
+            batch_size,
+        ),
+        SiemForwardOutcome::BufferingFailed {
+            buffer_failure_kind,
+            ..
+        } => build_siem_event_failed_audit_event(
+            request_id,
+            exporter_kind,
+            buffer_failure_kind.audit_error_code(),
+            false,
+            batch_size,
+        ),
+    }
+}
+
+fn is_buffer_capacity_exceeded(outcome: &SiemForwardOutcome) -> bool {
+    matches!(
+        outcome,
+        SiemForwardOutcome::BufferingFailed {
+            buffer_failure_kind: SiemBufferFailureKind::CapacityExceeded,
+            ..
+        }
+    )
 }
 
 fn failure_audit_record_effect(
@@ -437,12 +523,100 @@ mod tests {
     fn forward_failure_sink_error_code_extracts_buffering_failed_error() {
         let outcome = SiemForwardOutcome::BufferingFailed {
             sink_error_code: "buffer_failed".to_owned(),
+            buffer_failure_kind: SiemBufferFailureKind::WriteFailed,
         };
 
         assert_eq!(
             forward_failure_sink_error_code(&outcome),
             Some("buffer_failed")
         );
+    }
+
+    #[test]
+    fn capacity_exceeded_outcome_is_detected_for_overflow_incident() {
+        let outcome = SiemForwardOutcome::BufferingFailed {
+            sink_error_code: "siem_total_outage".to_owned(),
+            buffer_failure_kind: SiemBufferFailureKind::CapacityExceeded,
+        };
+
+        assert!(is_buffer_capacity_exceeded(&outcome));
+    }
+
+    #[test]
+    fn write_failed_outcome_does_not_record_overflow_incident() {
+        let outcome = SiemForwardOutcome::BufferingFailed {
+            sink_error_code: "siem_total_outage".to_owned(),
+            buffer_failure_kind: SiemBufferFailureKind::WriteFailed,
+        };
+
+        assert!(!is_buffer_capacity_exceeded(&outcome));
+    }
+
+    #[test]
+    fn capacity_exceeded_operational_audit_uses_buffer_error_code() {
+        let outcome = SiemForwardOutcome::BufferingFailed {
+            sink_error_code: "siem_total_outage".to_owned(),
+            buffer_failure_kind: SiemBufferFailureKind::CapacityExceeded,
+        };
+
+        let event = build_forward_outcome_audit_event(
+            RequestId::nil(),
+            SiemExporterKind::SplunkHec,
+            &outcome,
+            1,
+        )
+        .expect("audit event should build");
+        let metadata = event.metadata_json().as_value();
+
+        assert_eq!(event.action(), crate::audit::AuditAction::SiemEventFailed);
+        assert_eq!(event.result(), crate::audit::AuditResult::Failure);
+        assert_eq!(
+            metadata["error_code"].as_str(),
+            Some("siem_buffer_capacity_exceeded")
+        );
+        assert_eq!(metadata["buffered"].as_bool(), Some(false));
+        assert_eq!(metadata["batch_size"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn write_failed_operational_audit_uses_buffer_write_error_code() {
+        let outcome = SiemForwardOutcome::BufferingFailed {
+            sink_error_code: "siem_total_outage".to_owned(),
+            buffer_failure_kind: SiemBufferFailureKind::WriteFailed,
+        };
+
+        let event = build_forward_outcome_audit_event(
+            RequestId::nil(),
+            SiemExporterKind::SplunkHec,
+            &outcome,
+            1,
+        )
+        .expect("audit event should build");
+        let metadata = event.metadata_json().as_value();
+
+        assert_eq!(
+            metadata["error_code"].as_str(),
+            Some("siem_buffer_write_failed")
+        );
+        assert_eq!(metadata["buffered"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn siem_buffer_overflow_incident_input_uses_fixed_operational_vocabulary() {
+        let input = crate::server::incident::siem_buffer_overflow_incident_input();
+
+        assert_eq!(
+            input.incident_type,
+            crate::incident::IncidentType::SiemBufferOverflow
+        );
+        assert_eq!(input.severity, crate::incident::IncidentSeverity::High);
+        assert_eq!(input.detection_source, "siem_forwarding");
+        assert_eq!(input.dedupe_key, "siem:buffer:overflow");
+        assert_eq!(input.error_code, "siem_buffer_capacity_exceeded");
+        assert_eq!(input.incident_source_event_id, None);
+        assert_eq!(input.target_sequence_no, None);
+        assert_eq!(input.target_year_month, None);
+        assert_eq!(input.dedupe_window_seconds, 3600);
     }
 
     #[test]

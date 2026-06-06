@@ -807,6 +807,25 @@ fn canonical_contracts() -> Vec<AuditMetadataContract> {
             ],
         },
         AuditMetadataContract {
+            name: "incident_notification_sent siem buffer overflow success",
+            action: AuditAction::IncidentNotificationSent,
+            result: AuditResult::Success,
+            metadata_json: json!({
+                "incident_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                "category": "siem_buffer_overflow",
+                "notifier_kind": "webhook",
+                "duration_ms": 25,
+                "source_event_at": "2026-06-01T02:00:00Z"
+            }),
+            required_keys: &[
+                "incident_id",
+                "category",
+                "notifier_kind",
+                "duration_ms",
+                "source_event_at",
+            ],
+        },
+        AuditMetadataContract {
             name: "incident_notification_failed failure",
             action: AuditAction::IncidentNotificationFailed,
             result: AuditResult::Failure,

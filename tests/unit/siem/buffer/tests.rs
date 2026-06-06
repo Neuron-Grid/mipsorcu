@@ -289,6 +289,74 @@ fn append_pending_rejects_capacity_exceeded_without_changing_existing_pending() 
 }
 
 #[test]
+fn append_pending_rejects_capacity_after_multiple_rotations_without_growth() {
+    let path = tempfile_path("capacity_multi_rotate");
+    let initial = LocalSiemFallbackBuffer::with_limits(&path, 1, 1024 * 1024);
+    let first = build_event();
+    let second = build_event();
+    let third = build_event();
+    initial.append_pending(&first).unwrap();
+    initial.append_pending(&second).unwrap();
+    initial.append_pending(&third).unwrap();
+    let existing_size = initial.total_size_bytes().unwrap();
+    let pending_before = initial.pending_events().unwrap();
+    assert!(
+        rotated_files(path.parent().expect("buffer path has parent")).len() >= 2,
+        "test setup should create multiple rotated files"
+    );
+
+    let limited = LocalSiemFallbackBuffer::with_limits(&path, 1, existing_size);
+    let error = limited
+        .append_pending(&build_event())
+        .expect_err("new pending record should exceed total capacity");
+
+    assert!(matches!(
+        error,
+        LocalSiemBufferError::CapacityExceeded { .. }
+    ));
+    assert!(
+        limited.total_size_bytes().unwrap() <= limited.total_max_bytes(),
+        "capacity rejection must not grow the bounded buffer"
+    );
+    let pending_after = limited.pending_events().unwrap();
+    assert_eq!(pending_after.len(), pending_before.len());
+    assert_eq!(pending_after[0].event_id(), pending_before[0].event_id());
+    assert_eq!(pending_after[1].event_id(), pending_before[1].event_id());
+    assert_eq!(pending_after[2].event_id(), pending_before[2].event_id());
+}
+
+#[test]
+fn append_pending_batch_capacity_failure_leaves_no_partial_records() {
+    let sizing_path = tempfile_path("batch_sizing");
+    let sizing = LocalSiemFallbackBuffer::with_limits(&sizing_path, 1024 * 1024, 1024 * 1024);
+    let first = build_event();
+    sizing.append_pending(&first).unwrap();
+    let single_size = sizing.total_size_bytes().unwrap();
+    let _ = fs::remove_file(&sizing_path);
+
+    let path = tempfile_path("batch_capacity");
+    let second = build_event();
+    let buffer = LocalSiemFallbackBuffer::with_limits(&path, 1024 * 1024, single_size);
+
+    let error = buffer
+        .append_pending_batch(&[first, second])
+        .expect_err("batch should exceed total capacity");
+
+    assert!(matches!(
+        error,
+        LocalSiemBufferError::CapacityExceeded {
+            total_size_bytes: 0,
+            total_max_bytes
+        } if total_max_bytes == single_size
+    ));
+    assert!(
+        !path.exists(),
+        "capacity-only rejection must not create a partial current file"
+    );
+    assert!(buffer.pending_events().unwrap().is_empty());
+}
+
+#[test]
 fn mark_sent_is_allowed_over_capacity_and_compaction_shrinks_buffer() {
     let path = tempfile_path("sent_over_capacity");
     let initial = LocalSiemFallbackBuffer::with_limits(&path, 1024 * 1024, 1024 * 1024);

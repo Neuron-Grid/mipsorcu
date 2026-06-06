@@ -112,6 +112,19 @@ fn scheduler_runtime_state_assigns_distinct_locks_for_new_jobs() {
     assert_ne!(siem_flush_lock_ptr, envelope_lock_ptr);
 }
 
+#[test]
+fn siem_buffer_flush_long_failure_incident_uses_scheduler_source() {
+    let input = crate::server::incident::siem_long_failure_incident_input("siem_buffer_flush");
+
+    assert_eq!(
+        input.incident_type,
+        crate::incident::IncidentType::SiemLongFailure
+    );
+    assert_eq!(input.detection_source, "siem_buffer_flush");
+    assert_eq!(input.dedupe_key, "siem-long-failure");
+    assert_eq!(input.error_code, "siem_long_outage");
+}
+
 #[tokio::test]
 async fn run_once_per_period_marks_new_jobs_distinctly() {
     let mut runtime_state = SchedulerRuntimeState::new();

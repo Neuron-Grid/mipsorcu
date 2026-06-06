@@ -335,6 +335,7 @@ fn validate_string_metadata_values(
                 "archive_failure_persistent",
                 "timestamping_failure_persistent",
                 "siem_buffer_threshold",
+                "siem_buffer_overflow",
                 "envelope_migration_failure_burst",
                 "auth_failure_burst",
                 "key_rotation_failure",
@@ -588,6 +589,7 @@ fn incident_type_allowed(value: &str) -> bool {
             | "archive_failure_persistent"
             | "timestamping_failure_persistent"
             | "siem_buffer_threshold"
+            | "siem_buffer_overflow"
             | "envelope_migration_failure_burst"
             | "auth_failure_burst"
             | "key_rotation_failure"

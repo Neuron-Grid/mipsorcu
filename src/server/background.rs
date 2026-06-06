@@ -9,8 +9,9 @@ use crate::audit::{
     LocalAuditStoreError, ResendAuditSummary, RolloverOutcome,
 };
 use crate::auth::{JwksCache, JwksFetchError, JwtVerifier, JwtVerifierConfig, fetch_jwks};
-use crate::incident::{IncidentRecordInput, IncidentType};
-use crate::server::incident::{DetectedIncident, record_and_dispatch_incident};
+use crate::server::incident::{
+    DetectedIncident, record_and_dispatch_incident, record_siem_long_failure_incident,
+};
 use crate::server::siem_forwarding::SiemForwardingService;
 use crate::server::state::{AppState, ReadinessState};
 use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
@@ -290,22 +291,7 @@ async fn record_siem_resend_result(
             threshold_seconds = long_failure_threshold.as_secs(),
             "SIEM forwarding has been failing longer than threshold"
         );
-        let input = siem_long_failure_incident_input();
-        match state.incident_recorder.record(input).await {
-            Ok(result) => {
-                tracing::info!(
-                    notification_result = result.notification_result.as_str(),
-                    suppressed = result.suppressed,
-                    "SIEM long failure incident recorded"
-                );
-            }
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    "SIEM long failure incident recording failed"
-                );
-            }
-        }
+        record_siem_long_failure_incident(state, "siem_resend_loop").await;
     }
 
     match siem_forwarding.total_buffer_size_bytes() {
@@ -341,17 +327,6 @@ fn should_record_siem_long_failure(
     threshold: Duration,
 ) -> bool {
     status.is_long_failure(now, threshold)
-}
-
-fn siem_long_failure_incident_input() -> IncidentRecordInput {
-    let incident_type = IncidentType::SiemLongFailure;
-    IncidentRecordInput::new(
-        incident_type,
-        crate::incident::severity_for_incident(incident_type),
-        "siem_resend_loop",
-        "siem-long-failure",
-        "siem_long_outage",
-    )
 }
 
 pub async fn run_audit_fallback_rollover_once(

@@ -1,8 +1,16 @@
 use crate::incident::{
-    IncidentCategory, IncidentNotification, IncidentRecordInput, IncidentSeverity, IncidentType,
+    AnyNotificationSink, IncidentCategory, IncidentDetector, IncidentDispatcher,
+    IncidentNotification, IncidentRecordInput, IncidentSeverity, IncidentType,
 };
+use crate::server::supabase::SupabaseAuditAppender;
 
 use super::state::AppState;
+
+pub(crate) const SIEM_BUFFER_OVERFLOW_ERROR_CODE: &str = "siem_buffer_capacity_exceeded";
+const SIEM_BUFFER_OVERFLOW_DEDUPE_KEY: &str = "siem:buffer:overflow";
+const SIEM_BUFFER_OVERFLOW_DETECTION_SOURCE: &str = "siem_forwarding";
+const SIEM_LONG_FAILURE_DEDUPE_KEY: &str = "siem-long-failure";
+const SIEM_LONG_FAILURE_ERROR_CODE: &str = "siem_long_outage";
 
 #[derive(Debug, Clone)]
 pub(crate) struct DetectedIncident {
@@ -35,12 +43,34 @@ impl DetectedIncident {
     pub(crate) fn into_parts(self) -> (IncidentRecordInput, IncidentNotification) {
         (self.record_input, self.notification)
     }
+
+    pub(crate) fn siem_buffer_overflow() -> Result<Self, crate::incident::IncidentDetectorError> {
+        let detector = IncidentDetector::new();
+        let notification = detector.siem_buffer_overflow()?;
+        let record_input = siem_buffer_overflow_incident_input();
+        Ok(Self {
+            record_input,
+            notification,
+        })
+    }
 }
 
 pub(crate) async fn record_and_dispatch_incident(state: &AppState, detected: DetectedIncident) {
-    let record_input = detected.record_input;
-    let notification = detected.notification;
-    match state.incident_recorder.record(record_input).await {
+    record_and_dispatch_incident_parts(
+        state.incident_recorder.as_ref(),
+        state.incident_dispatcher.as_deref(),
+        detected,
+    )
+    .await;
+}
+
+pub(crate) async fn record_and_dispatch_incident_parts(
+    incident_recorder: &crate::incident::IncidentRecorder,
+    incident_dispatcher: Option<&IncidentDispatcher<AnyNotificationSink, SupabaseAuditAppender>>,
+    detected: DetectedIncident,
+) {
+    let (record_input, notification) = detected.into_parts();
+    match incident_recorder.record(record_input).await {
         Ok(result) => {
             tracing::info!(
                 notification_result = result.notification_result.as_str(),
@@ -57,9 +87,50 @@ pub(crate) async fn record_and_dispatch_incident(state: &AppState, detected: Det
         }
     }
 
-    if let Some(dispatcher) = state.incident_dispatcher.as_ref() {
+    if let Some(dispatcher) = incident_dispatcher {
         let _ = dispatcher.dispatch(notification).await;
     }
+}
+
+pub(crate) async fn record_siem_long_failure_incident(state: &AppState, detection_source: &str) {
+    let input = siem_long_failure_incident_input(detection_source);
+    match state.incident_recorder.record(input).await {
+        Ok(result) => {
+            tracing::info!(
+                notification_result = result.notification_result.as_str(),
+                suppressed = result.suppressed,
+                "SIEM long failure incident recorded"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "SIEM long failure incident recording failed"
+            );
+        }
+    }
+}
+
+pub(crate) fn siem_buffer_overflow_incident_input() -> IncidentRecordInput {
+    let incident_type = IncidentType::SiemBufferOverflow;
+    IncidentRecordInput::new(
+        incident_type,
+        crate::incident::severity_for_incident(incident_type),
+        SIEM_BUFFER_OVERFLOW_DETECTION_SOURCE,
+        SIEM_BUFFER_OVERFLOW_DEDUPE_KEY,
+        SIEM_BUFFER_OVERFLOW_ERROR_CODE,
+    )
+}
+
+pub(crate) fn siem_long_failure_incident_input(detection_source: &str) -> IncidentRecordInput {
+    let incident_type = IncidentType::SiemLongFailure;
+    IncidentRecordInput::new(
+        incident_type,
+        crate::incident::severity_for_incident(incident_type),
+        detection_source,
+        SIEM_LONG_FAILURE_DEDUPE_KEY,
+        SIEM_LONG_FAILURE_ERROR_CODE,
+    )
 }
 
 fn incident_type_for_category(category: IncidentCategory) -> IncidentType {
@@ -71,6 +142,7 @@ fn incident_type_for_category(category: IncidentCategory) -> IncidentType {
             IncidentType::TimestampingFailurePersistent
         }
         IncidentCategory::SiemBufferThreshold => IncidentType::SiemBufferThreshold,
+        IncidentCategory::SiemBufferOverflow => IncidentType::SiemBufferOverflow,
         IncidentCategory::EnvelopeMigrationFailureBurst => {
             IncidentType::EnvelopeMigrationFailureBurst
         }
@@ -86,7 +158,8 @@ fn severity_for_category(category: IncidentCategory) -> IncidentSeverity {
         }
         IncidentCategory::SchedulerFailure
         | IncidentCategory::ArchiveFailurePersistent
-        | IncidentCategory::TimestampingFailurePersistent => IncidentSeverity::High,
+        | IncidentCategory::TimestampingFailurePersistent
+        | IncidentCategory::SiemBufferOverflow => IncidentSeverity::High,
         IncidentCategory::SiemBufferThreshold
         | IncidentCategory::EnvelopeMigrationFailureBurst
         | IncidentCategory::AuthFailureBurst => IncidentSeverity::Medium,

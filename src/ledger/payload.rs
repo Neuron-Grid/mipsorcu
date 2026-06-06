@@ -456,6 +456,15 @@ fn validate_incident_type_value(key: &str, value: &Value) -> Result<(), LedgerEr
             "ledger_secret_leak_suspected",
             "siem_long_failure",
             "audit_ui_forbidden_operation",
+            "scheduler_failure",
+            "ledger_anomaly",
+            "archive_failure_persistent",
+            "timestamping_failure_persistent",
+            "siem_buffer_threshold",
+            "siem_buffer_overflow",
+            "envelope_migration_failure_burst",
+            "auth_failure_burst",
+            "key_rotation_failure",
         ],
     )
 }

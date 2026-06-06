@@ -605,7 +605,8 @@ pub fn severity_for_incident(incident_type: IncidentType) -> IncidentSeverity {
         | IncidentType::SequenceGap
         | IncidentType::SchedulerFailure
         | IncidentType::ArchiveFailurePersistent
-        | IncidentType::TimestampingFailurePersistent => IncidentSeverity::High,
+        | IncidentType::TimestampingFailurePersistent
+        | IncidentType::SiemBufferOverflow => IncidentSeverity::High,
         IncidentType::LedgerAnomaly | IncidentType::KeyRotationFailure => {
             IncidentSeverity::Critical
         }

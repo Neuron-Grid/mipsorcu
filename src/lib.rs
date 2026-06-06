@@ -115,9 +115,9 @@ pub use server::use_cases::request_timestamping_for_digest::{
 pub use siem::{
     DEFAULT_SIEM_BUFFER_MAX_BYTES, FailingSiemSink, ForwardReceipt, InMemorySiemSink,
     LocalSiemBufferError, LocalSiemFallbackBuffer, SIEM_EVENT_SCHEMA_VERSION,
-    SIEM_EVENT_TOP_LEVEL_KEYS, SIEM_MAX_BATCH_SIZE, SiemEvent, SiemExporterKind,
-    SiemForwardOutcome, SiemForwarder, SiemForwarderStatus, SiemResendSummary, SiemRetryPolicy,
-    SiemSink, SiemSinkError, build_siem_buffer_flushed_audit_event,
+    SIEM_EVENT_TOP_LEVEL_KEYS, SIEM_MAX_BATCH_SIZE, SiemBufferFailureKind, SiemEvent,
+    SiemExporterKind, SiemForwardOutcome, SiemForwarder, SiemForwarderStatus, SiemResendSummary,
+    SiemRetryPolicy, SiemSink, SiemSinkError, build_siem_buffer_flushed_audit_event,
     build_siem_event_failed_audit_event, build_siem_event_forwarded_audit_event,
     build_siem_forward_failure_audit_event,
 };

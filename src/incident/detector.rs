@@ -136,9 +136,9 @@ impl IncidentDetector {
 
     pub fn siem_buffer_threshold(
         &self,
-        current_size_bytes: u64,
+        total_size_bytes: u64,
     ) -> Result<Option<IncidentNotification>, IncidentDetectorError> {
-        if current_size_bytes < SIEM_BUFFER_THRESHOLD_BYTES {
+        if total_size_bytes < SIEM_BUFFER_THRESHOLD_BYTES {
             return Ok(None);
         }
         build_notification(
@@ -146,9 +146,19 @@ impl IncidentDetector {
             IncidentSeverity::Medium,
             "siem fallback buffer reached notification threshold",
             vec![ComponentName::siem()],
-            format!("siem:buffer:{current_size_bytes}"),
+            format!("siem:buffer:{total_size_bytes}"),
         )
         .map(Some)
+    }
+
+    pub fn siem_buffer_overflow(&self) -> Result<IncidentNotification, IncidentDetectorError> {
+        build_notification(
+            IncidentCategory::SiemBufferOverflow,
+            IncidentSeverity::High,
+            "siem fallback buffer capacity exceeded",
+            vec![ComponentName::siem()],
+            "siem:buffer:overflow",
+        )
     }
 
     pub fn record_envelope_migration_failure(

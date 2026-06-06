@@ -507,6 +507,27 @@ fn rust_allowlist_rejects_invalid_siem_operational_metadata() {
     ));
 }
 
+#[test]
+fn rust_allowlist_accepts_siem_buffer_overflow_incident_notification_category() {
+    let metadata = AuditMetadata::new(serde_json::json!({
+        "incident_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "category": "siem_buffer_overflow",
+        "notifier_kind": "webhook",
+        "duration_ms": 25,
+        "source_event_at": "2026-06-01T02:00:00Z"
+    }))
+    .unwrap();
+
+    assert!(
+        metadata
+            .validate_allowlist_for_action(
+                AuditAction::IncidentNotificationSent,
+                AuditResult::Success
+            )
+            .is_ok()
+    );
+}
+
 // ─── Parity: Rust ↔ SQL same case, same accept/reject ───
 
 #[test]

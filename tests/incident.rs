@@ -90,6 +90,30 @@ fn incident_detected_metadata_accepts_task14_incident_types() -> TestResult {
 }
 
 #[test]
+fn incident_detected_metadata_accepts_siem_buffer_overflow() -> TestResult {
+    let metadata = IncidentDetectedMetadata::new(
+        "siem_buffer_overflow",
+        "high",
+        "siem_forwarding",
+        "siem:buffer:overflow",
+        "webhook",
+        "not_configured",
+        "siem_buffer_capacity_exceeded",
+        SourceEventAt::parse(SOURCE_EVENT_AT)?,
+    )
+    .build()?;
+
+    metadata.validate_allowlist_for_action(AuditAction::IncidentDetected, AuditResult::Failure)?;
+    assert_eq!(
+        metadata.as_value()["incident_type"],
+        json!("siem_buffer_overflow")
+    );
+    assert_eq!(metadata.as_value()["severity"], json!("high"));
+
+    Ok(())
+}
+
+#[test]
 fn incident_detected_metadata_rejects_missing_and_invalid_values() -> TestResult {
     let missing_required = AuditMetadata::new(json!({
         "severity": "critical",
@@ -150,6 +174,29 @@ fn incident_detected_ledger_payload_matches_sql_constraints() -> TestResult {
 
     assert_eq!(payload.entry_type(), LedgerEntryType::IncidentDetected);
     assert_eq!(payload.as_value()["notification_result"], json!("sent"));
+
+    Ok(())
+}
+
+#[test]
+fn incident_detected_ledger_payload_accepts_siem_buffer_overflow() -> TestResult {
+    let payload = LedgerPayload::new(
+        LedgerEntryType::IncidentDetected,
+        json!({
+            "incident_type": "siem_buffer_overflow",
+            "severity": "high",
+            "detection_source": "siem_forwarding",
+            "dedupe_key": "siem:buffer:overflow",
+            "notification_sink": "dummy",
+            "notification_result": "not_configured"
+        }),
+    )?;
+
+    assert_eq!(payload.entry_type(), LedgerEntryType::IncidentDetected);
+    assert_eq!(
+        payload.as_value()["incident_type"],
+        json!("siem_buffer_overflow")
+    );
 
     Ok(())
 }

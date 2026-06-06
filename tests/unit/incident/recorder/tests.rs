@@ -106,6 +106,10 @@ fn severity_and_dedupe_key_are_stable() {
         severity_for_incident(IncidentType::SiemLongFailure),
         IncidentSeverity::Medium
     );
+    assert_eq!(
+        severity_for_incident(IncidentType::SiemBufferOverflow),
+        IncidentSeverity::High
+    );
 
     let period = MonthlyDigestPeriod::parse("2026-05").expect("valid test period");
     assert_eq!(

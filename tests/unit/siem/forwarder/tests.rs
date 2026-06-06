@@ -150,11 +150,36 @@ async fn forward_returns_buffering_failed_when_local_buffer_capacity_is_exceeded
     assert!(matches!(
         outcome,
         SiemForwardOutcome::BufferingFailed {
-            sink_error_code
+            sink_error_code,
+            buffer_failure_kind
         } if sink_error_code == "siem_total_outage"
+            && buffer_failure_kind == SiemBufferFailureKind::CapacityExceeded
     ));
     assert!(buffer.pending_events().unwrap().is_empty());
     assert!(forwarder.status().failure_since().is_some());
+}
+
+#[tokio::test]
+async fn forward_returns_write_failed_when_local_buffer_write_fails() {
+    let path = tempfile_path("write_failed");
+    std::fs::create_dir_all(&path).unwrap();
+    let sink = FailingSiemSink::new("siem_total_outage");
+    let buffer = LocalSiemFallbackBuffer::new(&path);
+    let forwarder = SiemForwarder::new_with_retry_policy(sink, buffer, SiemRetryPolicy::no_retry());
+    let event = build_siem_event();
+
+    let outcome = forwarder.forward(&event).await;
+
+    assert!(matches!(
+        outcome,
+        SiemForwardOutcome::BufferingFailed {
+            sink_error_code,
+            buffer_failure_kind
+        } if sink_error_code == "siem_total_outage"
+            && buffer_failure_kind == SiemBufferFailureKind::WriteFailed
+    ));
+    assert!(forwarder.status().failure_since().is_some());
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 #[tokio::test]

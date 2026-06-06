@@ -531,7 +531,7 @@ fn fresh_siem_status_does_not_record_long_failure_incident() {
 
 #[test]
 fn siem_long_failure_incident_input_uses_fixed_operational_vocabulary() {
-    let input = super::siem_long_failure_incident_input();
+    let input = crate::server::incident::siem_long_failure_incident_input("siem_resend_loop");
 
     assert_eq!(
         input.incident_type,

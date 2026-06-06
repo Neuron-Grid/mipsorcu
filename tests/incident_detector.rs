@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use mipsorcu::{IncidentCategory, IncidentDetector, IncidentSeverity};
+use mipsorcu::{ComponentName, IncidentCategory, IncidentDetector, IncidentSeverity};
 
 #[test]
 fn scheduler_three_consecutive_failures_produce_incident() {
@@ -74,6 +74,31 @@ fn siem_buffer_threshold_is_80_mib() {
             .unwrap()
             .category,
         IncidentCategory::SiemBufferThreshold
+    );
+}
+
+#[test]
+fn siem_buffer_overflow_is_high_severity_capacity_incident() {
+    let detector = IncidentDetector::new();
+    let notification = detector.siem_buffer_overflow().unwrap();
+
+    assert_eq!(notification.category, IncidentCategory::SiemBufferOverflow);
+    assert_eq!(notification.severity, IncidentSeverity::High);
+    assert_eq!(
+        notification.affected_components,
+        vec![ComponentName::siem()]
+    );
+    assert_eq!(
+        notification.correlation_id.as_deref(),
+        Some("siem:buffer:overflow")
+    );
+}
+
+#[test]
+fn siem_buffer_overflow_category_parses_from_wire_value() {
+    assert_eq!(
+        IncidentCategory::parse("siem_buffer_overflow"),
+        Some(IncidentCategory::SiemBufferOverflow)
     );
 }
 

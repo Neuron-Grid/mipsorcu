@@ -22,9 +22,10 @@ pub use buffer::{DEFAULT_SIEM_BUFFER_MAX_BYTES, LocalSiemBufferError, LocalSiemF
 pub use dummy::{FailingSiemSink, InMemorySiemSink};
 pub use event::{SIEM_EVENT_SCHEMA_VERSION, SIEM_EVENT_TOP_LEVEL_KEYS, SiemEvent};
 pub use forwarder::{
-    SiemForwardOutcome, SiemForwarder, SiemForwarderStatus, SiemResendSummary, SiemRetryPolicy,
-    build_siem_buffer_flushed_audit_event, build_siem_event_failed_audit_event,
-    build_siem_event_forwarded_audit_event, build_siem_forward_failure_audit_event,
+    SiemBufferFailureKind, SiemForwardOutcome, SiemForwarder, SiemForwarderStatus,
+    SiemResendSummary, SiemRetryPolicy, build_siem_buffer_flushed_audit_event,
+    build_siem_event_failed_audit_event, build_siem_event_forwarded_audit_event,
+    build_siem_forward_failure_audit_event,
 };
 pub use otlp::OtlpSiemSink;
 pub use sink::{

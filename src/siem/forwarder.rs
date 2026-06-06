@@ -27,7 +27,7 @@ use crate::audit::{
 };
 use crate::types::SourceEventAt;
 
-use super::buffer::LocalSiemFallbackBuffer;
+use super::buffer::{LocalSiemBufferError, LocalSiemFallbackBuffer};
 use super::event::SiemEvent;
 use super::sink::{
     ForwardReceipt, SIEM_MAX_BATCH_SIZE, SiemExporterKind, SiemSink, SiemSinkError,
@@ -49,7 +49,25 @@ pub enum SiemForwardOutcome {
     /// sink 送信は失敗したが、ローカル buffer に積み込まれた（再送可能）。
     Buffered { sink_error_code: String },
     /// sink 送信失敗 + buffer 書き出しも失敗した（最も深刻）。ログ済み。
-    BufferingFailed { sink_error_code: String },
+    BufferingFailed {
+        sink_error_code: String,
+        buffer_failure_kind: SiemBufferFailureKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiemBufferFailureKind {
+    CapacityExceeded,
+    WriteFailed,
+}
+
+impl SiemBufferFailureKind {
+    pub fn audit_error_code(self) -> &'static str {
+        match self {
+            Self::CapacityExceeded => "siem_buffer_capacity_exceeded",
+            Self::WriteFailed => "siem_buffer_write_failed",
+        }
+    }
 }
 
 impl SiemForwardOutcome {
@@ -371,23 +389,28 @@ impl<S: SiemSink> SiemForwarder<S> {
                 sink_error_code: code,
             },
             Ok(Err(error)) => {
+                let buffer_failure_kind = buffer_failure_kind(&error);
                 tracing::error!(
                     batch_size = batch.len(),
                     error = %error,
+                    buffer_error_code = buffer_failure_kind.audit_error_code(),
                     "siem forwarder: append_pending failed; event is lost from buffer"
                 );
                 SiemForwardOutcome::BufferingFailed {
                     sink_error_code: code,
+                    buffer_failure_kind,
                 }
             }
             Err(error) => {
                 tracing::error!(
                     batch_size = batch.len(),
                     error = %error,
+                    buffer_error_code = SiemBufferFailureKind::WriteFailed.audit_error_code(),
                     "siem forwarder: spawn_blocking join failed while appending pending"
                 );
                 SiemForwardOutcome::BufferingFailed {
                     sink_error_code: code,
+                    buffer_failure_kind: SiemBufferFailureKind::WriteFailed,
                 }
             }
         }
@@ -427,11 +450,17 @@ impl<S: SiemSink> SiemForwarder<S> {
 fn append_pending_batch(
     buffer: &LocalSiemFallbackBuffer,
     events: &[SiemEvent],
-) -> Result<(), super::buffer::LocalSiemBufferError> {
-    for event in events {
-        buffer.append_pending(event)?;
+) -> Result<(), LocalSiemBufferError> {
+    buffer.append_pending_batch(events)
+}
+
+fn buffer_failure_kind(error: &LocalSiemBufferError) -> SiemBufferFailureKind {
+    match error {
+        LocalSiemBufferError::CapacityExceeded { .. } => SiemBufferFailureKind::CapacityExceeded,
+        LocalSiemBufferError::Io(_)
+        | LocalSiemBufferError::Serialization(_)
+        | LocalSiemBufferError::LockPoisoned => SiemBufferFailureKind::WriteFailed,
     }
-    Ok(())
 }
 
 /// `SiemSinkError` を `audit_events.metadata_json.error_code` 用の安定文字列に
