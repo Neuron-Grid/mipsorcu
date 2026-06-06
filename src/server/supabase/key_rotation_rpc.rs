@@ -151,10 +151,12 @@ impl SupabaseClient {
         &self,
         batch_size: u32,
         secret_id: Option<&SecretId>,
+        include_failed: bool,
     ) -> Result<Vec<EnvelopeMigrationBatchRow>, SupabaseRpcError> {
         let params = EnvelopeMigrationBatchParams {
             p_limit: batch_size,
             p_secret_id: secret_id.map(SecretId::as_canonical_string),
+            p_include_failed: include_failed,
         };
         let response = self
             .post_rpc("rpc_list_envelope_migration_batch", &params)
@@ -244,6 +246,7 @@ struct EnvelopeMigrationStatusParams {
 struct EnvelopeMigrationBatchParams {
     p_limit: u32,
     p_secret_id: Option<String>,
+    p_include_failed: bool,
 }
 
 #[derive(Serialize)]
@@ -294,6 +297,10 @@ impl From<KeyRotationCompleteResponse> for KeyRotationCompleteOutcome {
 #[derive(Debug, Deserialize)]
 struct EnvelopeMigrationStatusResponse {
     total_legacy_rows: i64,
+    #[serde(default)]
+    migratable_legacy_rows: Option<i64>,
+    #[serde(default)]
+    blocked_failure_rows: Option<i64>,
     last_run_at: Option<String>,
     last_batch_size: Option<i64>,
     last_success_count: Option<i64>,
@@ -302,8 +309,14 @@ struct EnvelopeMigrationStatusResponse {
 
 impl From<EnvelopeMigrationStatusResponse> for EnvelopeMigrationStatus {
     fn from(response: EnvelopeMigrationStatusResponse) -> Self {
+        let migratable_legacy_rows = response
+            .migratable_legacy_rows
+            .unwrap_or(response.total_legacy_rows);
+        let blocked_failure_rows = response.blocked_failure_rows.unwrap_or(0);
         Self::new(
             response.total_legacy_rows,
+            migratable_legacy_rows,
+            blocked_failure_rows,
             response.last_run_at,
             response.last_batch_size,
             response.last_success_count,

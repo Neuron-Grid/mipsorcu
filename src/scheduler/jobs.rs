@@ -479,6 +479,8 @@ pub(crate) async fn run_daily_envelope_lazy_migration_job(
                 success_count = summary.success_count,
                 failure_count = summary.failure_count,
                 remaining_legacy_rows = summary.remaining_legacy_rows,
+                migratable_legacy_rows = summary.migratable_legacy_rows,
+                blocked_failure_rows = summary.blocked_failure_rows,
                 batches_executed = summary.batches_executed,
                 "daily envelope lazy migration completed"
             );

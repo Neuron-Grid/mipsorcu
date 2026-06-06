@@ -40,6 +40,7 @@ struct EnvelopeMigrationOptions {
     batch_size: u32,
     max_batches: u32,
     dry_run: bool,
+    retry_failed: bool,
     secret_id: Option<SecretId>,
     format: OutputFormat,
 }
@@ -83,7 +84,11 @@ pub(super) async fn run(
             .call_envelope_migration_status(options.secret_id.as_ref())
             .await?;
         let batch_rows = supabase_client
-            .call_list_envelope_migration_batch(options.batch_size, options.secret_id.as_ref())
+            .call_list_envelope_migration_batch(
+                options.batch_size,
+                options.secret_id.as_ref(),
+                options.retry_failed,
+            )
             .await?;
         let totals = RunTotals {
             dry_run: true,
@@ -110,7 +115,11 @@ pub(super) async fn run(
 
     for _ in 0..options.max_batches {
         let batch_rows = supabase_client
-            .call_list_envelope_migration_batch(options.batch_size, options.secret_id.as_ref())
+            .call_list_envelope_migration_batch(
+                options.batch_size,
+                options.secret_id.as_ref(),
+                options.retry_failed,
+            )
             .await?;
         if batch_rows.is_empty() {
             break;
@@ -495,13 +504,15 @@ fn print_totals(
     match format {
         OutputFormat::Text => {
             println!(
-                "envelope_migration dry_run={} request_id={} selected_count={} success_count={} failure_count={} remaining_legacy_rows={} last_run_at={} last_batch_size={} last_success_count={} last_failure_count={}",
+                "envelope_migration dry_run={} request_id={} selected_count={} success_count={} failure_count={} remaining_legacy_rows={} migratable_legacy_rows={} blocked_failure_rows={} last_run_at={} last_batch_size={} last_success_count={} last_failure_count={}",
                 totals.dry_run,
                 totals.last_request_id.as_deref().unwrap_or("-"),
                 totals.selected_count,
                 totals.success_count,
                 totals.failure_count,
                 totals.remaining_legacy_rows,
+                status.migratable_legacy_rows,
+                status.blocked_failure_rows,
                 status.last_run_at.as_deref().unwrap_or("-"),
                 format_optional_i64(status.last_batch_size),
                 format_optional_i64(status.last_success_count),
@@ -517,6 +528,8 @@ fn print_totals(
                     "success_count": totals.success_count,
                     "failure_count": totals.failure_count,
                     "remaining_legacy_rows": totals.remaining_legacy_rows,
+                    "migratable_legacy_rows": status.migratable_legacy_rows,
+                    "blocked_failure_rows": status.blocked_failure_rows,
                     "last_run_at": status.last_run_at.clone(),
                     "last_batch_size": status.last_batch_size,
                     "last_success_count": status.last_success_count,
@@ -540,6 +553,7 @@ fn parse_options(args: &[String]) -> Result<EnvelopeMigrationOptions, KeyRotatio
     let mut batch_size = DEFAULT_BATCH_SIZE;
     let mut max_batches = DEFAULT_MAX_BATCHES;
     let mut dry_run = false;
+    let mut retry_failed = false;
     let mut secret_id = None;
     let mut format = OutputFormat::Text;
     let mut migrate_seen = false;
@@ -558,6 +572,10 @@ fn parse_options(args: &[String]) -> Result<EnvelopeMigrationOptions, KeyRotatio
             }
             "--dry-run" => {
                 dry_run = true;
+                index += 1;
+            }
+            "--retry-failed" => {
+                retry_failed = true;
                 index += 1;
             }
             "--batch-size" => {
@@ -599,6 +617,7 @@ fn parse_options(args: &[String]) -> Result<EnvelopeMigrationOptions, KeyRotatio
         batch_size,
         max_batches,
         dry_run,
+        retry_failed,
         secret_id,
         format,
     })
@@ -662,6 +681,8 @@ pub(crate) struct RunScheduledEnvelopeMigrationOutcome {
     pub(crate) success_count: u64,
     pub(crate) failure_count: u64,
     pub(crate) remaining_legacy_rows: i64,
+    pub(crate) migratable_legacy_rows: i64,
+    pub(crate) blocked_failure_rows: i64,
     pub(crate) batches_executed: u32,
 }
 
@@ -701,7 +722,7 @@ pub(crate) async fn run_scheduled_envelope_migration(
 
     for _ in 0..max_batches {
         let batch_rows = supabase_client
-            .call_list_envelope_migration_batch(batch_size, None)
+            .call_list_envelope_migration_batch(batch_size, None, false)
             .await?;
         if batch_rows.is_empty() {
             break;
@@ -743,6 +764,8 @@ pub(crate) async fn run_scheduled_envelope_migration(
         success_count: totals.success_count,
         failure_count: totals.failure_count,
         remaining_legacy_rows: totals.remaining_legacy_rows,
+        migratable_legacy_rows: status.migratable_legacy_rows,
+        blocked_failure_rows: status.blocked_failure_rows,
         batches_executed,
     })
 }

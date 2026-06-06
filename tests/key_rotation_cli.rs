@@ -133,7 +133,7 @@ fn spawn_envelope_migration_dry_run_server() -> Result<TestServerHandle, Box<dyn
                     &mut stream,
                     200,
                     "OK",
-                    r#"[{"total_legacy_rows":7,"last_run_at":null,"last_batch_size":null,"last_success_count":null,"last_failure_count":null}]"#,
+                    r#"[{"total_legacy_rows":7,"migratable_legacy_rows":5,"blocked_failure_rows":2,"last_run_at":null,"last_batch_size":null,"last_success_count":null,"last_failure_count":null}]"#,
                 )?;
             } else if path == "/rest/v1/rpc/rpc_list_envelope_migration_batch" {
                 write_http_response(&mut stream, 200, "OK", r#"[]"#)?;
@@ -463,12 +463,15 @@ fn envelope_migration_dry_run_does_not_call_apply_rpc() -> Result<(), Box<dyn st
         .ok_or_else(|| std::io::Error::other("list body should be JSON"))?;
     assert_eq!(list_body["p_limit"], 100);
     assert_eq!(list_body["p_secret_id"], Value::Null);
+    assert_eq!(list_body["p_include_failed"], false);
 
     let stdout = String::from_utf8_lossy(&run.output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)?;
     assert_eq!(parsed["envelope_migration"]["dry_run"], true);
     assert_eq!(parsed["envelope_migration"]["selected_count"], 0);
     assert_eq!(parsed["envelope_migration"]["remaining_legacy_rows"], 7);
+    assert_eq!(parsed["envelope_migration"]["migratable_legacy_rows"], 5);
+    assert_eq!(parsed["envelope_migration"]["blocked_failure_rows"], 2);
     let stderr = String::from_utf8_lossy(&run.output.stderr);
     assert!(
         stderr.is_empty(),

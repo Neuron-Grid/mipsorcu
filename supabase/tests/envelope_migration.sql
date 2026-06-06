@@ -109,6 +109,58 @@ select ok(
     'envelope migration ledger payload schema is accepted'
 );
 
+select is(
+    (
+        select count(*)::integer
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public'
+            and c.relname = 'envelope_migration_failures'
+            and c.relrowsecurity
+            and c.relforcerowsecurity
+    ),
+    1,
+    'envelope migration failure markers enable and force row level security'
+);
+
+select is(
+    (
+        select exists (
+            select 1
+            from (values
+                ('anon', 'select'),
+                ('anon', 'insert'),
+                ('anon', 'update'),
+                ('anon', 'delete'),
+                ('authenticated', 'select'),
+                ('authenticated', 'insert'),
+                ('authenticated', 'update'),
+                ('authenticated', 'delete'),
+                ('service_role', 'select'),
+                ('service_role', 'insert'),
+                ('service_role', 'update'),
+                ('service_role', 'delete')
+            ) as table_privileges(role_name, privilege_name)
+            where has_table_privilege(
+                table_privileges.role_name,
+                'public.envelope_migration_failures',
+                table_privileges.privilege_name
+            )
+        )
+    ),
+    false,
+    'envelope migration failure markers have no direct runtime table privileges'
+);
+
+select ok(
+    has_function_privilege(
+        'service_role',
+        'public.rpc_list_envelope_migration_batch(integer,uuid,boolean)'::regprocedure,
+        'execute'
+    ),
+    'service_role can execute the envelope migration list RPC with retry flag'
+);
+
 select ok(
     not public.audit_metadata_has_schema_violation_for_action(
         'key_rotation_envelope_migrated',
@@ -772,12 +824,38 @@ from test_helpers.write_secret_version_fixture(
     '33'
 );
 
+create temp table legacy_failure_second_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001716',
+    'encrypt_rotate',
+    '550e8400-e29b-41d4-a716-446655441705',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:01:30Z',
+    2,
+    'a7',
+    '35'
+);
+
 create temp table failure_batch as
 select *
 from public.rpc_list_envelope_migration_batch(
-    10,
+    1,
     '550e8400-e29b-41d4-a716-446655441705'
 );
+
+create temp table failure_row_before as
+select
+    sv.id,
+    sv.ciphertext,
+    sv.encrypted_data_key,
+    sv.nonce_or_iv,
+    sv.aad_context,
+    sv.created_at,
+    sv.dek_wrap_algorithm,
+    sv.wrapped_dek
+from public.secret_versions sv
+join failure_batch fb on fb.id = sv.id;
 
 select is(
     test_helpers.try_apply_envelope_migration_batch(
@@ -868,6 +946,112 @@ select is(
     ),
     1,
     'pre-crypto failure row appends matching batch ledger entry'
+);
+
+select ok(
+    (
+        select sv.dek_wrap_algorithm is not distinct from old_row.dek_wrap_algorithm
+            and sv.encrypted_data_key is not distinct from old_row.encrypted_data_key
+            and sv.wrapped_dek is not distinct from old_row.wrapped_dek
+            and sv.ciphertext = old_row.ciphertext
+            and sv.nonce_or_iv = old_row.nonce_or_iv
+            and sv.aad_context = old_row.aad_context
+            and sv.created_at = old_row.created_at
+        from public.secret_versions sv
+        join failure_row_before old_row on old_row.id = sv.id
+    ),
+    'pre-crypto failure marker leaves secret_versions cryptographic fields unchanged'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.envelope_migration_failures emf
+        join failure_batch fb on fb.id = emf.secret_version_id
+        where emf.secret_id = '550e8400-e29b-41d4-a716-446655441705'
+            and emf.version = 1
+            and emf.key_version = 1
+            and emf.error_code = 'aad_context_mismatch'
+            and emf.failure_count = 1
+    ),
+    1,
+    'pre-crypto failure records a single active failure marker'
+);
+
+create temp table failure_skip_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    1,
+    '550e8400-e29b-41d4-a716-446655441705'
+);
+
+select is(
+    (select count(*)::integer from failure_skip_batch),
+    1,
+    'normal envelope migration list still returns later migratable rows after a failure marker'
+);
+
+select is(
+    (select version from failure_skip_batch),
+    2,
+    'normal envelope migration list skips the oldest marked failure row'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000001706'
+            and ae.action = 'key_rotation_envelope_failed'
+    ),
+    1,
+    'normal relisting does not duplicate the row failure audit'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.ledger_entries le
+        where le.source_event_id = '00000000-0000-4000-8000-000000001707'
+    ),
+    1,
+    'normal relisting does not duplicate the failure batch ledger entry'
+);
+
+create temp table failure_secret_status as
+select *
+from public.rpc_envelope_migration_status('550e8400-e29b-41d4-a716-446655441705');
+
+select is(
+    (select total_legacy_rows from failure_secret_status),
+    2::bigint,
+    'envelope migration status counts all legacy rows including marked failures'
+);
+
+select is(
+    (select migratable_legacy_rows from failure_secret_status),
+    1::bigint,
+    'envelope migration status counts unmarked migratable legacy rows'
+);
+
+select is(
+    (select blocked_failure_rows from failure_secret_status),
+    1::bigint,
+    'envelope migration status counts marked failure rows'
+);
+
+create temp table failure_retry_list as
+select *
+from public.rpc_list_envelope_migration_batch(
+    1,
+    '550e8400-e29b-41d4-a716-446655441705',
+    true
+);
+
+select is(
+    (select version from failure_retry_list),
+    1,
+    'explicit retry list includes the marked oldest failure row'
 );
 
 select is(
@@ -1259,6 +1443,397 @@ select is(
     ),
     0,
     'task08 migration keeps secret_id nonce uniqueness invariant'
+);
+
+create temp table retry_marker_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001810',
+    'encrypt_create',
+    '550e8400-e29b-41d4-a716-446655441810',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:30:00Z',
+    1,
+    'aa',
+    '37'
+);
+
+create temp table retry_marker_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    1,
+    '550e8400-e29b-41d4-a716-446655441810'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001811',
+        '[]'::jsonb,
+        jsonb_build_array(
+            jsonb_build_object(
+                'id', (select id::text from retry_marker_batch),
+                'secret_id', '550e8400-e29b-41d4-a716-446655441810',
+                'version', 1,
+                'key_version', 1,
+                'error_code', 'aad_context_mismatch'
+            )
+        ),
+        '00000000-0000-4000-8000-000000001812',
+        '2026-04-08T12:31:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001813',
+            4,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:31:00Z',
+            '00000000-0000-4000-8000-000000001811',
+            '00000000-0000-4000-8000-000000001812',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 0, 'failure_count', 1),
+            repeat('96', 32),
+            repeat('98', 32)
+        )
+    ),
+    'ok',
+    'retry fixture records the initial failure marker'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001814',
+        '[]'::jsonb,
+        jsonb_build_array(
+            jsonb_build_object(
+                'id', (select id::text from retry_marker_batch),
+                'secret_id', '550e8400-e29b-41d4-a716-446655441810',
+                'version', 1,
+                'key_version', 1,
+                'error_code', 'legacy_decrypt_failed'
+            )
+        ),
+        '00000000-0000-4000-8000-000000001815',
+        '2026-04-08T12:32:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001816',
+            5,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:32:00Z',
+            '00000000-0000-4000-8000-000000001814',
+            '00000000-0000-4000-8000-000000001815',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 0, 'failure_count', 1),
+            repeat('98', 32),
+            repeat('99', 32)
+        )
+    ),
+    'ok',
+    'explicit retry failure updates the active marker without duplicating it'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.envelope_migration_failures emf
+        join retry_marker_batch mb on mb.id = emf.secret_version_id
+        where emf.failure_count = 2
+            and emf.error_code = 'legacy_decrypt_failed'
+    ),
+    1,
+    'explicit retry failure increments marker count and stores the latest error code'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.target_secret_id = '550e8400-e29b-41d4-a716-446655441810'
+            and ae.action = 'key_rotation_envelope_failed'
+    ),
+    2,
+    'explicit retry failure records exactly one additional failure audit'
+);
+
+create temp table retry_marker_list as
+select *
+from public.rpc_list_envelope_migration_batch(
+    1,
+    '550e8400-e29b-41d4-a716-446655441810',
+    true
+);
+
+select is(
+    (select count(*)::integer from retry_marker_list),
+    1,
+    'explicit retry list can select a marked failure row'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001817',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from retry_marker_list),
+            '550e8400-e29b-41d4-a716-446655441810',
+            1,
+            1,
+            'ca',
+            '38',
+            'da',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001818',
+        '2026-04-08T12:33:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001819',
+            6,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:33:00Z',
+            '00000000-0000-4000-8000-000000001817',
+            '00000000-0000-4000-8000-000000001818',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0),
+            repeat('99', 32),
+            repeat('9a', 32)
+        )
+    ),
+    'ok',
+    'explicit retry success migrates the marked row'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.envelope_migration_failures emf
+        join retry_marker_batch mb on mb.id = emf.secret_version_id
+    ),
+    0,
+    'explicit retry success clears the failure marker'
+);
+
+create temp table retry_marker_status_after_success as
+select *
+from public.rpc_envelope_migration_status('550e8400-e29b-41d4-a716-446655441810');
+
+select is(
+    (select total_legacy_rows from retry_marker_status_after_success),
+    0::bigint,
+    'retry success removes the migrated row from total legacy status'
+);
+
+select is(
+    (select blocked_failure_rows from retry_marker_status_after_success),
+    0::bigint,
+    'retry success removes the migrated row from blocked failure status'
+);
+
+create temp table failure_conflict_write_result as
+select *
+from test_helpers.write_secret_version_fixture(
+    '00000000-0000-4000-8000-000000001820',
+    'encrypt_create',
+    '550e8400-e29b-41d4-a716-446655441820',
+    'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+    '2026-04-08T12:40:00Z',
+    1,
+    'ab',
+    '39'
+);
+
+create temp table failure_conflict_batch as
+select *
+from public.rpc_list_envelope_migration_batch(
+    1,
+    '550e8400-e29b-41d4-a716-446655441820'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001821',
+        '[]'::jsonb,
+        jsonb_build_array(
+            jsonb_build_object(
+                'id', (select id::text from failure_conflict_batch),
+                'secret_id', '550e8400-e29b-41d4-a716-446655441820',
+                'version', 2,
+                'key_version', 1,
+                'error_code', 'aad_context_mismatch'
+            )
+        ),
+        '00000000-0000-4000-8000-000000001822',
+        '2026-04-08T12:41:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001823',
+            7,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:41:00Z',
+            '00000000-0000-4000-8000-000000001821',
+            '00000000-0000-4000-8000-000000001822',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 0, 'failure_count', 1),
+            repeat('9a', 32),
+            repeat('9b', 32)
+        )
+    ),
+    'envelope_migration_failure_row_conflict',
+    'failure row version mismatch fails closed'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.envelope_migration_failures emf
+        join failure_conflict_batch mb on mb.id = emf.secret_version_id
+    ),
+    0,
+    'failure row conflict does not leave a failure marker'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000001821'
+            or ae.id = '00000000-0000-4000-8000-000000001822'
+    ),
+    0,
+    'failure row conflict does not record audit events'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001824',
+        jsonb_build_array(test_helpers.envelope_migration_apply_row_json(
+            (select id from failure_conflict_batch),
+            '550e8400-e29b-41d4-a716-446655441820',
+            1,
+            2,
+            'cc',
+            '3a',
+            'dc',
+            2
+        )),
+        '[]'::jsonb,
+        '00000000-0000-4000-8000-000000001825',
+        '2026-04-08T12:42:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001826',
+            7,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:42:00Z',
+            '00000000-0000-4000-8000-000000001824',
+            '00000000-0000-4000-8000-000000001825',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 1, 'failure_count', 0),
+            repeat('9a', 32),
+            repeat('9c', 32)
+        )
+    ),
+    'envelope_migration_row_conflict',
+    'success row key_version mismatch fails closed'
+);
+
+select ok(
+    (
+        select sv.dek_wrap_algorithm is null
+            and sv.encrypted_data_key is not null
+            and sv.wrapped_dek is null
+        from public.secret_versions sv
+        join failure_conflict_batch mb on mb.id = sv.id
+    ),
+    'success row key_version mismatch leaves the row legacy'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000001824'
+            or ae.id = '00000000-0000-4000-8000-000000001825'
+    ),
+    0,
+    'success row key_version mismatch does not record audit events'
+);
+
+select is(
+    test_helpers.try_apply_envelope_migration_batch(
+        '00000000-0000-4000-8000-000000001827',
+        '[]'::jsonb,
+        jsonb_build_array(
+            jsonb_build_object(
+                'id', (select id::text from failure_conflict_batch),
+                'secret_id', '550e8400-e29b-41d4-a716-446655441820',
+                'version', 1,
+                'key_version', 2,
+                'error_code', 'aad_context_mismatch'
+            )
+        ),
+        '00000000-0000-4000-8000-000000001828',
+        '2026-04-08T12:43:00Z',
+        test_helpers.ledger_entry_json(
+            '00000000-0000-4000-8000-000000001829',
+            7,
+            'envelope_migration_batch_completed',
+            '2026-04-08T12:43:00Z',
+            '00000000-0000-4000-8000-000000001827',
+            '00000000-0000-4000-8000-000000001828',
+            '',
+            '',
+            '',
+            '',
+            'success',
+            '',
+            jsonb_build_object('batch_size', 1, 'success_count', 0, 'failure_count', 1),
+            repeat('9a', 32),
+            repeat('9d', 32)
+        )
+    ),
+    'envelope_migration_failure_row_conflict',
+    'failure row key_version mismatch fails closed'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.envelope_migration_failures emf
+        join failure_conflict_batch mb on mb.id = emf.secret_version_id
+    ),
+    0,
+    'failure row key_version mismatch does not leave a failure marker'
+);
+
+select is(
+    (
+        select count(*)::integer
+        from public.audit_events ae
+        where ae.request_id = '00000000-0000-4000-8000-000000001827'
+            or ae.id = '00000000-0000-4000-8000-000000001828'
+    ),
+    0,
+    'failure row key_version mismatch does not record audit events'
 );
 
 select *

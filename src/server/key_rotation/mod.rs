@@ -60,7 +60,7 @@ pub fn usage() -> String {
         "usage:",
         "  mipsorcu",
         "  mipsorcu key-rotation status [--key-version <n>] [--format text|json]",
-        "  mipsorcu key-rotation --migrate-envelope [--batch-size <n>] [--max-batches <n>] [--dry-run] [--secret-id <uuid>] [--format text|json]",
+        "  mipsorcu key-rotation --migrate-envelope [--batch-size <n>] [--max-batches <n>] [--dry-run] [--retry-failed] [--secret-id <uuid>] [--format text|json]",
         "  mipsorcu key-rotation start --old-key-version <old> --new-key-version <new>",
         "  mipsorcu key-rotation rewrap --old-key-version <old> --new-key-version <new> --batch-limit <n>",
         "  mipsorcu key-rotation complete --old-key-version <old> --new-key-version <new>",

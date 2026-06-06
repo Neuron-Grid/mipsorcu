@@ -186,6 +186,7 @@ begin
             where sv.id = v_id
                 and sv.secret_id = v_secret_id
                 and sv.version = v_version
+                and sv.key_version = v_key_version
                 and (sv.dek_wrap_algorithm is null or sv.dek_wrap_algorithm = 'legacy-master-key-v1')
             for update nowait;
 
@@ -203,6 +204,9 @@ begin
                 kek_version = v_kek_version,
                 key_version = v_kek_version
             where id = v_id;
+
+            delete from public.envelope_migration_failures
+            where secret_version_id = v_id;
 
             success_count := coalesce(success_count, 0) + 1;
         exception
@@ -249,6 +253,51 @@ begin
         if v_error_code !~ '^[a-z0-9_]{1,64}$' then
             raise exception 'invalid_error_code' using errcode = '22023';
         end if;
+
+        begin
+            perform 1
+            from public.secret_versions sv
+            where sv.id = v_id
+                and sv.secret_id = v_secret_id
+                and sv.version = v_version
+                and sv.key_version = v_key_version
+                and (sv.dek_wrap_algorithm is null or sv.dek_wrap_algorithm = 'legacy-master-key-v1')
+            for update nowait;
+
+            if not found then
+                raise exception 'envelope_migration_failure_row_conflict' using errcode = '40001';
+            end if;
+
+            insert into public.envelope_migration_failures (
+                secret_version_id,
+                secret_id,
+                version,
+                key_version,
+                error_code
+            )
+            values (
+                v_id,
+                v_secret_id,
+                v_version,
+                v_key_version,
+                v_error_code
+            )
+            on conflict (secret_version_id) do update
+            set
+                secret_id = excluded.secret_id,
+                version = excluded.version,
+                key_version = excluded.key_version,
+                error_code = excluded.error_code,
+                failure_count = case
+                    when public.envelope_migration_failures.failure_count < 2147483647
+                        then public.envelope_migration_failures.failure_count + 1
+                    else public.envelope_migration_failures.failure_count
+                end,
+                last_failed_at = now();
+        exception
+            when lock_not_available then
+                raise exception 'envelope_migration_failure_row_locked' using errcode = '40001';
+        end;
 
         v_failure_metadata := jsonb_build_object(
             'secret_version_id', v_id::text,

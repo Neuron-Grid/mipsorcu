@@ -143,6 +143,7 @@ fn envelope_migration_cli_converts_legacy_fixture_to_decryptable_v02_apply_row()
         .ok_or_else(|| std::io::Error::other("list request body should be JSON"))?;
     assert_eq!(list_body["p_limit"], 1);
     assert_eq!(list_body["p_secret_id"], Value::Null);
+    assert_eq!(list_body["p_include_failed"], false);
 
     let apply_body = apply_request
         .body
@@ -217,12 +218,198 @@ fn envelope_migration_dry_run_skips_apply_rpc_in_task08_suite()
         list_request.path,
         "/rest/v1/rpc/rpc_list_envelope_migration_batch"
     );
+    let list_body = list_request
+        .body
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("dry-run list request body should be JSON"))?;
+    assert_eq!(list_body["p_include_failed"], false);
     let stdout = String::from_utf8_lossy(&run.output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)?;
     assert_eq!(parsed["envelope_migration"]["dry_run"], true);
     assert_eq!(parsed["envelope_migration"]["remaining_legacy_rows"], 1);
+    assert_eq!(parsed["envelope_migration"]["migratable_legacy_rows"], 1);
+    assert_eq!(parsed["envelope_migration"]["blocked_failure_rows"], 0);
     assert!(!stdout.contains("rpc_apply_envelope_migration_batch"));
     assert!(!run.fallback_path.exists());
+
+    fs::remove_dir_all(run.temp_dir)?;
+
+    Ok(())
+}
+
+#[test]
+fn envelope_migration_cli_continues_after_preparation_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = legacy_fixture()?;
+    let (supabase_url, receiver, server_thread) =
+        spawn_envelope_migration_failure_skip_server(&fixture)?;
+
+    let run = run_key_rotation_migrate_with_args(
+        &supabase_url,
+        "envelope-failure-skip",
+        &[
+            "key-rotation",
+            "--migrate-envelope",
+            "--batch-size",
+            "1",
+            "--max-batches",
+            "2",
+            "--format",
+            "json",
+        ],
+    )?;
+    let public_key_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let first_list_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let first_chain_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let first_apply_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let second_list_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let second_chain_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let second_apply_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let status_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    server_thread
+        .join()
+        .map_err(|_| std::io::Error::other("failure skip server thread panicked"))??;
+
+    assert!(run.output.status.success());
+    assert_eq!(
+        public_key_request.path,
+        "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status"
+    );
+    assert_eq!(
+        first_list_request.path,
+        "/rest/v1/rpc/rpc_list_envelope_migration_batch"
+    );
+    assert_eq!(first_chain_request.method, "GET");
+    assert_eq!(
+        first_apply_request.path,
+        "/rest/v1/rpc/rpc_apply_envelope_migration_batch"
+    );
+    assert_eq!(
+        second_list_request.path,
+        "/rest/v1/rpc/rpc_list_envelope_migration_batch"
+    );
+    assert_eq!(second_chain_request.method, "GET");
+    assert_eq!(
+        second_apply_request.path,
+        "/rest/v1/rpc/rpc_apply_envelope_migration_batch"
+    );
+    assert_eq!(
+        status_request.path,
+        "/rest/v1/rpc/rpc_envelope_migration_status"
+    );
+
+    let first_list_body = first_list_request
+        .body
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("first list body should be JSON"))?;
+    assert_eq!(first_list_body["p_include_failed"], false);
+    let second_list_body = second_list_request
+        .body
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("second list body should be JSON"))?;
+    assert_eq!(second_list_body["p_include_failed"], false);
+
+    let first_apply_body = first_apply_request
+        .body
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("first apply body should be JSON"))?;
+    assert!(
+        first_apply_body["p_rows"]
+            .as_array()
+            .ok_or_else(|| std::io::Error::other("first p_rows should be an array"))?
+            .is_empty()
+    );
+    let first_failure_rows = first_apply_body["p_failure_rows"]
+        .as_array()
+        .ok_or_else(|| std::io::Error::other("first p_failure_rows should be an array"))?;
+    assert_eq!(first_failure_rows.len(), 1);
+    assert_eq!(first_failure_rows[0]["error_code"], "aad_context_mismatch");
+
+    let second_apply_body = second_apply_request
+        .body
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("second apply body should be JSON"))?;
+    assert_eq!(
+        second_apply_body["p_rows"]
+            .as_array()
+            .ok_or_else(|| std::io::Error::other("second p_rows should be an array"))?
+            .len(),
+        1
+    );
+    assert!(
+        second_apply_body["p_failure_rows"]
+            .as_array()
+            .ok_or_else(|| std::io::Error::other("second p_failure_rows should be an array"))?
+            .is_empty()
+    );
+
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed["envelope_migration"]["selected_count"], 2);
+    assert_eq!(parsed["envelope_migration"]["success_count"], 1);
+    assert_eq!(parsed["envelope_migration"]["failure_count"], 1);
+    assert_eq!(parsed["envelope_migration"]["remaining_legacy_rows"], 1);
+    assert_eq!(parsed["envelope_migration"]["migratable_legacy_rows"], 0);
+    assert_eq!(parsed["envelope_migration"]["blocked_failure_rows"], 1);
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(
+        stderr.is_empty(),
+        "migration failure-skip stderr should be empty: {stderr}"
+    );
+    assert_no_cli_secret_material(&format!("{stdout}{stderr}"), &fixture)?;
+    assert!(!run.fallback_path.exists());
+
+    fs::remove_dir_all(run.temp_dir)?;
+
+    Ok(())
+}
+
+#[test]
+fn envelope_migration_retry_failed_sets_list_retry_flag() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (supabase_url, receiver, server_thread) = spawn_envelope_migration_dry_run_server()?;
+
+    let run = run_key_rotation_migrate_with_args(
+        &supabase_url,
+        "envelope-retry-failed-dry-run",
+        &[
+            "key-rotation",
+            "--migrate-envelope",
+            "--batch-size",
+            "1",
+            "--max-batches",
+            "1",
+            "--retry-failed",
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+    )?;
+    let public_key_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let status_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let list_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    server_thread
+        .join()
+        .map_err(|_| std::io::Error::other("retry dry-run server thread panicked"))??;
+
+    assert!(run.output.status.success());
+    assert_eq!(
+        public_key_request.path,
+        "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status"
+    );
+    assert_eq!(
+        status_request.path,
+        "/rest/v1/rpc/rpc_envelope_migration_status"
+    );
+    assert_eq!(
+        list_request.path,
+        "/rest/v1/rpc/rpc_list_envelope_migration_batch"
+    );
+    let list_body = list_request
+        .body
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("retry list request body should be JSON"))?;
+    assert_eq!(list_body["p_include_failed"], true);
 
     fs::remove_dir_all(run.temp_dir)?;
 
@@ -275,7 +462,7 @@ fn spawn_envelope_migration_apply_server(
                     &mut stream,
                     200,
                     "OK",
-                    r#"[{"total_legacy_rows":0,"last_run_at":"2026-04-08T12:10:00Z","last_batch_size":1,"last_success_count":1,"last_failure_count":0}]"#,
+                    r#"[{"total_legacy_rows":0,"migratable_legacy_rows":0,"blocked_failure_rows":0,"last_run_at":"2026-04-08T12:10:00Z","last_batch_size":1,"last_success_count":1,"last_failure_count":0}]"#,
                 )?;
             } else {
                 write_http_response(&mut stream, 500, "Unexpected Request", r#""unexpected""#)?;
@@ -317,7 +504,7 @@ fn spawn_envelope_migration_dry_run_server() -> Result<TestServerHandle, Box<dyn
                     &mut stream,
                     200,
                     "OK",
-                    r#"[{"total_legacy_rows":1,"last_run_at":null,"last_batch_size":null,"last_success_count":null,"last_failure_count":null}]"#,
+                    r#"[{"total_legacy_rows":1,"migratable_legacy_rows":1,"blocked_failure_rows":0,"last_run_at":null,"last_batch_size":null,"last_success_count":null,"last_failure_count":null}]"#,
                 )?;
             } else if path == "/rest/v1/rpc/rpc_list_envelope_migration_batch" {
                 write_http_response(&mut stream, 200, "OK", r#"[]"#)?;
@@ -332,13 +519,107 @@ fn spawn_envelope_migration_dry_run_server() -> Result<TestServerHandle, Box<dyn
     Ok((format!("http://{addr}"), receiver, thread))
 }
 
+fn spawn_envelope_migration_failure_skip_server(
+    fixture: &LegacyEnvelopeFixture,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let first_batch_body = legacy_batch_body_with_id_and_aad_context(
+        fixture,
+        "650e8400-e29b-41d4-a716-446655440011",
+        mismatched_aad_context(fixture),
+    )?;
+    let second_batch_body = legacy_batch_body_with_id_and_aad_context(
+        fixture,
+        "650e8400-e29b-41d4-a716-446655440012",
+        fixture.aad_context.clone(),
+    )?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let mut list_count = 0;
+        let mut apply_count = 0;
+        for _ in 0..8 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let path = request.path.clone();
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if path == "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status" {
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "OK",
+                    &ledger_signing_public_key_status_body(),
+                )?;
+            } else if path == "/rest/v1/rpc/rpc_list_envelope_migration_batch" {
+                list_count += 1;
+                let body = if list_count == 1 {
+                    &first_batch_body
+                } else {
+                    &second_batch_body
+                };
+                write_http_response(&mut stream, 200, "OK", body)?;
+            } else if path.starts_with("/rest/v1/ledger_chain_state") {
+                write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
+            } else if path == "/rest/v1/rpc/rpc_apply_envelope_migration_batch" {
+                apply_count += 1;
+                if apply_count == 1 {
+                    write_http_response(
+                        &mut stream,
+                        200,
+                        "OK",
+                        r#"[{"success_count":0,"failure_count":1,"remaining_legacy_rows":2,"retry_secret_version_ids":[]}]"#,
+                    )?;
+                } else {
+                    write_http_response(
+                        &mut stream,
+                        200,
+                        "OK",
+                        r#"[{"success_count":1,"failure_count":0,"remaining_legacy_rows":1,"retry_secret_version_ids":[]}]"#,
+                    )?;
+                }
+            } else if path == "/rest/v1/rpc/rpc_envelope_migration_status" {
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "OK",
+                    r#"[{"total_legacy_rows":1,"migratable_legacy_rows":0,"blocked_failure_rows":1,"last_run_at":"2026-04-08T12:11:00Z","last_batch_size":1,"last_success_count":1,"last_failure_count":0}]"#,
+                )?;
+            } else {
+                write_http_response(&mut stream, 500, "Unexpected Request", r#""unexpected""#)?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
 fn legacy_batch_body(
     fixture: &LegacyEnvelopeFixture,
+) -> Result<String, Box<dyn std::error::Error>> {
+    legacy_batch_body_with_id_and_aad_context(
+        fixture,
+        "650e8400-e29b-41d4-a716-446655440001",
+        fixture.aad_context.clone(),
+    )
+}
+
+fn legacy_batch_body_with_id_and_aad_context(
+    fixture: &LegacyEnvelopeFixture,
+    id: &str,
+    aad_context: Value,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let version = i32::try_from(fixture.version)?;
     let key_version = i32::try_from(fixture.key_version)?;
     Ok(json!([{
-        "id": "650e8400-e29b-41d4-a716-446655440001",
+        "id": id,
         "secret_id": fixture.secret_id,
         "version": version,
         "ciphertext": format!("\\x{}", fixture.ciphertext_hex),
@@ -347,11 +628,17 @@ fn legacy_batch_body(
         "algorithm": ALGORITHM_XCHACHA20_POLY1305,
         "classification": fixture.classification,
         "nonce_or_iv": format!("\\x{}", fixture.nonce_hex),
-        "aad_context": fixture.aad_context,
+        "aad_context": aad_context,
         "created_at": fixture.created_at,
         "owner_user_id": fixture.owner_user_id,
     }])
     .to_string())
+}
+
+fn mismatched_aad_context(fixture: &LegacyEnvelopeFixture) -> Value {
+    let mut aad_context = fixture.aad_context.clone();
+    aad_context["classification"] = json!("restricted");
+    aad_context
 }
 
 fn run_key_rotation_migrate(

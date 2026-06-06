@@ -134,8 +134,10 @@ fn print_status(
                 );
             }
             println!(
-                "envelope_migration total_legacy_rows={} last_run_at={} last_batch_size={} last_success_count={} last_failure_count={}",
+                "envelope_migration total_legacy_rows={} migratable_legacy_rows={} blocked_failure_rows={} last_run_at={} last_batch_size={} last_success_count={} last_failure_count={}",
                 envelope_status.total_legacy_rows,
+                envelope_status.migratable_legacy_rows,
+                envelope_status.blocked_failure_rows,
                 envelope_status.last_run_at.as_deref().unwrap_or("-"),
                 format_optional_i64(envelope_status.last_batch_size),
                 format_optional_i64(envelope_status.last_success_count),
@@ -150,6 +152,8 @@ fn print_status(
                 })),
                 "envelope_migration": {
                     "total_legacy_rows": envelope_status.total_legacy_rows,
+                    "migratable_legacy_rows": envelope_status.migratable_legacy_rows,
+                    "blocked_failure_rows": envelope_status.blocked_failure_rows,
                     "last_run_at": envelope_status.last_run_at.clone(),
                     "last_batch_size": envelope_status.last_batch_size,
                     "last_success_count": envelope_status.last_success_count,

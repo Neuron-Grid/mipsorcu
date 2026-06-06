@@ -380,9 +380,58 @@ as $$
     end;
 $$;
 
+-- liveness marker: rows that fail SBC-side preparation must not be
+-- reselected forever by normal lazy migration batches. This table is
+-- operational state only; audit_events and ledger_entries remain the audit
+-- source of truth. It stores no plaintext, key material, ciphertext, nonce,
+-- AAD JSON, JWT, or service_role key.
+create table if not exists public.envelope_migration_failures (
+    secret_version_id uuid primary key,
+    secret_id uuid not null,
+    version integer not null,
+    key_version integer not null,
+    error_code text not null,
+    failure_count integer not null default 1,
+    first_failed_at timestamptz not null default now(),
+    last_failed_at timestamptz not null default now(),
+    constraint envelope_migration_failures_secret_version_fk
+        foreign key (secret_id, secret_version_id)
+        references public.secret_versions (secret_id, id)
+        on delete cascade,
+    constraint envelope_migration_failures_version_positive
+        check (version > 0),
+    constraint envelope_migration_failures_key_version_positive
+        check (key_version > 0),
+    constraint envelope_migration_failures_error_code_valid
+        check (error_code ~ '^[a-z0-9_]{1,64}$'),
+    constraint envelope_migration_failures_count_positive
+        check (failure_count > 0),
+    constraint envelope_migration_failures_timestamps_ordered
+        check (last_failed_at >= first_failed_at)
+);
+
+comment on table public.envelope_migration_failures is
+    'Operational marker table for Task 07 envelope lazy migration rows that failed SBC-side preparation. Not an audit source of truth and contains no secret material.';
+comment on column public.envelope_migration_failures.secret_version_id is
+    'Legacy secret_versions row to skip during normal envelope lazy migration batches.';
+comment on column public.envelope_migration_failures.error_code is
+    'Non-secret SBC-side preparation error code, e.g. aad_context_mismatch.';
+comment on column public.envelope_migration_failures.failure_count is
+    'Number of explicit failed attempts for this row. Normal migration batches skip marked rows.';
+
+create index if not exists envelope_migration_failures_secret_id_idx
+    on public.envelope_migration_failures (secret_id, last_failed_at);
+
+alter table public.envelope_migration_failures enable row level security;
+alter table public.envelope_migration_failures force row level security;
+
+revoke all on table public.envelope_migration_failures from public, anon, authenticated, service_role;
+
 create or replace function public.rpc_envelope_migration_status(p_secret_id uuid default null)
 returns table (
     total_legacy_rows bigint,
+    migratable_legacy_rows bigint,
+    blocked_failure_rows bigint,
     last_run_at text,
     last_batch_size bigint,
     last_success_count bigint,
@@ -395,9 +444,17 @@ as $$
 declare
     v_last_metadata jsonb;
 begin
-    select count(*)
-    into total_legacy_rows
+    select
+        count(*)::bigint,
+        count(*) filter (where emf.secret_version_id is null)::bigint,
+        count(*) filter (where emf.secret_version_id is not null)::bigint
+    into
+        total_legacy_rows,
+        migratable_legacy_rows,
+        blocked_failure_rows
     from public.secret_versions sv
+    left join public.envelope_migration_failures emf
+        on emf.secret_version_id = sv.id
     where (sv.dek_wrap_algorithm is null or sv.dek_wrap_algorithm = 'legacy-master-key-v1')
         and (p_secret_id is null or sv.secret_id = p_secret_id);
 
@@ -419,11 +476,12 @@ end;
 $$;
 
 comment on function public.rpc_envelope_migration_status(uuid)
-is 'Returns Task 07 envelope lazy migration progress without exposing plaintext or key material.';
+is 'Returns Task 07 envelope lazy migration progress, including migratable and failure-blocked legacy row counts, without exposing plaintext or key material.';
 
 create or replace function public.rpc_list_envelope_migration_batch(
     p_limit integer,
-    p_secret_id uuid default null
+    p_secret_id uuid default null,
+    p_include_failed boolean default false
 )
 returns table (
     id uuid,
@@ -464,16 +522,19 @@ begin
         s.owner_user_id
     from public.secret_versions sv
     join public.secrets s on s.id = sv.secret_id
+    left join public.envelope_migration_failures emf
+        on emf.secret_version_id = sv.id
     where (sv.dek_wrap_algorithm is null or sv.dek_wrap_algorithm = 'legacy-master-key-v1')
         and sv.encrypted_data_key is not null
         and (p_secret_id is null or sv.secret_id = p_secret_id)
+        and (coalesce(p_include_failed, false) or emf.secret_version_id is null)
     order by sv.created_at, sv.id
     limit p_limit;
 end;
 $$;
 
-comment on function public.rpc_list_envelope_migration_batch(integer, uuid)
-is 'Lists legacy envelope rows for SBC-side lazy migration. Returns ciphertext and wrapped legacy DEK only; no plaintext key material is exposed.';
+comment on function public.rpc_list_envelope_migration_batch(integer, uuid, boolean)
+is 'Lists legacy envelope rows for SBC-side lazy migration. By default skips rows with recorded preparation failures so later rows can progress.';
 
 create or replace function public.rpc_apply_envelope_migration_batch(
     p_request_id uuid,
@@ -809,7 +870,7 @@ revoke execute on function public.audit_metadata_has_unknown_key_for_action(text
 revoke execute on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) from public, anon, authenticated;
 revoke execute on function public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean) from public, anon, authenticated;
 revoke execute on function public.rpc_envelope_migration_status(uuid) from public, anon, authenticated;
-revoke execute on function public.rpc_list_envelope_migration_batch(integer, uuid) from public, anon, authenticated;
+revoke execute on function public.rpc_list_envelope_migration_batch(integer, uuid, boolean) from public, anon, authenticated;
 revoke execute on function public.rpc_apply_envelope_migration_batch(uuid, jsonb, jsonb, uuid, text, jsonb) from public, anon, authenticated;
 
 grant execute on function public.audit_metadata_has_missing_required_key_for_action(text, text, jsonb, boolean) to service_role;
@@ -817,5 +878,5 @@ grant execute on function public.audit_metadata_has_unknown_key_for_action(text,
 grant execute on function public.audit_metadata_has_invalid_value_for_action(text, text, jsonb) to service_role;
 grant execute on function public.audit_metadata_has_schema_violation_for_action(text, text, jsonb, boolean) to service_role;
 grant execute on function public.rpc_envelope_migration_status(uuid) to service_role;
-grant execute on function public.rpc_list_envelope_migration_batch(integer, uuid) to service_role;
+grant execute on function public.rpc_list_envelope_migration_batch(integer, uuid, boolean) to service_role;
 grant execute on function public.rpc_apply_envelope_migration_batch(uuid, jsonb, jsonb, uuid, text, jsonb) to service_role;

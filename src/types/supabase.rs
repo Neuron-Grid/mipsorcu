@@ -255,6 +255,8 @@ impl KeyRotationStatus {
 #[derive(Debug)]
 pub struct EnvelopeMigrationStatus {
     pub total_legacy_rows: i64,
+    pub migratable_legacy_rows: i64,
+    pub blocked_failure_rows: i64,
     pub last_run_at: Option<String>,
     pub last_batch_size: Option<i64>,
     pub last_success_count: Option<i64>,
@@ -264,6 +266,8 @@ pub struct EnvelopeMigrationStatus {
 impl EnvelopeMigrationStatus {
     pub(crate) fn new(
         total_legacy_rows: i64,
+        migratable_legacy_rows: i64,
+        blocked_failure_rows: i64,
         last_run_at: Option<String>,
         last_batch_size: Option<i64>,
         last_success_count: Option<i64>,
@@ -271,6 +275,8 @@ impl EnvelopeMigrationStatus {
     ) -> Self {
         Self {
             total_legacy_rows,
+            migratable_legacy_rows,
+            blocked_failure_rows,
             last_run_at,
             last_batch_size,
             last_success_count,
