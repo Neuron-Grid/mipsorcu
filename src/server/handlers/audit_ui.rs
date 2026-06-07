@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult, AuditUiReadMetadata,
-    FORBIDDEN_AUDIT_METADATA_KEYS,
+    AuditAction, AuditEventId, AuditResult, AuditUiReadMetadata, FORBIDDEN_AUDIT_METADATA_KEYS,
 };
 use crate::authorization::authorize_audit_ui_read;
 use crate::incident::ledger_payload_contains_forbidden_key;
@@ -13,6 +12,7 @@ use crate::ledger::{
     LedgerChainHead, LedgerError, LedgerSequenceNo, LedgerVerifyingKey, MonthlyDigestPeriod,
     SignedLedgerEntry, verify_ledger_chain,
 };
+use crate::server::audit_reporter::{OperationalAuditEvent, build_operational_audit_event};
 use crate::server::errors::{ApiError, RequestAwareApiError, ServerResult};
 use crate::server::middleware::{AuthenticatedUser, RequestContext};
 use crate::server::state::AppState;
@@ -211,9 +211,9 @@ async fn list_audit_events(
     if let Some((start, end)) = period.clone() {
         audit = audit.with_period(start, end);
     }
-    validate_optional_audit_action(query.action.as_deref())
+    let action = parse_optional_audit_action(query.action.as_deref())
         .map_err(|error| error.with_request_id(&request_id))?;
-    validate_optional_result(query.result.as_deref())
+    let result = parse_optional_result(query.result.as_deref())
         .map_err(|error| error.with_request_id(&request_id))?;
 
     let params = AuditUiAuditEventsParams {
@@ -221,8 +221,8 @@ async fn list_audit_events(
         p_offset: page.offset,
         p_period_start: period.as_ref().map(|(start, _)| start.as_str().to_owned()),
         p_period_end: period.as_ref().map(|(_, end)| end.as_str().to_owned()),
-        p_action: query.action,
-        p_result: query.result,
+        p_action: action.map(|action| action.as_str().to_owned()),
+        p_result: result.map(|result| result.as_str().to_owned()),
     };
     let mut rows = match state
         .supabase_client
@@ -266,7 +266,7 @@ async fn list_ledger_entries(
     if let Some((start, end)) = range {
         audit = audit.with_sequence_range(start.get(), end.get());
     }
-    validate_optional_result(query.result.as_deref())
+    let result = parse_optional_result(query.result.as_deref())
         .map_err(|error| error.with_request_id(&request_id))?;
 
     let params = AuditUiLedgerEntriesParams {
@@ -283,7 +283,7 @@ async fn list_ledger_entries(
             .map_err(|_| ApiError::BadRequest("invalid sequence range".to_owned()))
             .map_err(|error| error.with_request_id(&request_id))?,
         p_entry_type: query.entry_type,
-        p_result: query.result,
+        p_result: result.map(|result| result.as_str().to_owned()),
     };
     let mut rows = match state
         .supabase_client
@@ -753,16 +753,14 @@ async fn record_audit_ui_read(
         .map_err(|error| ApiError::InternalError(error.to_string()))?;
     let audit_event_id =
         AuditEventId::generate().map_err(|error| ApiError::InternalError(error.to_string()))?;
-    let event = AuditEvent::new(AuditEventParts {
+    let event = build_operational_audit_event(OperationalAuditEvent {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: Some(actor_user_id.clone()),
-        actor_device_id: None,
         action: AuditAction::AuditUiRead,
-        target_secret_id: None,
         result,
         key_version: None,
-        metadata_json: metadata,
+        metadata,
     })
     .map_err(|error| ApiError::InternalError(error.to_string()))?;
 
@@ -857,22 +855,20 @@ fn parse_optional_sequence_range(
     }
 }
 
-fn validate_optional_audit_action(value: Option<&str>) -> Result<(), ApiError> {
-    if let Some(value) = value {
-        AuditAction::parse(value).map_err(|_| ApiError::BadRequest("invalid action".to_owned()))?;
-    }
-
-    Ok(())
+fn parse_optional_audit_action(value: Option<&str>) -> Result<Option<AuditAction>, ApiError> {
+    value
+        .map(|value| {
+            AuditAction::parse(value).map_err(|_| ApiError::BadRequest("invalid action".to_owned()))
+        })
+        .transpose()
 }
 
-fn validate_optional_result(value: Option<&str>) -> Result<(), ApiError> {
-    if let Some(value) = value
-        && !matches!(value, "success" | "failure")
-    {
-        return Err(ApiError::BadRequest("invalid result".to_owned()));
-    }
-
-    Ok(())
+fn parse_optional_result(value: Option<&str>) -> Result<Option<AuditResult>, ApiError> {
+    value
+        .map(|value| {
+            AuditResult::parse(value).map_err(|_| ApiError::BadRequest("invalid result".to_owned()))
+        })
+        .transpose()
 }
 
 async fn resolve_signature_range(
@@ -1080,3 +1076,7 @@ fn contains_forbidden_key(value: &Value, forbidden_keys: &[&str]) -> bool {
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/server/handlers/audit_ui/tests.rs"]
+mod tests;

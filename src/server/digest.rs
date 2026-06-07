@@ -72,17 +72,33 @@ pub fn usage() -> String {
     .join("\n")
 }
 
-pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), DigestCliError> {
-    let mut subcommand: Option<&String> = None;
+/// digest CLI のサブコマンドと、検証済みの実行パラメータ。
+#[derive(Debug, PartialEq, Eq)]
+enum DigestCommand {
+    Generate { period: MonthlyDigestPeriod },
+    Verify { period: MonthlyDigestPeriod },
+    List,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedDigestArgs {
+    command: DigestCommand,
+}
+
+/// CLI 引数を解析し、サブコマンドと検証済み期間を返す（純粋・I/O なし）。
+///
+/// 解析順序は既存挙動を踏襲する: 引数ループ → `--format json` 検査 →
+/// サブコマンド解決 → `--year-month` のパース。`list` は `--year-month` を無視する。
+fn parse_digest_args(args: &[String]) -> Result<ParsedDigestArgs, DigestCliError> {
+    let mut subcommand: Option<&str> = None;
     let mut year_month: Option<String> = None;
     let mut format: Option<&String> = None;
 
     let mut i = 0;
     while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
-            "generate" | "verify" | "list" if subcommand.is_none() => {
-                subcommand = Some(arg);
+        match args[i].as_str() {
+            command @ ("generate" | "verify" | "list") if subcommand.is_none() => {
+                subcommand = Some(command);
             }
             "--year-month" => {
                 let value = args
@@ -114,16 +130,31 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), DigestCli
         _ => return Err(DigestCliError::Usage(usage())),
     }
 
-    match subcommand {
-        Some(cmd) if cmd == "generate" => {
-            let period = parse_period(year_month)?;
+    let command = match subcommand {
+        Some("generate") => DigestCommand::Generate {
+            period: parse_period(year_month)?,
+        },
+        Some("verify") => DigestCommand::Verify {
+            period: parse_period(year_month)?,
+        },
+        Some("list") => DigestCommand::List,
+        _ => return Err(DigestCliError::Usage(usage())),
+    };
+
+    Ok(ParsedDigestArgs { command })
+}
+
+pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), DigestCliError> {
+    let ParsedDigestArgs { command } = parse_digest_args(args)?;
+
+    match command {
+        DigestCommand::Generate { period } => {
             let output = run_generate_command(&config, period).await?;
             let json_output = serde_json::to_string_pretty(&output)
                 .map_err(|error| DigestCliError::Serialization(error.to_string()))?;
             println!("{json_output}");
         }
-        Some(cmd) if cmd == "verify" => {
-            let period = parse_period(year_month)?;
+        DigestCommand::Verify { period } => {
             let output = run_verify_command(&config, period).await?;
             let json_output = serde_json::to_string_pretty(&output)
                 .map_err(|error| DigestCliError::Serialization(error.to_string()))?;
@@ -132,13 +163,12 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), DigestCli
                 return Err(DigestCliError::VerifyFailed(verify_error));
             }
         }
-        Some(cmd) if cmd == "list" => {
+        DigestCommand::List => {
             let output = run_list_command(&config).await?;
             let json_output = serde_json::to_string_pretty(&output)
                 .map_err(|error| DigestCliError::Serialization(error.to_string()))?;
             println!("{json_output}");
         }
-        _ => return Err(DigestCliError::Usage(usage())),
     }
 
     Ok(())
@@ -441,3 +471,7 @@ async fn record_monthly_digest_verify_incident(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/server/digest/tests.rs"]
+mod tests;

@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditResult, AuditTrigger, RequestId,
+    AuditAction, AuditEvent, AuditEventId, AuditResult, AuditTrigger, RequestId,
     SchedulerJobMetadata, SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata,
     SignatureKeyRetiredMetadata,
 };
@@ -13,6 +13,7 @@ use crate::ledger::{
     LEDGER_ED25519_PUBLIC_KEY_LENGTH, LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult,
     LedgerSignatureKeyVersion, LedgerSigningKey, LedgerVerifyingKey, SignedLedgerEntry,
 };
+use crate::server::audit_reporter::{OperationalAuditEvent, build_operational_audit_event};
 use crate::server::config::AppConfig;
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts, LedgerAppender};
 use crate::server::scheduler;
@@ -309,16 +310,14 @@ fn build_signature_key_event(
     let request_id =
         RequestId::generate().map_err(|error| SignatureKeyCliError::Audit(error.to_string()))?;
 
-    AuditEvent::new(AuditEventParts {
+    build_operational_audit_event(OperationalAuditEvent {
         audit_event_id,
         request_id,
         actor_user_id: None,
-        actor_device_id: None,
         action,
-        target_secret_id: None,
         result: AuditResult::Success,
         key_version: None,
-        metadata_json,
+        metadata: metadata_json,
     })
     .map_err(|error| SignatureKeyCliError::Audit(error.to_string()))
 }
@@ -385,16 +384,14 @@ async fn record_verify_all_result(
         AuditEventId::generate().map_err(|error| SignatureKeyCliError::Audit(error.to_string()))?;
     let request_id =
         RequestId::generate().map_err(|error| SignatureKeyCliError::Audit(error.to_string()))?;
-    let event = AuditEvent::new(AuditEventParts {
+    let event = build_operational_audit_event(OperationalAuditEvent {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: None,
-        actor_device_id: None,
         action: AuditAction::SchedulerJob,
-        target_secret_id: None,
         result,
         key_version: None,
-        metadata_json: metadata,
+        metadata,
     })
     .map_err(|error| SignatureKeyCliError::Audit(error.to_string()))?;
 

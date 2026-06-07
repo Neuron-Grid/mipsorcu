@@ -17,14 +17,14 @@ use std::sync::Arc;
 use crate::archive::backend::{ArchiveBackend, ArchiveBackendError, ArchiveObjectKey};
 use crate::archive::export::ArchiveExportPackage;
 use crate::audit::{
-    ArchiveExportMetadata, AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder,
-    AuditResult, RequestId,
+    ArchiveExportMetadata, AuditAction, AuditEventId, AuditRecorder, AuditResult, RequestId,
 };
 use crate::incident::{IncidentRecorder, archive_incident_input};
 use crate::ledger::{
     LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
     SignedMonthlyDigest,
 };
+use crate::server::audit_reporter::{OperationalAuditEvent, build_operational_audit_event};
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts, LedgerAppender};
 use crate::server::supabase::SupabaseAuditAppender;
 use crate::types::SourceEventAt;
@@ -416,16 +416,14 @@ async fn record_archive_export_audit(
         }
     };
 
-    let event = match AuditEvent::new(AuditEventParts {
+    let event = match build_operational_audit_event(OperationalAuditEvent {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: None,
-        actor_device_id: None,
         action: AuditAction::ArchiveExport,
-        target_secret_id: None,
         result,
         key_version: None,
-        metadata_json: metadata,
+        metadata,
     }) {
         Ok(e) => e,
         Err(err) => {

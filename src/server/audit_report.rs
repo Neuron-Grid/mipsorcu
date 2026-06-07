@@ -8,13 +8,14 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventParts, AuditRecordError, AuditRecordOutcome, AuditRecorder,
-    AuditReportGenerateMetadata, AuditResult, LocalAuditFallbackStore, RequestId,
+    AuditAction, AuditRecordError, AuditRecordOutcome, AuditRecorder, AuditReportGenerateMetadata,
+    AuditResult, LocalAuditFallbackStore, RequestId,
 };
 use crate::ledger::{
     LedgerChainHead, LedgerError, LedgerSequenceNo, LedgerVerifyingKey, SignedLedgerEntry,
     verify_ledger_chain,
 };
+use crate::server::audit_reporter::{OperationalAuditEvent, build_operational_audit_event};
 use crate::server::config::AppConfig;
 use crate::server::supabase::{
     AuditReportSummary, LedgerVerificationMaterialRow, SupabaseAuditAppender, SupabaseClient,
@@ -731,16 +732,14 @@ async fn record_audit_report_generation(
         .map_err(|error| AuditReportCliError::Config(error.to_string()))?;
     let audit_event_id = crate::audit::AuditEventId::generate()
         .map_err(|error| AuditReportCliError::Config(error.to_string()))?;
-    let event = AuditEvent::new(AuditEventParts {
+    let event = build_operational_audit_event(OperationalAuditEvent {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: None,
-        actor_device_id: None,
         action: AuditAction::AuditReportGenerate,
-        target_secret_id: None,
         result,
         key_version: None,
-        metadata_json: metadata,
+        metadata,
     })
     .map_err(|error| AuditReportCliError::Config(error.to_string()))?;
 

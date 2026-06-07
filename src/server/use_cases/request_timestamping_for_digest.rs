@@ -16,14 +16,14 @@
 use std::sync::Arc;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder, AuditResult,
-    DigestTimestampingMetadata, RequestId,
+    AuditAction, AuditEventId, AuditRecorder, AuditResult, DigestTimestampingMetadata, RequestId,
 };
 use crate::incident::{IncidentRecorder, digest_timestamping_incident_input};
 use crate::ledger::{
     LedgerEntryId, LedgerEntryType, LedgerPayload, LedgerResult, MonthlyDigestPeriod,
     SignedMonthlyDigest,
 };
+use crate::server::audit_reporter::{OperationalAuditEvent, build_operational_audit_event};
 use crate::server::ledger_appender::{LedgerAppendDraft, LedgerAppendDraftParts, LedgerAppender};
 use crate::server::supabase::SupabaseAuditAppender;
 use crate::timestamping::{
@@ -356,16 +356,14 @@ async fn record_digest_timestamping_audit(
         }
     };
 
-    let event = match AuditEvent::new(AuditEventParts {
+    let event = match build_operational_audit_event(OperationalAuditEvent {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: None,
-        actor_device_id: None,
         action: AuditAction::DigestTimestamping,
-        target_secret_id: None,
         result,
         key_version: None,
-        metadata_json: metadata,
+        metadata,
     }) {
         Ok(e) => e,
         Err(err) => {

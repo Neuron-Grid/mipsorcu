@@ -116,17 +116,34 @@ pub fn usage() -> String {
     .join("\n")
 }
 
-pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), TimestampingCliError> {
-    let mut subcommand: Option<&String> = None;
+/// timestamping CLI のサブコマンドと、検証済みの実行パラメータ。
+#[derive(Debug, PartialEq, Eq)]
+enum TimestampingCommand {
+    Send { period: MonthlyDigestPeriod },
+    Verify { period: MonthlyDigestPeriod },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedTimestampingArgs {
+    command: TimestampingCommand,
+}
+
+/// CLI 引数を解析し、サブコマンドと検証済み期間を返す（純粋・I/O なし）。
+///
+/// 解析順序は既存挙動を踏襲する: 引数ループ → `--format json` 検査 →
+/// サブコマンド解決 → `--month` のパース。
+fn parse_timestamping_args(
+    args: &[String],
+) -> Result<ParsedTimestampingArgs, TimestampingCliError> {
+    let mut subcommand: Option<&str> = None;
     let mut month: Option<String> = None;
     let mut format: Option<&String> = None;
 
     let mut i = 0;
     while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
-            "send" | "verify" if subcommand.is_none() => {
-                subcommand = Some(arg);
+        match args[i].as_str() {
+            command @ ("send" | "verify") if subcommand.is_none() => {
+                subcommand = Some(command);
             }
             "--month" => {
                 let value = args
@@ -158,14 +175,28 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), Timestamp
         _ => return Err(TimestampingCliError::Usage(usage())),
     }
 
-    match subcommand {
-        Some(cmd) if cmd == "send" => {
-            let period = parse_period(month)?;
+    let command = match subcommand {
+        Some("send") => TimestampingCommand::Send {
+            period: parse_period(month)?,
+        },
+        Some("verify") => TimestampingCommand::Verify {
+            period: parse_period(month)?,
+        },
+        _ => return Err(TimestampingCliError::Usage(usage())),
+    };
+
+    Ok(ParsedTimestampingArgs { command })
+}
+
+pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), TimestampingCliError> {
+    let ParsedTimestampingArgs { command } = parse_timestamping_args(args)?;
+
+    match command {
+        TimestampingCommand::Send { period } => {
             let output = run_send_command(&config, period).await?;
             print_json(&output)?;
         }
-        Some(cmd) if cmd == "verify" => {
-            let period = parse_period(month)?;
+        TimestampingCommand::Verify { period } => {
             let output = run_verify_command(&config, period).await?;
             print_json(&output)?;
             if output.verify_result != "valid" {
@@ -174,7 +205,6 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), Timestamp
                 });
             }
         }
-        _ => return Err(TimestampingCliError::Usage(usage())),
     }
 
     Ok(())
@@ -534,3 +564,7 @@ async fn record_timestamping_verify_incident(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/server/timestamping/tests.rs"]
+mod tests;

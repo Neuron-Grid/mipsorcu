@@ -17,14 +17,14 @@
 use std::sync::Arc;
 
 use crate::audit::{
-    AuditAction, AuditEvent, AuditEventId, AuditEventParts, AuditRecorder, AuditResult,
-    MonthlyDigestVerifyMetadata, RequestId,
+    AuditAction, AuditEventId, AuditRecorder, AuditResult, MonthlyDigestVerifyMetadata, RequestId,
 };
 use crate::ledger::{
     DigestHash, LedgerChainHead, LedgerError, LedgerHash, LedgerSequenceNo, LedgerVerifyingKey,
     MonthlyDigestPeriod, SignedLedgerEntry, build_monthly_digest_canonical_form,
     verify_ledger_chain,
 };
+use crate::server::audit_reporter::{OperationalAuditEvent, build_operational_audit_event};
 use crate::server::supabase::{
     MonthlyDigestVerificationMaterials, SupabaseAuditAppender, SupabaseClient,
 };
@@ -501,16 +501,14 @@ pub async fn record_monthly_digest_verify_success_audit(
         }
     };
 
-    let event = match AuditEvent::new(AuditEventParts {
+    let event = match build_operational_audit_event(OperationalAuditEvent {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: None,
-        actor_device_id: None,
         action: AuditAction::MonthlyDigestVerify,
-        target_secret_id: None,
         result: AuditResult::Success,
         key_version: None,
-        metadata_json: metadata,
+        metadata,
     }) {
         Ok(e) => e,
         Err(err) => {
@@ -579,16 +577,14 @@ pub async fn record_monthly_digest_verify_failure_audit(
             }
         };
 
-    let event = match AuditEvent::new(AuditEventParts {
+    let event = match build_operational_audit_event(OperationalAuditEvent {
         audit_event_id,
         request_id: request_id.clone(),
         actor_user_id: None,
-        actor_device_id: None,
         action: AuditAction::MonthlyDigestVerify,
-        target_secret_id: None,
         result: AuditResult::Failure,
         key_version: None,
-        metadata_json: metadata,
+        metadata,
     }) {
         Ok(e) => e,
         Err(err) => {

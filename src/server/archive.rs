@@ -100,17 +100,32 @@ pub fn usage() -> String {
     .join("\n")
 }
 
-pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), ArchiveCliError> {
-    let mut subcommand: Option<&String> = None;
+/// archive CLI のサブコマンドと、検証済みの実行パラメータ。
+#[derive(Debug, PartialEq, Eq)]
+enum ArchiveCommand {
+    Send { period: MonthlyDigestPeriod },
+    Verify { period: MonthlyDigestPeriod },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedArchiveArgs {
+    command: ArchiveCommand,
+}
+
+/// CLI 引数を解析し、サブコマンドと検証済み期間を返す（純粋・I/O なし）。
+///
+/// 解析順序は既存挙動を踏襲する: 引数ループ → `--format json` 検査 →
+/// サブコマンド解決 → `--month` のパース。
+fn parse_archive_args(args: &[String]) -> Result<ParsedArchiveArgs, ArchiveCliError> {
+    let mut subcommand: Option<&str> = None;
     let mut month: Option<String> = None;
     let mut format: Option<&String> = None;
 
     let mut i = 0;
     while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
-            "send" | "verify" if subcommand.is_none() => {
-                subcommand = Some(arg);
+        match args[i].as_str() {
+            command @ ("send" | "verify") if subcommand.is_none() => {
+                subcommand = Some(command);
             }
             "--month" => {
                 let value = args
@@ -142,14 +157,28 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), ArchiveCl
         _ => return Err(ArchiveCliError::Usage(usage())),
     }
 
-    match subcommand {
-        Some(cmd) if cmd == "send" => {
-            let period = parse_period(month)?;
+    let command = match subcommand {
+        Some("send") => ArchiveCommand::Send {
+            period: parse_period(month)?,
+        },
+        Some("verify") => ArchiveCommand::Verify {
+            period: parse_period(month)?,
+        },
+        _ => return Err(ArchiveCliError::Usage(usage())),
+    };
+
+    Ok(ParsedArchiveArgs { command })
+}
+
+pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), ArchiveCliError> {
+    let ParsedArchiveArgs { command } = parse_archive_args(args)?;
+
+    match command {
+        ArchiveCommand::Send { period } => {
             let output = run_send_command(&config, period).await?;
             print_json(&output)?;
         }
-        Some(cmd) if cmd == "verify" => {
-            let period = parse_period(month)?;
+        ArchiveCommand::Verify { period } => {
             let output = run_verify_command(&config, period).await?;
             print_json(&output)?;
             if output.verify_result != "match" {
@@ -158,7 +187,6 @@ pub async fn run_cli(config: AppConfig, args: &[String]) -> Result<(), ArchiveCl
                 });
             }
         }
-        _ => return Err(ArchiveCliError::Usage(usage())),
     }
 
     Ok(())
@@ -480,3 +508,7 @@ pub(crate) fn build_ledger_appender(
         config.ledger_signing_key.clone(),
     ))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/server/archive/tests.rs"]
+mod tests;
