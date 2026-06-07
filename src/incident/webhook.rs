@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{KeyInit, Mac, SimpleHmac};
 use sha3::Sha3_256;
 
 use crate::types::SecretString;
@@ -24,7 +24,7 @@ use super::dto::{IncidentNotifierKind, NotificationReceipt};
 use super::sink::{IncidentError, IncidentNotifier, NotificationSink, NotificationSinkError};
 use super::types::IncidentNotificationPayload;
 
-type HmacSha3_256 = Hmac<Sha3_256>;
+type HmacSha3_256 = SimpleHmac<Sha3_256>;
 
 const SIGNATURE_HEADER: &str = "X-Mipsorcu-Signature";
 

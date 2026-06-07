@@ -1,13 +1,13 @@
 use std::fmt;
 
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{KeyInit, Mac, SimpleHmac};
 use sha3::Sha3_256;
 
 use crate::alias::input::NormalizedAlias;
 use crate::error::CryptoError;
 use crate::types::{AliasFingerprintKey, OwnerUserId};
 
-type HmacSha3_256 = Hmac<Sha3_256>;
+type HmacSha3_256 = SimpleHmac<Sha3_256>;
 
 pub const ALIAS_FINGERPRINT_LENGTH: usize = 32;
 pub const ALIAS_FINGERPRINT_SCHEMA_VERSION_V1: u32 = 1;

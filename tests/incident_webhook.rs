@@ -3,7 +3,7 @@
 //! wiremock で webhook 受信側を立て、HMAC-SHA3-256 署名ヘッダの形式と内容、
 //! および HTTP 失敗時の error code マッピングを検証する。
 
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{KeyInit, Mac, SimpleHmac};
 use mipsorcu::incident::{
     ComponentName, IncidentCategory, IncidentId, IncidentNotification, IncidentNotificationPayload,
     IncidentNotifier, IncidentSeverity, IncidentSummary, IncidentType, NotificationSink,
@@ -14,7 +14,7 @@ use sha3::Sha3_256;
 use wiremock::matchers::{body_bytes, header, header_exists, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-type HmacSha3_256 = Hmac<Sha3_256>;
+type HmacSha3_256 = SimpleHmac<Sha3_256>;
 
 const HMAC_HEADER_NAME: &str = "X-Mipsorcu-Signature";
 
