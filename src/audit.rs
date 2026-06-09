@@ -18,9 +18,9 @@ pub use event::{
     MonthlyDigestVerifyMetadata, NOTIFIER_KIND_ALLOWLIST, RequestId, RestoreTestMetadata,
     SchedulerJobMetadata, SecretAliasCreateMetadata, SecretAliasDeleteMetadata,
     SecretAliasListMetadata, SecretAliasUpdateMetadata, SiemBufferFlushedMetadata,
-    SiemEventFailedMetadata,
-    SiemEventForwardedMetadata, SiemForwardFailureMetadata, SignatureKeyActivatedMetadata,
-    SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata, VersionPurgeMetadata,
+    SiemEventFailedMetadata, SiemEventForwardedMetadata, SiemForwardFailureMetadata,
+    SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata,
+    VersionPurgeMetadata, required_metadata_keys,
 };
 pub use fallback::{
     ArchiveSweepOutcome, LocalAuditFallbackStore, RolloverArchive, RolloverOutcome, SweptArchive,

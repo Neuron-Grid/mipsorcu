@@ -19,8 +19,8 @@ pub use metadata::{
     MonthlyDigestVerifyMetadata, NOTIFIER_KIND_ALLOWLIST, RestoreTestMetadata,
     SchedulerJobMetadata, SecretAliasCreateMetadata, SecretAliasDeleteMetadata,
     SecretAliasListMetadata, SecretAliasUpdateMetadata, SiemBufferFlushedMetadata,
-    SiemEventFailedMetadata,
-    SiemEventForwardedMetadata, SiemForwardFailureMetadata, SignatureKeyActivatedMetadata,
-    SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata, VersionPurgeMetadata,
+    SiemEventFailedMetadata, SiemEventForwardedMetadata, SiemForwardFailureMetadata,
+    SignatureKeyActivatedMetadata, SignatureKeyCreatedMetadata, SignatureKeyRetiredMetadata,
+    VersionPurgeMetadata, required_metadata_keys,
 };
 pub use model::{AuditEvent, AuditEventAppender, AuditEventParts};

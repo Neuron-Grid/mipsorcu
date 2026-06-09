@@ -6,6 +6,7 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
+pub use allowlists::required_metadata_keys;
 pub use validate::{
     INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST, INCIDENT_TYPE_ALLOWLIST,
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, NOTIFIER_KIND_ALLOWLIST,

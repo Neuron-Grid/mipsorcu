@@ -271,10 +271,11 @@ pub(super) fn allowed_metadata_keys(
 ///
 /// `source_event_at` はここには含めない（呼び出し側が必要に応じて付与する）。
 /// 返り値の順序は「最初に欠落したキーを報告する」既存挙動を保つため意味を持つ。
-pub(super) fn required_metadata_keys(
-    action: AuditAction,
-    result: AuditResult,
-) -> &'static [&'static str] {
+///
+/// crate 公開 API として export しているのは、SQL 側 `audit_metadata_has_missing_required_key_for_action`
+/// の実効定義（`-- REQUIRED_KEY_START/END`）と突き合わせる parity test
+/// （`tests/audit_metadata_forbidden_keys_parity.rs`）が Rust 正本として参照するためである。
+pub fn required_metadata_keys(action: AuditAction, result: AuditResult) -> &'static [&'static str] {
     match action {
         AuditAction::EncryptCreate | AuditAction::EncryptRotate | AuditAction::VersionPurge => {
             &["version", "secret_version_id"]

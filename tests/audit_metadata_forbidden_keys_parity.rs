@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use mipsorcu::{
     AuditAction, AuditMetadata, AuditResult, FORBIDDEN_AUDIT_METADATA_KEYS,
-    FORBIDDEN_LEDGER_PAYLOAD_KEYS, INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST, INCIDENT_TYPE_ALLOWLIST,
-    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, NOTIFIER_KIND_ALLOWLIST,
+    FORBIDDEN_LEDGER_PAYLOAD_KEYS, INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST,
+    INCIDENT_TYPE_ALLOWLIST, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, NOTIFIER_KIND_ALLOWLIST,
+    required_metadata_keys,
 };
 
 // このガードは固定パスを参照しない。SQL の「実効最新定義」を、マーカー
@@ -25,12 +26,15 @@ const INCIDENT_CATEGORY_START_MARKER: &str = "-- INCIDENT_CATEGORY_ALLOWLIST_STA
 const INCIDENT_CATEGORY_END_MARKER: &str = "-- INCIDENT_CATEGORY_ALLOWLIST_END";
 const NOTIFIER_KIND_START_MARKER: &str = "-- NOTIFIER_KIND_ALLOWLIST_START";
 const NOTIFIER_KIND_END_MARKER: &str = "-- NOTIFIER_KIND_ALLOWLIST_END";
+const REQUIRED_KEY_START_MARKER: &str = "-- REQUIRED_KEY_START";
+const REQUIRED_KEY_END_MARKER: &str = "-- REQUIRED_KEY_END";
 
 // SQL 側ガード関数名（実効最新定義の自動発見・メタテスト用）。
 const UNKNOWN_KEY_FN: &str = "audit_metadata_has_unknown_key_for_action";
 const FORBIDDEN_KEY_FN: &str = "audit_metadata_has_forbidden_key";
 const INVALID_VALUE_FN: &str = "audit_metadata_has_invalid_value_for_action";
 const INCIDENT_TYPE_FN: &str = "incident_type_allowed";
+const REQUIRED_KEY_FN: &str = "audit_metadata_has_missing_required_key_for_action";
 
 #[test]
 fn forbidden_keys_parity_between_rust_and_sql() {
@@ -165,8 +169,11 @@ fn latest_value_guard_definitions_carry_value_markers() {
 #[test]
 fn incident_type_allowlist_parity_between_rust_and_sql() {
     let migration = read_latest_migration_containing(INCIDENT_TYPE_START_MARKER);
-    let sql =
-        extract_sql_keys_between(&migration, INCIDENT_TYPE_START_MARKER, INCIDENT_TYPE_END_MARKER);
+    let sql = extract_sql_keys_between(
+        &migration,
+        INCIDENT_TYPE_START_MARKER,
+        INCIDENT_TYPE_END_MARKER,
+    );
     let rust = INCIDENT_TYPE_ALLOWLIST
         .iter()
         .map(|k| (*k).to_owned())
@@ -194,14 +201,62 @@ fn incident_notification_category_allowlist_parity_between_rust_and_sql() {
 #[test]
 fn notifier_kind_allowlist_parity_between_rust_and_sql() {
     let migration = read_latest_migration_containing(NOTIFIER_KIND_START_MARKER);
-    let sql =
-        extract_sql_keys_between(&migration, NOTIFIER_KIND_START_MARKER, NOTIFIER_KIND_END_MARKER);
+    let sql = extract_sql_keys_between(
+        &migration,
+        NOTIFIER_KIND_START_MARKER,
+        NOTIFIER_KIND_END_MARKER,
+    );
     let rust = NOTIFIER_KIND_ALLOWLIST
         .iter()
         .map(|k| (*k).to_owned())
         .collect::<BTreeSet<_>>();
 
     assert_eq!(rust, sql);
+}
+
+// ─── 必須キー parity: Rust required_metadata_keys ↔ SQL 実効定義（bug-05 二次ギャップの解消） ───
+
+#[test]
+fn required_keys_parity_between_rust_and_sql() {
+    // SQL 実効最新の必須キー定義（-- REQUIRED_KEY マーカーを持つ辞書順最後の migration）を
+    // 自動発見し、action+result ごとの base 必須キー集合を抽出する。Rust 真値は
+    // mipsorcu::required_metadata_keys（いずれも source_event_at を含まない base 集合）。
+    // source_event_at は SQL 側ではマーカー外の p_require_source_event_at 分岐で付与されるため
+    // 抽出対象に入らず、両者とも base 同士で比較する。
+    let migration = read_latest_migration_containing(REQUIRED_KEY_START_MARKER);
+    let sql_required = extract_sql_required_keys(&migration);
+
+    for action in all_actions() {
+        for result in [AuditResult::Success, AuditResult::Failure] {
+            let rust_required = required_metadata_keys(action, result)
+                .iter()
+                .map(|key| (*key).to_owned())
+                .collect::<BTreeSet<_>>();
+
+            let sql_key = format!("{}:{}", action.as_str(), result.as_str());
+            let sql_allowed = sql_required.get(&sql_key).unwrap_or_else(|| {
+                panic!("SQL required-key definition should contain entry for {sql_key}")
+            });
+
+            assert_eq!(
+                rust_required, *sql_allowed,
+                "Rust/SQL required-key mismatch for {sql_key} (action={action:?}, result={result:?})"
+            );
+        }
+    }
+}
+
+#[test]
+fn latest_required_key_definition_carries_required_markers() {
+    // 「ガード関数 audit_metadata_has_missing_required_key_for_action の最新定義を持つ migration」が
+    // 「REQUIRED_KEY_START を持つ migration」と一致することを保証する。将来 delegating 再定義を
+    // マーカー無しで足すと、両者がずれて必ず mismatch で落ちる（= 陳腐化を検知できる）。
+    assert_eq!(
+        latest_migration_defining_function(REQUIRED_KEY_FN),
+        latest_migration_containing(REQUIRED_KEY_START_MARKER),
+        "audit_metadata_has_missing_required_key_for_action の最新定義がマーカー付き完全必須キー集合を保持していない。\
+         再定義する migration は REQUIRED_KEY_START/END 込みで全 action を完全再掲すること（docs/coding-rules.md §14）。"
+    );
 }
 
 #[test]
@@ -1456,6 +1511,77 @@ fn parse_array_keys(text: &str, out: &mut Vec<String>) {
             (false, _) => {}
         }
     }
+}
+
+/// `-- REQUIRED_KEY_START/END` 内の `case p_action` を解析し、`<action>:<result>` →
+/// base 必須キー集合（`source_event_at` 抜き）の写像を返す。
+///
+/// - `when '<a>', '<b>' then` の複数 action をまとめて拾う。
+/// - result 分岐（`if p_result = 'success' then ... else ... end if`）を持つ arm は
+///   success / failure を別集合として登録する。分岐の無い arm は両 result に同じ集合を登録する。
+/// - `v_summary_required_keys := array[...]`（integrity_check の violation_summary 必須キー）は
+///   `v_required_keys :=` で始まらないため自然に無視される（本テストの対象は top-level 必須キー）。
+/// - すべての必須キー配列は単一行（`...];` で完結）である前提。
+fn extract_sql_required_keys(sql: &str) -> HashMap<String, BTreeSet<String>> {
+    let (_, after_start) = sql
+        .split_once(REQUIRED_KEY_START_MARKER)
+        .expect("required-key start marker should exist");
+    let (block, _) = after_start
+        .split_once(REQUIRED_KEY_END_MARKER)
+        .expect("required-key end marker should exist");
+
+    let mut result: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut current_actions: Vec<String> = Vec::new();
+    // None = arm が result で分岐しない（両 result に適用）。Some(r) = いま if p_result 分岐の r 側。
+    let mut current_result: Option<&'static str> = None;
+
+    for line in block.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("when ") {
+            current_actions.clear();
+            let parts: Vec<&str> = trimmed.split('\'').collect();
+            for i in (1..parts.len()).step_by(2) {
+                if !parts[i].is_empty() {
+                    current_actions.push(parts[i].to_owned());
+                }
+            }
+            current_result = None;
+        } else if trimmed.starts_with("if p_result = '") {
+            current_result = if trimmed.contains("'success'") {
+                Some("success")
+            } else {
+                Some("failure")
+            };
+        } else if trimmed == "else" {
+            // result 分岐内の else だけ反転する。case 末尾の `else return true;` は
+            // 直前の `end if` で current_result が None に戻っているため反転しない。
+            current_result = match current_result {
+                Some("success") => Some("failure"),
+                Some("failure") => Some("success"),
+                other => other,
+            };
+        } else if trimmed.starts_with("end if") {
+            current_result = None;
+        } else if trimmed.contains("v_required_keys := array[") {
+            let mut keys = Vec::new();
+            parse_array_keys(trimmed, &mut keys);
+            let set: BTreeSet<String> = keys.into_iter().collect();
+            for action in &current_actions {
+                match current_result {
+                    Some(r) => {
+                        result.insert(format!("{action}:{r}"), set.clone());
+                    }
+                    None => {
+                        result.insert(format!("{action}:success"), set.clone());
+                        result.insert(format!("{action}:failure"), set.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }
 
 fn extract_sql_violation_summary_keys(sql: &str) -> BTreeSet<String> {
