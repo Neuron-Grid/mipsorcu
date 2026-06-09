@@ -326,25 +326,11 @@ fn validate_string_metadata_values(
     }
 
     if let Some(value) = object.get("category") {
-        validate_enum_metadata_value(
-            "category",
-            value,
-            &[
-                "ledger_anomaly",
-                "scheduler_failure",
-                "archive_failure_persistent",
-                "timestamping_failure_persistent",
-                "siem_buffer_threshold",
-                "siem_buffer_overflow",
-                "envelope_migration_failure_burst",
-                "auth_failure_burst",
-                "key_rotation_failure",
-            ],
-        )?;
+        validate_enum_metadata_value("category", value, INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST)?;
     }
 
     if let Some(value) = object.get("notifier_kind") {
-        validate_enum_metadata_value("notifier_kind", value, &["dummy", "webhook"])?;
+        validate_enum_metadata_value("notifier_kind", value, NOTIFIER_KIND_ALLOWLIST)?;
     }
 
     if let Some(value) = object.get("notification_result") {
@@ -571,29 +557,7 @@ fn validate_enum_metadata_value(
 }
 
 fn incident_type_allowed(value: &str) -> bool {
-    matches!(
-        value,
-        "hash_chain_mismatch"
-            | "signature_mismatch"
-            | "monthly_digest_mismatch"
-            | "digest_timestamping_mismatch"
-            | "archive_export_mismatch"
-            | "sequence_gap"
-            | "unknown_signature_key"
-            | "non_auditor_ledger_read"
-            | "ledger_secret_leak_suspected"
-            | "siem_long_failure"
-            | "audit_ui_forbidden_operation"
-            | "scheduler_failure"
-            | "ledger_anomaly"
-            | "archive_failure_persistent"
-            | "timestamping_failure_persistent"
-            | "siem_buffer_threshold"
-            | "siem_buffer_overflow"
-            | "envelope_migration_failure_burst"
-            | "auth_failure_burst"
-            | "key_rotation_failure"
-    )
+    INCIDENT_TYPE_ALLOWLIST.contains(&value)
 }
 
 pub const INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST: &[&str] = &[
@@ -614,3 +578,50 @@ pub const INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST: &[&str] = &[
     "audit_metadata_forbidden_key",
     "audit_source_event_at_invalid",
 ];
+
+/// incident 監査・ledger が受理する非秘密の incident_type 語彙。
+/// SQL 正本は `incident_type_allowed`（最新定義は 1430）の
+/// `-- INCIDENT_TYPE_ALLOWLIST_START/END` で囲まれたリテラルリストであり、
+/// 一致は `audit_metadata_forbidden_keys_parity` の値 enum parity テストで保証する。
+pub const INCIDENT_TYPE_ALLOWLIST: &[&str] = &[
+    "hash_chain_mismatch",
+    "signature_mismatch",
+    "monthly_digest_mismatch",
+    "digest_timestamping_mismatch",
+    "archive_export_mismatch",
+    "sequence_gap",
+    "unknown_signature_key",
+    "non_auditor_ledger_read",
+    "ledger_secret_leak_suspected",
+    "siem_long_failure",
+    "audit_ui_forbidden_operation",
+    "scheduler_failure",
+    "ledger_anomaly",
+    "archive_failure_persistent",
+    "timestamping_failure_persistent",
+    "siem_buffer_threshold",
+    "siem_buffer_overflow",
+    "envelope_migration_failure_burst",
+    "auth_failure_burst",
+    "key_rotation_failure",
+];
+
+/// incident_notification_* 監査メタデータの `category` 許可値。
+/// SQL 正本は `audit_metadata_has_invalid_value_for_action`（最新定義は 1430）の
+/// `-- INCIDENT_CATEGORY_ALLOWLIST_START/END` リテラルリスト。
+pub const INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST: &[&str] = &[
+    "ledger_anomaly",
+    "scheduler_failure",
+    "archive_failure_persistent",
+    "timestamping_failure_persistent",
+    "siem_buffer_threshold",
+    "siem_buffer_overflow",
+    "envelope_migration_failure_burst",
+    "auth_failure_burst",
+    "key_rotation_failure",
+];
+
+/// incident_notification_* 監査メタデータの `notifier_kind` 許可値。
+/// SQL 正本は `audit_metadata_has_invalid_value_for_action`（最新定義は 1430）の
+/// `-- NOTIFIER_KIND_ALLOWLIST_START/END` リテラルリスト。
+pub const NOTIFIER_KIND_ALLOWLIST: &[&str] = &["dummy", "webhook"];

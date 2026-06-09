@@ -1,29 +1,40 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use mipsorcu::{
     AuditAction, AuditMetadata, AuditResult, FORBIDDEN_AUDIT_METADATA_KEYS,
-    FORBIDDEN_LEDGER_PAYLOAD_KEYS, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST,
+    FORBIDDEN_LEDGER_PAYLOAD_KEYS, INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST, INCIDENT_TYPE_ALLOWLIST,
+    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, NOTIFIER_KIND_ALLOWLIST,
 };
 
-const CURRENT_FORBIDDEN_KEY_MIGRATION_PATH: &str =
-    "supabase/migrations/1390_siem_production_actions_and_buffer_guards.sql";
-const LATEST_AUDIT_METADATA_MIGRATION_PATH: &str =
-    "supabase/migrations/1390_siem_production_actions_and_buffer_guards.sql";
-// allowlist 正本: 全 action を含む更新版の函数定義を持つ。
-// allowlist_parity / forbidden_key_parity / violation_summary_parity はこちらを参照する。
-// 新 action を追加する場合は、このパスの migration を更新すること。
+// このガードは固定パスを参照しない。SQL の「実効最新定義」を、マーカー
+// （-- *_ALLOWLIST_START/END）を含む辞書順最後の migration として自動発見する
+// （latest_migration_containing）。1 世代前の migration を読む陳腐化を構造的に防ぐため、
+// 最新定義がマーカーを保持していることをメタテスト（*_definition_carries_*_markers）で
+// 強制する。再定義する migration は完全再掲＋マーカー保持が不変条件（docs/coding-rules.md §14）。
 const FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_START";
 const FORBIDDEN_END_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_END";
 const LEDGER_FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_LEDGER_PAYLOAD_KEYS_START";
 const LEDGER_FORBIDDEN_END_MARKER: &str = "-- FORBIDDEN_LEDGER_PAYLOAD_KEYS_END";
 const ALLOWLIST_START_MARKER: &str = "-- ACTION_ALLOWLIST_START";
 const ALLOWLIST_END_MARKER: &str = "-- ACTION_ALLOWLIST_END";
+const INCIDENT_TYPE_START_MARKER: &str = "-- INCIDENT_TYPE_ALLOWLIST_START";
+const INCIDENT_TYPE_END_MARKER: &str = "-- INCIDENT_TYPE_ALLOWLIST_END";
+const INCIDENT_CATEGORY_START_MARKER: &str = "-- INCIDENT_CATEGORY_ALLOWLIST_START";
+const INCIDENT_CATEGORY_END_MARKER: &str = "-- INCIDENT_CATEGORY_ALLOWLIST_END";
+const NOTIFIER_KIND_START_MARKER: &str = "-- NOTIFIER_KIND_ALLOWLIST_START";
+const NOTIFIER_KIND_END_MARKER: &str = "-- NOTIFIER_KIND_ALLOWLIST_END";
+
+// SQL 側ガード関数名（実効最新定義の自動発見・メタテスト用）。
+const UNKNOWN_KEY_FN: &str = "audit_metadata_has_unknown_key_for_action";
+const FORBIDDEN_KEY_FN: &str = "audit_metadata_has_forbidden_key";
+const INVALID_VALUE_FN: &str = "audit_metadata_has_invalid_value_for_action";
+const INCIDENT_TYPE_FN: &str = "incident_type_allowed";
 
 #[test]
 fn forbidden_keys_parity_between_rust_and_sql() {
-    let migration = fs::read_to_string(CURRENT_FORBIDDEN_KEY_MIGRATION_PATH)
-        .expect("forbidden-keys migration should be readable");
+    let migration = read_latest_migration_containing(FORBIDDEN_START_MARKER);
     let sql_keys = extract_sql_forbidden_keys(&migration);
     let rust_keys = FORBIDDEN_AUDIT_METADATA_KEYS
         .iter()
@@ -35,8 +46,7 @@ fn forbidden_keys_parity_between_rust_and_sql() {
 
 #[test]
 fn forbidden_keys_parity_between_audit_metadata_and_ledger_payload() {
-    let migration = fs::read_to_string(CURRENT_FORBIDDEN_KEY_MIGRATION_PATH)
-        .expect("forbidden-keys migration should be readable");
+    let migration = read_latest_migration_containing(FORBIDDEN_START_MARKER);
     let sql_audit_keys = extract_sql_forbidden_keys(&migration);
     let sql_ledger_keys = extract_sql_keys_between(
         &migration,
@@ -59,11 +69,10 @@ fn forbidden_keys_parity_between_audit_metadata_and_ledger_payload() {
 
 #[test]
 fn allowlist_parity_between_rust_and_sql() {
-    // 最新の allowlist migration が audit_metadata_has_unknown_key_for_action の最新定義を持つ。
-    // 新 action を追加する場合は最新 migration の ACTION_ALLOWLIST_START/END 内と
+    // SQL 実効最新の allowlist 定義（ACTION_ALLOWLIST マーカーを持つ辞書順最後の migration）を
+    // 自動発見する。新 action / キーを追加する場合は最新 migration の ACTION_ALLOWLIST_START/END 内と
     // rust_allowlist_for_action_result（このファイル内）の両方を更新すること。
-    let migration = fs::read_to_string(LATEST_AUDIT_METADATA_MIGRATION_PATH)
-        .expect("allowlist migration should be readable");
+    let migration = read_latest_migration_containing(ALLOWLIST_START_MARKER);
     let sql_allowlist = extract_sql_allowlist(&migration);
 
     // Rust 側 allowlist を action+result ごとに構成
@@ -97,9 +106,8 @@ fn allowlist_parity_between_rust_and_sql() {
 
 #[test]
 fn integrity_check_violation_summary_allowlist_parity() {
-    // 最新 migration は完全な関数定義（violation_summary キーを含む）を保持する。
-    let migration = fs::read_to_string(LATEST_AUDIT_METADATA_MIGRATION_PATH)
-        .expect("allowlist migration should be readable");
+    // 実効最新の allowlist 定義は violation_summary キーも保持する。
+    let migration = read_latest_migration_containing(ALLOWLIST_START_MARKER);
     let sql_summary = extract_sql_violation_summary_keys(&migration);
     let rust_summary = INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST
         .iter()
@@ -107,6 +115,93 @@ fn integrity_check_violation_summary_allowlist_parity() {
         .collect::<BTreeSet<_>>();
 
     assert_eq!(rust_summary, sql_summary);
+}
+
+// ─── Meta-guards: 実効最新定義がマーカーを保持しているか（陳腐化再発防止の核心） ───
+
+#[test]
+fn latest_unknown_key_definition_carries_allowlist_markers() {
+    // 「ガード関数 audit_metadata_has_unknown_key_for_action の最新定義を持つ migration」が
+    // 「ACTION_ALLOWLIST_START を持つ migration」と一致することを保証する。将来 delegating 再定義を
+    // マーカー無しで足すと、両者がずれて必ず mismatch で落ちる（= 陳腐化を検知できる）。
+    assert_eq!(
+        latest_migration_defining_function(UNKNOWN_KEY_FN),
+        latest_migration_containing(ALLOWLIST_START_MARKER),
+        "audit_metadata_has_unknown_key_for_action の最新定義がマーカー付き完全 allowlist を保持していない。\
+         再定義する migration は ACTION_ALLOWLIST_START/END 込みで全 action を完全再掲すること（docs/coding-rules.md §14）。"
+    );
+}
+
+#[test]
+fn latest_forbidden_key_definition_carries_forbidden_markers() {
+    assert_eq!(
+        latest_migration_defining_function(FORBIDDEN_KEY_FN),
+        latest_migration_containing(FORBIDDEN_START_MARKER),
+        "audit_metadata_has_forbidden_key の最新定義が FORBIDDEN_AUDIT_METADATA_KEYS マーカーを保持していない。"
+    );
+}
+
+#[test]
+fn latest_value_guard_definitions_carry_value_markers() {
+    assert_eq!(
+        latest_migration_defining_function(INCIDENT_TYPE_FN),
+        latest_migration_containing(INCIDENT_TYPE_START_MARKER),
+        "incident_type_allowed の最新定義が INCIDENT_TYPE_ALLOWLIST マーカーを保持していない。"
+    );
+    assert_eq!(
+        latest_migration_defining_function(INVALID_VALUE_FN),
+        latest_migration_containing(INCIDENT_CATEGORY_START_MARKER),
+        "audit_metadata_has_invalid_value_for_action の最新定義が INCIDENT_CATEGORY_ALLOWLIST マーカーを保持していない。"
+    );
+    assert_eq!(
+        latest_migration_defining_function(INVALID_VALUE_FN),
+        latest_migration_containing(NOTIFIER_KIND_START_MARKER),
+        "audit_metadata_has_invalid_value_for_action の最新定義が NOTIFIER_KIND_ALLOWLIST マーカーを保持していない。"
+    );
+}
+
+// ─── 値 enum parity: Rust const ↔ SQL リテラルリスト（追加-A の解消） ───
+
+#[test]
+fn incident_type_allowlist_parity_between_rust_and_sql() {
+    let migration = read_latest_migration_containing(INCIDENT_TYPE_START_MARKER);
+    let sql =
+        extract_sql_keys_between(&migration, INCIDENT_TYPE_START_MARKER, INCIDENT_TYPE_END_MARKER);
+    let rust = INCIDENT_TYPE_ALLOWLIST
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rust, sql);
+}
+
+#[test]
+fn incident_notification_category_allowlist_parity_between_rust_and_sql() {
+    let migration = read_latest_migration_containing(INCIDENT_CATEGORY_START_MARKER);
+    let sql = extract_sql_keys_between(
+        &migration,
+        INCIDENT_CATEGORY_START_MARKER,
+        INCIDENT_CATEGORY_END_MARKER,
+    );
+    let rust = INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rust, sql);
+}
+
+#[test]
+fn notifier_kind_allowlist_parity_between_rust_and_sql() {
+    let migration = read_latest_migration_containing(NOTIFIER_KIND_START_MARKER);
+    let sql =
+        extract_sql_keys_between(&migration, NOTIFIER_KIND_START_MARKER, NOTIFIER_KIND_END_MARKER);
+    let rust = NOTIFIER_KIND_ALLOWLIST
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rust, sql);
 }
 
 #[test]
@@ -1163,6 +1258,53 @@ fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) ->
     };
     keys.sort();
     keys.into_iter().map(|s| s.to_owned()).collect()
+}
+
+fn migration_paths() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(Path::new("supabase/migrations"))
+        .expect("supabase/migrations should be readable")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+        .collect();
+    // 4 桁ゼロパディング連番のため、辞書順 == 適用順（実効最新 = 辞書順最後）。
+    paths.sort();
+    paths
+}
+
+/// `needle` を含む辞書順最後の migration（= 実効最新の定義を持つファイル）を返す。
+fn latest_migration_containing(needle: &str) -> PathBuf {
+    migration_paths()
+        .into_iter()
+        .rfind(|path| {
+            fs::read_to_string(path)
+                .map(|content| content.contains(needle))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("no migration contains {needle}"))
+}
+
+/// `create [or replace] function public.<fn_name>(` を含む辞書順最後の migration を返す。
+/// `_before_NNNN` 委譲版（別名）・`alter ... rename`・`comment on` 行は定義として数えない。
+fn latest_migration_defining_function(fn_name: &str) -> PathBuf {
+    let needle = format!("function public.{fn_name}(");
+    migration_paths()
+        .into_iter()
+        .rfind(|path| {
+            fs::read_to_string(path)
+                .map(|content| {
+                    content
+                        .lines()
+                        .any(|line| line.contains("create") && line.contains(&needle))
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("no migration defines function {fn_name}"))
+}
+
+fn read_latest_migration_containing(needle: &str) -> String {
+    let path = latest_migration_containing(needle);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("migration {} should be readable", path.display()))
 }
 
 fn extract_sql_forbidden_keys(sql: &str) -> BTreeSet<String> {

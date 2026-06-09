@@ -6,7 +6,10 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
-pub use validate::INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST;
+pub use validate::{
+    INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST, INCIDENT_TYPE_ALLOWLIST,
+    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, NOTIFIER_KIND_ALLOWLIST,
+};
 
 pub use builders::{
     ArchiveExportMetadata, AuditReportGenerateMetadata, AuditUiReadMetadata, AuthFailureMetadata,

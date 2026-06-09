@@ -8,6 +8,7 @@ immutable
 set search_path = public
 as $$
     select p_incident_type in (
+        -- INCIDENT_TYPE_ALLOWLIST_START
         'hash_chain_mismatch',
         'signature_mismatch',
         'monthly_digest_mismatch',
@@ -28,6 +29,7 @@ as $$
         'envelope_migration_failure_burst',
         'auth_failure_burst',
         'key_rotation_failure'
+        -- INCIDENT_TYPE_ALLOWLIST_END
     );
 $$;
 
@@ -93,6 +95,7 @@ begin
     v_value := p_metadata_json -> 'category';
     if jsonb_typeof(v_value) <> 'string'
         or (v_value #>> '{}') not in (
+            -- INCIDENT_CATEGORY_ALLOWLIST_START
             'ledger_anomaly',
             'scheduler_failure',
             'archive_failure_persistent',
@@ -102,6 +105,7 @@ begin
             'envelope_migration_failure_burst',
             'auth_failure_burst',
             'key_rotation_failure'
+            -- INCIDENT_CATEGORY_ALLOWLIST_END
         )
     then
         return true;
@@ -110,7 +114,12 @@ begin
     if p_action in ('incident_notification_sent', 'incident_notification_failed') then
         v_value := p_metadata_json -> 'notifier_kind';
         if jsonb_typeof(v_value) <> 'string'
-            or (v_value #>> '{}') not in ('dummy', 'webhook')
+            or (v_value #>> '{}') not in (
+                -- NOTIFIER_KIND_ALLOWLIST_START
+                'dummy',
+                'webhook'
+                -- NOTIFIER_KIND_ALLOWLIST_END
+            )
         then
             return true;
         end if;
