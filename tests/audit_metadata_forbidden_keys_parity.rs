@@ -14,6 +14,12 @@ use mipsorcu::{
 // （latest_migration_containing）。1 世代前の migration を読む陳腐化を構造的に防ぐため、
 // 最新定義がマーカーを保持していることをメタテスト（*_definition_carries_*_markers）で
 // 強制する。再定義する migration は完全再掲＋マーカー保持が不変条件（docs/coding-rules.md §14）。
+//
+// マーカーは「行全体（前後空白除去後の完全一致）がマーカー文字列である行」だけを採用する
+// （has_marker_line / marker_block）。ヘッダや `comment on` の散文中に綴られた
+// "-- ACTION_ALLOWLIST_START/END" のような言及は行全体一致でないため検出・抽出窓に
+// 影響しない。これにより 1 ファイルへ複数ガードを再掲する consolidation（1440）でも、
+// 散文が抽出窓を広げて誤抽出する事故（bug-05 同類の silent drift 見逃し）を構造的に防ぐ。
 const FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_START";
 const FORBIDDEN_END_MARKER: &str = "-- FORBIDDEN_AUDIT_METADATA_KEYS_END";
 const LEDGER_FORBIDDEN_START_MARKER: &str = "-- FORBIDDEN_LEDGER_PAYLOAD_KEYS_START";
@@ -256,6 +262,53 @@ fn latest_required_key_definition_carries_required_markers() {
         latest_migration_containing(REQUIRED_KEY_START_MARKER),
         "audit_metadata_has_missing_required_key_for_action の最新定義がマーカー付き完全必須キー集合を保持していない。\
          再定義する migration は REQUIRED_KEY_START/END 込みで全 action を完全再掲すること（docs/coding-rules.md §14）。"
+    );
+}
+
+// ─── 再発防止: マーカーは独立行のみ採用し、散文中の綴りで抽出窓を汚染しない ───
+
+#[test]
+fn has_marker_line_requires_standalone_line() {
+    // 散文中の "-- ACTION_ALLOWLIST_START/END" は行全体一致でないため採用しない。
+    assert!(!has_marker_line(
+        "--   restates allowlist with -- ACTION_ALLOWLIST_START/END markers preserved\n",
+        ALLOWLIST_START_MARKER
+    ));
+    // インデント付きでも、trim 後に完全一致する独立行は採用する。
+    assert!(has_marker_line(
+        "    -- ACTION_ALLOWLIST_START\n",
+        ALLOWLIST_START_MARKER
+    ));
+}
+
+#[test]
+fn marker_block_ignores_prose_mentions() {
+    // bug-05 consolidation 由来の脆さ（コメント散文中のマーカー綴りが split_once の境界に
+    // 採られて抽出窓を広げ、誤抽出＝silent drift 見逃しを招く）に対する構造的ガード。
+    // ヘッダと comment on が両マーカーを散文で綴っても、独立行マーカーに挟まれた領域だけを返す。
+    let sql = "\
+-- header prose mentions -- ACTION_ALLOWLIST_START/END markers preserved
+create or replace function public.f(p_action text) returns boolean as $$
+begin
+    -- ACTION_ALLOWLIST_START
+    case p_action
+        when 'a' then v_allowed_keys := array['real_key'];
+    end case;
+    -- ACTION_ALLOWLIST_END
+    return false;
+end;
+$$;
+comment on function public.f(text) is 'restates allowlist with -- ACTION_ALLOWLIST_START/END markers';
+";
+    let block = marker_block(sql, ALLOWLIST_START_MARKER, ALLOWLIST_END_MARKER);
+    assert!(block.contains("real_key"), "実マーカー間の本体を抽出すること");
+    assert!(
+        !block.contains("header prose"),
+        "ヘッダ散文を抽出窓に含めないこと"
+    );
+    assert!(
+        !block.contains("comment on"),
+        "comment on 散文を抽出窓に含めないこと"
     );
 }
 
@@ -1326,16 +1379,53 @@ fn migration_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// `needle` を含む辞書順最後の migration（= 実効最新の定義を持つファイル）を返す。
-fn latest_migration_containing(needle: &str) -> PathBuf {
+/// `content` 内に「行全体（前後空白除去後）が `marker` に完全一致する行」が 1 つでもあるか。
+/// 散文中の同綴り（コメントの "-- FOO_START/END" 等）は行全体一致でないため採用しない。
+fn has_marker_line(content: &str, marker: &str) -> bool {
+    content.lines().any(|line| line.trim() == marker)
+}
+
+/// `marker` を独立行として持つ辞書順最後の migration（= 実効最新の定義を持つファイル）を返す。
+fn latest_migration_containing(marker: &str) -> PathBuf {
     migration_paths()
         .into_iter()
         .rfind(|path| {
             fs::read_to_string(path)
-                .map(|content| content.contains(needle))
+                .map(|content| has_marker_line(&content, marker))
                 .unwrap_or(false)
         })
-        .unwrap_or_else(|| panic!("no migration contains {needle}"))
+        .unwrap_or_else(|| panic!("no migration has a standalone marker line {marker}"))
+}
+
+/// `start_marker` / `end_marker` が「行全体」になっている行に挟まれた領域を返す。
+/// 散文中の同綴りは行全体一致でないため境界に採用されない。1 ファイルに複数ガードを
+/// 再掲しても（consolidation）、ヘッダ／`comment on` の散文が抽出窓を広げて誤抽出する事故を
+/// 構造的に防ぐ。返値はマーカー行自身を含まない、間の各行を改行付きで連結した文字列。
+fn marker_block(sql: &str, start_marker: &str, end_marker: &str) -> String {
+    let mut block = String::new();
+    let mut in_block = false;
+
+    for line in sql.lines() {
+        let trimmed = line.trim();
+        if trimmed == start_marker {
+            assert!(!in_block, "duplicate start marker line {start_marker}");
+            in_block = true;
+            continue;
+        }
+        if trimmed == end_marker {
+            assert!(
+                in_block,
+                "end marker line {end_marker} appears before start marker line {start_marker}"
+            );
+            return block;
+        }
+        if in_block {
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+
+    panic!("standalone marker block {start_marker}..{end_marker} not found in migration");
 }
 
 /// `create [or replace] function public.<fn_name>(` を含む辞書順最後の migration を返す。
@@ -1367,12 +1457,7 @@ fn extract_sql_forbidden_keys(sql: &str) -> BTreeSet<String> {
 }
 
 fn extract_sql_keys_between(sql: &str, start_marker: &str, end_marker: &str) -> BTreeSet<String> {
-    let (_, after_start) = sql
-        .split_once(start_marker)
-        .expect("start marker should exist in migration");
-    let (key_block, _) = after_start
-        .split_once(end_marker)
-        .expect("end marker should exist in migration");
+    let key_block = marker_block(sql, start_marker, end_marker);
 
     let mut keys = BTreeSet::new();
     let mut current = String::new();
@@ -1399,12 +1484,7 @@ fn extract_sql_keys_between(sql: &str, start_marker: &str, end_marker: &str) -> 
 }
 
 fn extract_sql_allowlist(sql: &str) -> HashMap<String, BTreeSet<String>> {
-    let (_, after_start) = sql
-        .split_once(ALLOWLIST_START_MARKER)
-        .expect("allowlist start marker should exist");
-    let (block, _) = after_start
-        .split_once(ALLOWLIST_END_MARKER)
-        .expect("allowlist end marker should exist");
+    let block = marker_block(sql, ALLOWLIST_START_MARKER, ALLOWLIST_END_MARKER);
 
     let mut result: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut current_actions: Vec<String> = Vec::new();
@@ -1523,12 +1603,7 @@ fn parse_array_keys(text: &str, out: &mut Vec<String>) {
 ///   `v_required_keys :=` で始まらないため自然に無視される（本テストの対象は top-level 必須キー）。
 /// - すべての必須キー配列は単一行（`...];` で完結）である前提。
 fn extract_sql_required_keys(sql: &str) -> HashMap<String, BTreeSet<String>> {
-    let (_, after_start) = sql
-        .split_once(REQUIRED_KEY_START_MARKER)
-        .expect("required-key start marker should exist");
-    let (block, _) = after_start
-        .split_once(REQUIRED_KEY_END_MARKER)
-        .expect("required-key end marker should exist");
+    let block = marker_block(sql, REQUIRED_KEY_START_MARKER, REQUIRED_KEY_END_MARKER);
 
     let mut result: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut current_actions: Vec<String> = Vec::new();
@@ -1585,12 +1660,7 @@ fn extract_sql_required_keys(sql: &str) -> HashMap<String, BTreeSet<String>> {
 }
 
 fn extract_sql_violation_summary_keys(sql: &str) -> BTreeSet<String> {
-    let (_, after_start) = sql
-        .split_once(ALLOWLIST_START_MARKER)
-        .expect("allowlist start marker should exist");
-    let (block, _) = after_start
-        .split_once(ALLOWLIST_END_MARKER)
-        .expect("allowlist end marker should exist");
+    let block = marker_block(sql, ALLOWLIST_START_MARKER, ALLOWLIST_END_MARKER);
 
     let mut keys = BTreeSet::new();
     let mut found_summary_section = false;
