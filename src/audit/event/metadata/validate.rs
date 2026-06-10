@@ -322,7 +322,7 @@ fn validate_string_metadata_values(
     }
 
     if let Some(value) = object.get("severity") {
-        validate_enum_metadata_value("severity", value, &["critical", "high", "medium", "low"])?;
+        validate_enum_metadata_value("severity", value, INCIDENT_SEVERITY_ALLOWLIST)?;
     }
 
     if let Some(value) = object.get("category") {
@@ -334,11 +334,7 @@ fn validate_string_metadata_values(
     }
 
     if let Some(value) = object.get("notification_result") {
-        validate_enum_metadata_value(
-            "notification_result",
-            value,
-            &["sent", "failed", "suppressed", "not_configured"],
-        )?;
+        validate_enum_metadata_value("notification_result", value, NOTIFICATION_RESULT_ALLOWLIST)?;
     }
 
     if let Some(value) = object.get("format") {
@@ -625,3 +621,18 @@ pub const INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST: &[&str] = &[
 /// SQL 正本は `audit_metadata_has_invalid_value_for_action`（最新定義は 1430）の
 /// `-- NOTIFIER_KIND_ALLOWLIST_START/END` リテラルリスト。
 pub const NOTIFIER_KIND_ALLOWLIST: &[&str] = &["dummy", "webhook"];
+
+/// incident 監査・ledger が受理する `severity` 許可値。
+/// SQL 正本は `incident_severity_allowed`（最新定義は 1450）の
+/// `-- SEVERITY_ALLOWLIST_START/END` リテラルリストであり、一致は
+/// `audit_metadata_forbidden_keys_parity` の値 enum parity テストで保証する。
+/// 監査メタデータ（本ファイル）と ledger payload（`src/ledger/payload.rs`）の双方が
+/// この単一 const を参照し、手動同期コピーを持たない。
+pub const INCIDENT_SEVERITY_ALLOWLIST: &[&str] = &["critical", "high", "medium", "low"];
+
+/// incident 監査・ledger が受理する `notification_result` 許可値。
+/// SQL 正本は `incident_notification_result_allowed`（最新定義は 1450）の
+/// `-- NOTIFICATION_RESULT_ALLOWLIST_START/END` リテラルリスト。監査メタデータと
+/// ledger payload の双方がこの単一 const を参照する。
+pub const NOTIFICATION_RESULT_ALLOWLIST: &[&str] =
+    &["sent", "failed", "suppressed", "not_configured"];

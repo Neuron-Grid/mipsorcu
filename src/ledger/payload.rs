@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 
 use crate::audit::AuditTrigger;
 use crate::types::SourceEventAt;
+use crate::{INCIDENT_SEVERITY_ALLOWLIST, INCIDENT_TYPE_ALLOWLIST, NOTIFICATION_RESULT_ALLOWLIST};
 
 use super::canonical::CanonicalPayloadObject;
 use super::constants::{
@@ -166,15 +167,11 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         "trigger" => validate_trigger_value(key, value),
         "error_code" | "reason_code" | "archive_key" | "job_name" | "detection_source"
         | "dedupe_key" | "notification_sink" => validate_non_blank_short_string(key, value),
-        "incident_type" => validate_incident_type_value(key, value),
-        "severity" => {
-            validate_string_enum_value(key, value, &["critical", "high", "medium", "low"])
+        "incident_type" => validate_string_enum_value(key, value, INCIDENT_TYPE_ALLOWLIST),
+        "severity" => validate_string_enum_value(key, value, INCIDENT_SEVERITY_ALLOWLIST),
+        "notification_result" => {
+            validate_string_enum_value(key, value, NOTIFICATION_RESULT_ALLOWLIST)
         }
-        "notification_result" => validate_string_enum_value(
-            key,
-            value,
-            &["sent", "failed", "suppressed", "not_configured"],
-        ),
         // monthly_digest 専用フィールド
         "target_year_month" => validate_year_month_value(key, value),
         "digest_hash" | "timestamp_token_hash" | "public_key_fingerprint" => {
@@ -438,35 +435,6 @@ fn validate_string_enum_value(
         key: key.to_owned(),
         expected: "an allowed string value",
     })
-}
-
-fn validate_incident_type_value(key: &str, value: &Value) -> Result<(), LedgerError> {
-    validate_string_enum_value(
-        key,
-        value,
-        &[
-            "hash_chain_mismatch",
-            "signature_mismatch",
-            "monthly_digest_mismatch",
-            "digest_timestamping_mismatch",
-            "archive_export_mismatch",
-            "sequence_gap",
-            "unknown_signature_key",
-            "non_auditor_ledger_read",
-            "ledger_secret_leak_suspected",
-            "siem_long_failure",
-            "audit_ui_forbidden_operation",
-            "scheduler_failure",
-            "ledger_anomaly",
-            "archive_failure_persistent",
-            "timestamping_failure_persistent",
-            "siem_buffer_threshold",
-            "siem_buffer_overflow",
-            "envelope_migration_failure_burst",
-            "auth_failure_burst",
-            "key_rotation_failure",
-        ],
-    )
 }
 
 fn validate_old_new_key_versions(object: &Map<String, Value>) -> Result<(), LedgerError> {

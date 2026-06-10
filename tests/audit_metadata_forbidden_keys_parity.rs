@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use mipsorcu::{
     AuditAction, AuditMetadata, AuditResult, FORBIDDEN_AUDIT_METADATA_KEYS,
     FORBIDDEN_LEDGER_PAYLOAD_KEYS, INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST,
-    INCIDENT_TYPE_ALLOWLIST, INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, NOTIFIER_KIND_ALLOWLIST,
-    required_metadata_keys,
+    INCIDENT_SEVERITY_ALLOWLIST, INCIDENT_TYPE_ALLOWLIST,
+    INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, NOTIFICATION_RESULT_ALLOWLIST,
+    NOTIFIER_KIND_ALLOWLIST, required_metadata_keys,
 };
 
 // このガードは固定パスを参照しない。SQL の「実効最新定義」を、マーカー
@@ -32,6 +33,10 @@ const INCIDENT_CATEGORY_START_MARKER: &str = "-- INCIDENT_CATEGORY_ALLOWLIST_STA
 const INCIDENT_CATEGORY_END_MARKER: &str = "-- INCIDENT_CATEGORY_ALLOWLIST_END";
 const NOTIFIER_KIND_START_MARKER: &str = "-- NOTIFIER_KIND_ALLOWLIST_START";
 const NOTIFIER_KIND_END_MARKER: &str = "-- NOTIFIER_KIND_ALLOWLIST_END";
+const SEVERITY_START_MARKER: &str = "-- SEVERITY_ALLOWLIST_START";
+const SEVERITY_END_MARKER: &str = "-- SEVERITY_ALLOWLIST_END";
+const NOTIFICATION_RESULT_START_MARKER: &str = "-- NOTIFICATION_RESULT_ALLOWLIST_START";
+const NOTIFICATION_RESULT_END_MARKER: &str = "-- NOTIFICATION_RESULT_ALLOWLIST_END";
 const REQUIRED_KEY_START_MARKER: &str = "-- REQUIRED_KEY_START";
 const REQUIRED_KEY_END_MARKER: &str = "-- REQUIRED_KEY_END";
 
@@ -40,6 +45,8 @@ const UNKNOWN_KEY_FN: &str = "audit_metadata_has_unknown_key_for_action";
 const FORBIDDEN_KEY_FN: &str = "audit_metadata_has_forbidden_key";
 const INVALID_VALUE_FN: &str = "audit_metadata_has_invalid_value_for_action";
 const INCIDENT_TYPE_FN: &str = "incident_type_allowed";
+const SEVERITY_FN: &str = "incident_severity_allowed";
+const NOTIFICATION_RESULT_FN: &str = "incident_notification_result_allowed";
 const REQUIRED_KEY_FN: &str = "audit_metadata_has_missing_required_key_for_action";
 
 #[test]
@@ -168,6 +175,18 @@ fn latest_value_guard_definitions_carry_value_markers() {
         latest_migration_containing(NOTIFIER_KIND_START_MARKER),
         "audit_metadata_has_invalid_value_for_action の最新定義が NOTIFIER_KIND_ALLOWLIST マーカーを保持していない。"
     );
+    assert_eq!(
+        latest_migration_defining_function(SEVERITY_FN),
+        latest_migration_containing(SEVERITY_START_MARKER),
+        "incident_severity_allowed の最新定義が SEVERITY_ALLOWLIST マーカーを保持していない。\
+         再定義する migration は SEVERITY_ALLOWLIST_START/END 込みで全値を完全再掲すること（docs/coding-rules.md §14.3）。"
+    );
+    assert_eq!(
+        latest_migration_defining_function(NOTIFICATION_RESULT_FN),
+        latest_migration_containing(NOTIFICATION_RESULT_START_MARKER),
+        "incident_notification_result_allowed の最新定義が NOTIFICATION_RESULT_ALLOWLIST マーカーを保持していない。\
+         再定義する migration は NOTIFICATION_RESULT_ALLOWLIST_START/END 込みで全値を完全再掲すること（docs/coding-rules.md §14.3）。"
+    );
 }
 
 // ─── 値 enum parity: Rust const ↔ SQL リテラルリスト（追加-A の解消） ───
@@ -213,6 +232,34 @@ fn notifier_kind_allowlist_parity_between_rust_and_sql() {
         NOTIFIER_KIND_END_MARKER,
     );
     let rust = NOTIFIER_KIND_ALLOWLIST
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rust, sql);
+}
+
+#[test]
+fn incident_severity_allowlist_parity_between_rust_and_sql() {
+    let migration = read_latest_migration_containing(SEVERITY_START_MARKER);
+    let sql = extract_sql_keys_between(&migration, SEVERITY_START_MARKER, SEVERITY_END_MARKER);
+    let rust = INCIDENT_SEVERITY_ALLOWLIST
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(rust, sql);
+}
+
+#[test]
+fn notification_result_allowlist_parity_between_rust_and_sql() {
+    let migration = read_latest_migration_containing(NOTIFICATION_RESULT_START_MARKER);
+    let sql = extract_sql_keys_between(
+        &migration,
+        NOTIFICATION_RESULT_START_MARKER,
+        NOTIFICATION_RESULT_END_MARKER,
+    );
+    let rust = NOTIFICATION_RESULT_ALLOWLIST
         .iter()
         .map(|k| (*k).to_owned())
         .collect::<BTreeSet<_>>();
@@ -301,7 +348,10 @@ $$;
 comment on function public.f(text) is 'restates allowlist with -- ACTION_ALLOWLIST_START/END markers';
 ";
     let block = marker_block(sql, ALLOWLIST_START_MARKER, ALLOWLIST_END_MARKER);
-    assert!(block.contains("real_key"), "実マーカー間の本体を抽出すること");
+    assert!(
+        block.contains("real_key"),
+        "実マーカー間の本体を抽出すること"
+    );
     assert!(
         !block.contains("header prose"),
         "ヘッダ散文を抽出窓に含めないこと"
