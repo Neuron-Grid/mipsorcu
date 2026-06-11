@@ -9,6 +9,10 @@ pub enum KeyRotationCliError {
     Audit(String),
     Crypto(String),
     Supabase(SupabaseRpcError),
+    /// envelope migration の適用 RPC が 40001（nonce 再利用 / 行衝突 / 行ロック）で
+    /// バッチ全体を中断・ロールバックした場合の retryable conflict。残存 legacy 行は
+    /// 次回スケジューラ実行で再処理される。汎用 `Supabase` 失敗と区別して分類する。
+    EnvelopeMigrationConflict,
 }
 
 impl fmt::Display for KeyRotationCliError {
@@ -21,6 +25,10 @@ impl fmt::Display for KeyRotationCliError {
             Self::Audit(message) => write!(formatter, "key rotation audit error: {message}"),
             Self::Crypto(message) => write!(formatter, "key rotation crypto error: {message}"),
             Self::Supabase(error) => write!(formatter, "{error}"),
+            Self::EnvelopeMigrationConflict => write!(
+                formatter,
+                "envelope migration batch aborted on a retryable conflict"
+            ),
         }
     }
 }
@@ -35,6 +43,7 @@ impl KeyRotationCliError {
             Self::Audit(_) => Some("key_rotation_audit_failed"),
             Self::Crypto(_) => Some("key_rotation_crypto_failed"),
             Self::Supabase(_) => Some("key_rotation_supabase_failed"),
+            Self::EnvelopeMigrationConflict => Some("key_rotation_envelope_conflict"),
         }
     }
 }

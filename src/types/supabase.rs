@@ -290,21 +290,14 @@ pub struct EnvelopeMigrationApplyOutcome {
     pub success_count: i64,
     pub failure_count: i64,
     pub remaining_legacy_rows: i64,
-    pub retry_secret_version_ids: Vec<String>,
 }
 
 impl EnvelopeMigrationApplyOutcome {
-    pub(crate) fn new(
-        success_count: i64,
-        failure_count: i64,
-        remaining_legacy_rows: i64,
-        retry_secret_version_ids: Vec<String>,
-    ) -> Self {
+    pub(crate) fn new(success_count: i64, failure_count: i64, remaining_legacy_rows: i64) -> Self {
         Self {
             success_count,
             failure_count,
             remaining_legacy_rows,
-            retry_secret_version_ids,
         }
     }
 }

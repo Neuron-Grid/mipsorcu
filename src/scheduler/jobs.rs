@@ -623,12 +623,13 @@ async fn record_envelope_migration_failure_incident(state: &AppState, error_code
     }
 }
 
-fn map_envelope_migration_error(error: &KeyRotationCliError) -> &'static str {
+pub(crate) fn map_envelope_migration_error(error: &KeyRotationCliError) -> &'static str {
     match error {
         KeyRotationCliError::Config(_) => "envelope_migration_config_invalid",
         KeyRotationCliError::Supabase(_) => "envelope_migration_supabase_failed",
         KeyRotationCliError::Audit(_) => "envelope_migration_audit_failed",
         KeyRotationCliError::Crypto(_) => "envelope_migration_crypto_failed",
+        KeyRotationCliError::EnvelopeMigrationConflict => "envelope_migration_conflict_retryable",
         KeyRotationCliError::Usage(_) => "envelope_migration_failed",
     }
 }

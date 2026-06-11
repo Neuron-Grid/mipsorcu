@@ -8,7 +8,10 @@ use time::{Date, Time};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::jobs::{persist_timestamping_token_to_archive, run_monthly_timestamping_obtain_job};
+use super::jobs::{
+    map_envelope_migration_error, persist_timestamping_token_to_archive,
+    run_monthly_timestamping_obtain_job,
+};
 use super::*;
 use crate::archive::{AnyArchiveBackend, LocalFileArchiveBackend};
 use crate::audit::{AuditRecorder, LocalAuditFallbackStore};
@@ -295,6 +298,45 @@ fn scheduled_job_name_includes_new_v02_jobs() {
     assert_eq!(
         ScheduledJobName::SiemBufferFlush.as_str(),
         "siem_buffer_flush"
+    );
+}
+
+#[test]
+fn map_envelope_migration_error_classifies_retryable_conflict() {
+    use crate::server::key_rotation::KeyRotationCliError;
+    use crate::server::supabase::SupabaseRpcError;
+
+    // 1340 abort 契約の 40001 retryable conflict は専用 error_code に分類し、
+    // 汎用 Supabase 失敗 (`envelope_migration_supabase_failed`) と区別する。
+    assert_eq!(
+        map_envelope_migration_error(&KeyRotationCliError::EnvelopeMigrationConflict),
+        "envelope_migration_conflict_retryable"
+    );
+    assert_ne!(
+        map_envelope_migration_error(&KeyRotationCliError::EnvelopeMigrationConflict),
+        map_envelope_migration_error(&KeyRotationCliError::Supabase(SupabaseRpcError::EmptyResult))
+    );
+
+    // 残りのバリアントのマッピングも回帰固定する（網羅性の担保）。
+    assert_eq!(
+        map_envelope_migration_error(&KeyRotationCliError::Supabase(SupabaseRpcError::EmptyResult)),
+        "envelope_migration_supabase_failed"
+    );
+    assert_eq!(
+        map_envelope_migration_error(&KeyRotationCliError::Config("boom".to_owned())),
+        "envelope_migration_config_invalid"
+    );
+    assert_eq!(
+        map_envelope_migration_error(&KeyRotationCliError::Audit("boom".to_owned())),
+        "envelope_migration_audit_failed"
+    );
+    assert_eq!(
+        map_envelope_migration_error(&KeyRotationCliError::Crypto("boom".to_owned())),
+        "envelope_migration_crypto_failed"
+    );
+    assert_eq!(
+        map_envelope_migration_error(&KeyRotationCliError::Usage("boom".to_owned())),
+        "envelope_migration_failed"
     );
 }
 

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -27,7 +26,6 @@ use super::ledger::{build_key_rotation_ledger_draft, sign_single_ledger_entry};
 const DEFAULT_BATCH_SIZE: u32 = 100;
 const DEFAULT_MAX_BATCHES: u32 = 10;
 const MAX_BATCH_SIZE: u32 = 1_000;
-const MAX_NONCE_REUSE_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
@@ -128,28 +126,8 @@ pub(super) async fn run(
         totals.selected_count += u64::try_from(batch_rows.len()).map_err(|_| {
             KeyRotationCliError::Config("envelope migration batch size is invalid".to_owned())
         })?;
-        let retry_sources: HashMap<String, EnvelopeMigrationBatchRow> = batch_rows
-            .iter()
-            .cloned()
-            .map(|row| (row.id.clone(), row))
-            .collect();
         let prepared = prepare_batch(&config.master_key_ring, batch_rows)?;
-        let outcome =
-            apply_prepared_batch(&supabase_client, &ledger_appender, &prepared, &mut totals)
-                .await?;
-
-        retry_nonce_reuse_rows(
-            &supabase_client,
-            &ledger_appender,
-            &config.master_key_ring,
-            &retry_sources,
-            outcome.retry_secret_version_ids.clone(),
-            &mut totals,
-        )
-        .await?;
-        if outcome.success_count == 0 && outcome.failure_count == 0 {
-            break;
-        }
+        apply_prepared_batch(&supabase_client, &ledger_appender, &prepared, &mut totals).await?;
     }
 
     let status = supabase_client
@@ -328,7 +306,7 @@ async fn apply_prepared_batch(
     ledger_appender: &LedgerAppender,
     prepared: &PreparedBatch,
     totals: &mut RunTotals,
-) -> Result<EnvelopeMigrationApplyOutcome, KeyRotationCliError> {
+) -> Result<(), KeyRotationCliError> {
     let batch_size = u64::try_from(prepared.success_rows.len() + prepared.failure_rows.len())
         .map_err(|_| {
             KeyRotationCliError::Config("envelope migration batch size is invalid".to_owned())
@@ -365,79 +343,20 @@ async fn apply_prepared_batch(
             prepared.success_rows.clone(),
             prepared.failure_rows.clone(),
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            // 1340 契約: nonce 再利用・行衝突・行ロックは 40001 でバッチ全体を中断し
+            // ロールバックする。これは retryable conflict（次回実行で残存 legacy 行を
+            // 再処理）であり、汎用 Supabase 失敗と区別する。
+            if supabase_client.is_envelope_migration_conflict(&error) {
+                KeyRotationCliError::EnvelopeMigrationConflict
+            } else {
+                KeyRotationCliError::Supabase(error)
+            }
+        })?;
 
     merge_outcome(totals, &request_id, &outcome)?;
-    Ok(outcome)
-}
-
-async fn retry_nonce_reuse_rows(
-    supabase_client: &SupabaseClient,
-    ledger_appender: &LedgerAppender,
-    master_key_ring: &MasterKeyRing,
-    retry_sources: &HashMap<String, EnvelopeMigrationBatchRow>,
-    mut retry_ids: Vec<String>,
-    totals: &mut RunTotals,
-) -> Result<(), KeyRotationCliError> {
-    for _ in 0..MAX_NONCE_REUSE_RETRIES {
-        if retry_ids.is_empty() {
-            return Ok(());
-        }
-
-        let rows = retry_rows_from_sources(retry_sources, &retry_ids)?;
-        let prepared = prepare_batch(master_key_ring, rows)?;
-        let outcome =
-            apply_prepared_batch(supabase_client, ledger_appender, &prepared, totals).await?;
-        retry_ids = outcome.retry_secret_version_ids;
-    }
-
-    if retry_ids.is_empty() {
-        return Ok(());
-    }
-
-    let failure_rows = retry_ids
-        .iter()
-        .map(|id| retry_failure_row(retry_sources, id))
-        .collect::<Result<Vec<_>, _>>()?;
-    let prepared = PreparedBatch {
-        success_rows: Vec::new(),
-        failure_rows,
-    };
-    let _ = apply_prepared_batch(supabase_client, ledger_appender, &prepared, totals).await?;
-
     Ok(())
-}
-
-fn retry_rows_from_sources(
-    retry_sources: &HashMap<String, EnvelopeMigrationBatchRow>,
-    retry_ids: &[String],
-) -> Result<Vec<EnvelopeMigrationBatchRow>, KeyRotationCliError> {
-    retry_ids
-        .iter()
-        .map(|id| {
-            retry_sources.get(id).cloned().ok_or_else(|| {
-                KeyRotationCliError::Config("nonce retry row is missing from batch".to_owned())
-            })
-        })
-        .collect()
-}
-
-fn retry_failure_row(
-    retry_sources: &HashMap<String, EnvelopeMigrationBatchRow>,
-    id: &str,
-) -> Result<EnvelopeMigrationFailureRow, KeyRotationCliError> {
-    let row = retry_sources.get(id).ok_or_else(|| {
-        KeyRotationCliError::Config("nonce retry row is missing from batch".to_owned())
-    })?;
-    let (id, secret_id, version, key_version) = parse_row_identity(row)?;
-
-    Ok(EnvelopeMigrationFailureRow {
-        id: id.as_canonical_string(),
-        secret_id: secret_id.as_canonical_string(),
-        version: version.get(),
-        key_version: key_version.get(),
-        error_code: "nonce_reuse_detected".to_owned(),
-    })
 }
 
 impl RowFailure {
@@ -731,29 +650,9 @@ pub(crate) async fn run_scheduled_envelope_migration(
         totals.selected_count += u64::try_from(batch_rows.len()).map_err(|_| {
             KeyRotationCliError::Config("envelope migration batch size is invalid".to_owned())
         })?;
-        let retry_sources: HashMap<String, EnvelopeMigrationBatchRow> = batch_rows
-            .iter()
-            .cloned()
-            .map(|row| (row.id.clone(), row))
-            .collect();
         let prepared = prepare_batch(&master_key_ring, batch_rows)?;
-        let outcome =
-            apply_prepared_batch(&supabase_client, &ledger_appender, &prepared, &mut totals)
-                .await?;
+        apply_prepared_batch(&supabase_client, &ledger_appender, &prepared, &mut totals).await?;
         batches_executed = batches_executed.saturating_add(1);
-
-        retry_nonce_reuse_rows(
-            &supabase_client,
-            &ledger_appender,
-            &master_key_ring,
-            &retry_sources,
-            outcome.retry_secret_version_ids.clone(),
-            &mut totals,
-        )
-        .await?;
-        if outcome.success_count == 0 && outcome.failure_count == 0 {
-            break;
-        }
     }
 
     let status = supabase_client.call_envelope_migration_status(None).await?;

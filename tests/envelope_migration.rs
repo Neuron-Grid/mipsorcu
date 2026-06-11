@@ -416,6 +416,63 @@ fn envelope_migration_retry_failed_sets_list_retry_flag() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[test]
+fn envelope_migration_cli_aborts_run_when_apply_returns_40001_conflict()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = legacy_fixture()?;
+    let (supabase_url, receiver, server_thread) =
+        spawn_envelope_migration_apply_conflict_server(&fixture)?;
+
+    let run = run_key_rotation_migrate(&supabase_url, "envelope-apply-conflict")?;
+    let public_key_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let list_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let chain_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    let apply_request = receiver.recv_timeout(Duration::from_secs(2))?;
+    server_thread
+        .join()
+        .map_err(|_| std::io::Error::other("apply conflict server thread panicked"))??;
+
+    // 1340 契約: apply RPC が 40001 を返すとバッチ全体が中断・ロールバックする。
+    // run/apply_prepared_batch は EnvelopeMigrationConflict を返し、runtime が exit(2) する。
+    assert!(!run.output.status.success());
+    assert_eq!(run.output.status.code(), Some(2));
+    assert_eq!(
+        public_key_request.path,
+        "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status"
+    );
+    assert_eq!(
+        list_request.path,
+        "/rest/v1/rpc/rpc_list_envelope_migration_batch"
+    );
+    assert_eq!(chain_request.method, "GET");
+    assert_eq!(
+        apply_request.path,
+        "/rest/v1/rpc/rpc_apply_envelope_migration_batch"
+    );
+
+    // conflict で run が即終端するため、status RPC など後続の集計呼び出しは発行されない。
+    assert!(
+        receiver.recv_timeout(Duration::from_millis(200)).is_err(),
+        "no further RPC should be issued after the apply conflict aborts the run"
+    );
+
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(
+        stderr.contains("envelope migration batch aborted on a retryable conflict"),
+        "stderr should surface the retryable conflict via KeyRotationCliError::EnvelopeMigrationConflict: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    assert!(
+        !stdout.contains("success_count"),
+        "aborted run must not print a completion summary: {stdout}"
+    );
+    assert_no_cli_secret_material(&format!("{stdout}{stderr}"), &fixture)?;
+
+    fs::remove_dir_all(run.temp_dir)?;
+
+    Ok(())
+}
+
 fn legacy_fixture() -> Result<LegacyEnvelopeFixture, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(V01_FIXTURE_JSON)?)
 }
@@ -455,7 +512,7 @@ fn spawn_envelope_migration_apply_server(
                     &mut stream,
                     200,
                     "OK",
-                    r#"[{"success_count":1,"failure_count":0,"remaining_legacy_rows":0,"retry_secret_version_ids":[]}]"#,
+                    r#"[{"success_count":1,"failure_count":0,"remaining_legacy_rows":0}]"#,
                 )?;
             } else if path == "/rest/v1/rpc/rpc_envelope_migration_status" {
                 write_http_response(
@@ -573,14 +630,14 @@ fn spawn_envelope_migration_failure_skip_server(
                         &mut stream,
                         200,
                         "OK",
-                        r#"[{"success_count":0,"failure_count":1,"remaining_legacy_rows":2,"retry_secret_version_ids":[]}]"#,
+                        r#"[{"success_count":0,"failure_count":1,"remaining_legacy_rows":2}]"#,
                     )?;
                 } else {
                     write_http_response(
                         &mut stream,
                         200,
                         "OK",
-                        r#"[{"success_count":1,"failure_count":0,"remaining_legacy_rows":1,"retry_secret_version_ids":[]}]"#,
+                        r#"[{"success_count":1,"failure_count":0,"remaining_legacy_rows":1}]"#,
                     )?;
                 }
             } else if path == "/rest/v1/rpc/rpc_envelope_migration_status" {
@@ -589,6 +646,59 @@ fn spawn_envelope_migration_failure_skip_server(
                     200,
                     "OK",
                     r#"[{"total_legacy_rows":1,"migratable_legacy_rows":0,"blocked_failure_rows":1,"last_run_at":"2026-04-08T12:11:00Z","last_batch_size":1,"last_success_count":1,"last_failure_count":0}]"#,
+                )?;
+            } else {
+                write_http_response(&mut stream, 500, "Unexpected Request", r#""unexpected""#)?;
+            }
+        }
+
+        Ok(())
+    });
+
+    Ok((format!("http://{addr}"), receiver, thread))
+}
+
+fn spawn_envelope_migration_apply_conflict_server(
+    fixture: &LegacyEnvelopeFixture,
+) -> Result<TestServerHandle, Box<dyn std::error::Error>> {
+    let batch_body = legacy_batch_body(fixture)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        // 決定的なプレフィックスのみ応答する: public-key / list / chain / apply(40001)。
+        // apply の 40001 で run が終端するため status RPC は来ない。終端後の
+        // best-effort なインシデント記録要求は listener drop で接続拒否され握り潰される。
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            let path = request.path.clone();
+            sender.send(request).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "captured request receiver was dropped",
+                )
+            })?;
+
+            if path == "/rest/v1/rpc/rpc_get_ledger_signing_public_key_status" {
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "OK",
+                    &ledger_signing_public_key_status_body(),
+                )?;
+            } else if path == "/rest/v1/rpc/rpc_list_envelope_migration_batch" {
+                write_http_response(&mut stream, 200, "OK", &batch_body)?;
+            } else if path.starts_with("/rest/v1/ledger_chain_state") {
+                write_http_response(&mut stream, 200, "OK", &ledger_chain_head_body())?;
+            } else if path == "/rest/v1/rpc/rpc_apply_envelope_migration_batch" {
+                // PostgREST は 1340 の `raise exception ... errcode '40001'` を
+                // message フィールドに marker を載せた error object として返す。
+                write_http_response(
+                    &mut stream,
+                    500,
+                    "Internal Server Error",
+                    r#"{"code":"40001","message":"envelope_migration_nonce_reuse"}"#,
                 )?;
             } else {
                 write_http_response(&mut stream, 500, "Unexpected Request", r#""unexpected""#)?;

@@ -171,3 +171,70 @@ fn migration_fixture_row()
 
     Ok((keyring, row))
 }
+
+fn dummy_supabase_client() -> SupabaseClient {
+    SupabaseClient::new(
+        reqwest::Client::new(),
+        "http://localhost",
+        "service-role-key",
+        "publishable-key",
+    )
+}
+
+fn conflict_error(marker: &str) -> crate::server::supabase::SupabaseRpcError {
+    crate::server::supabase::SupabaseRpcError::NonSuccessStatus {
+        status: 500,
+        body: format!(r#"{{"code":"40001","message":"{marker}"}}"#),
+    }
+}
+
+#[test]
+fn is_envelope_migration_conflict_classifies_all_40001_markers() {
+    let client = dummy_supabase_client();
+    let markers = [
+        "envelope_migration_nonce_reuse",
+        "envelope_migration_row_conflict",
+        "envelope_migration_row_locked",
+        "envelope_migration_failure_row_conflict",
+        "envelope_migration_failure_row_locked",
+    ];
+    for marker in markers {
+        assert!(
+            client.is_envelope_migration_conflict(&conflict_error(marker)),
+            "marker {marker} should classify as a retryable conflict"
+        );
+    }
+}
+
+#[test]
+fn is_envelope_migration_conflict_ignores_unrelated_errors() {
+    let client = dummy_supabase_client();
+
+    let unrelated = crate::server::supabase::SupabaseRpcError::NonSuccessStatus {
+        status: 400,
+        body: r#"{"code":"22023","message":"invalid_rpc_input"}"#.to_owned(),
+    };
+    assert!(!client.is_envelope_migration_conflict(&unrelated));
+    assert!(
+        !client.is_envelope_migration_conflict(
+            &crate::server::supabase::SupabaseRpcError::EmptyResult
+        )
+    );
+    assert!(!client.is_envelope_migration_conflict(
+        &crate::server::supabase::SupabaseRpcError::InvalidResponse("boom".to_owned())
+    ));
+}
+
+#[test]
+fn envelope_migration_conflict_maps_to_dedicated_incident_code() {
+    // retryable conflict は汎用 Supabase 失敗と区別した incident コードを返す。
+    assert_eq!(
+        KeyRotationCliError::EnvelopeMigrationConflict.incident_error_code(),
+        Some("key_rotation_envelope_conflict")
+    );
+    assert_ne!(
+        KeyRotationCliError::EnvelopeMigrationConflict.incident_error_code(),
+        KeyRotationCliError::Supabase(crate::server::supabase::SupabaseRpcError::EmptyResult)
+            .incident_error_code()
+    );
+}

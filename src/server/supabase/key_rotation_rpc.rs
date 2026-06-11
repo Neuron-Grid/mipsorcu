@@ -10,8 +10,19 @@ use crate::types::supabase::{
 };
 use crate::{KeyVersion, SecretId};
 
-use super::response::ensure_success;
+use super::response::{ensure_success, response_contains_marker};
 use super::{SupabaseClient, SupabaseRpcError};
+
+/// 1340 契約で envelope migration の適用 RPC が errcode 40001 でバッチ全体を中断する
+/// 際の marker。いずれも retryable conflict（次回スケジューラ実行で残存 legacy 行を
+/// 再処理）であり、汎用 Supabase 失敗と区別する。
+const ENVELOPE_MIGRATION_CONFLICT_MARKERS: [&str; 5] = [
+    "envelope_migration_nonce_reuse",
+    "envelope_migration_row_conflict",
+    "envelope_migration_row_locked",
+    "envelope_migration_failure_row_conflict",
+    "envelope_migration_failure_row_locked",
+];
 
 impl SupabaseClient {
     pub async fn call_key_rotation_status(
@@ -203,6 +214,18 @@ impl SupabaseClient {
             .ok_or(SupabaseRpcError::EmptyResult)
             .map(EnvelopeMigrationApplyOutcome::from)
     }
+
+    /// envelope migration の適用 RPC エラーが 40001 retryable conflict かを判定する。
+    /// run を終端させつつ汎用 Supabase 失敗と区別するための分類に用いる。
+    pub fn is_envelope_migration_conflict(&self, error: &SupabaseRpcError) -> bool {
+        let SupabaseRpcError::NonSuccessStatus { body, .. } = error else {
+            return false;
+        };
+
+        ENVELOPE_MIGRATION_CONFLICT_MARKERS
+            .iter()
+            .any(|marker| response_contains_marker(body, marker))
+    }
 }
 
 #[derive(Serialize)]
@@ -325,12 +348,13 @@ impl From<EnvelopeMigrationStatusResponse> for EnvelopeMigrationStatus {
     }
 }
 
+// 1340 適用 RPC は `retry_secret_version_ids uuid[]` 列を返すが常に空配列であり、
+// abort 方式（40001）へ移行後は意味を持たない。Rust では読み取らず serde に無視させる。
 #[derive(Debug, Deserialize)]
 struct EnvelopeMigrationApplyResponse {
     success_count: i64,
     failure_count: i64,
     remaining_legacy_rows: i64,
-    retry_secret_version_ids: Option<Vec<String>>,
 }
 
 impl From<EnvelopeMigrationApplyResponse> for EnvelopeMigrationApplyOutcome {
@@ -339,7 +363,6 @@ impl From<EnvelopeMigrationApplyResponse> for EnvelopeMigrationApplyOutcome {
             response.success_count,
             response.failure_count,
             response.remaining_legacy_rows,
-            response.retry_secret_version_ids.unwrap_or_default(),
         )
     }
 }
