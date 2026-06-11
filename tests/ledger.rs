@@ -200,6 +200,25 @@ fn ledger_payload_rejects_unknown_key() {
 }
 
 #[test]
+fn ledger_payload_unknown_key_reports_actual_entry_type() {
+    let entry_type = LedgerEntryType::MonthlyDigest;
+    let result = LedgerPayload::new(
+        entry_type,
+        json!({
+            "unexpected": 1
+        }),
+    );
+
+    assert_eq!(
+        result,
+        Err(LedgerError::UnknownPayloadKey {
+            key: "unexpected".to_owned(),
+            entry_type,
+        })
+    );
+}
+
+#[test]
 fn ledger_payload_rejects_top_level_forbidden_key() {
     let result = LedgerPayload::new(
         LedgerEntryType::SecretCreated,

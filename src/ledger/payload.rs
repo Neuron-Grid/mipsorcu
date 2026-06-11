@@ -120,14 +120,18 @@ fn validate_payload_object(
             });
         }
 
-        validate_payload_field(key, value)?;
+        validate_payload_field(entry_type, key, value)?;
     }
 
     validate_required_payload_keys(entry_type, object)?;
     validate_old_new_key_versions(object)
 }
 
-fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
+fn validate_payload_field(
+    entry_type: LedgerEntryType,
+    key: &str,
+    value: &Value,
+) -> Result<(), LedgerError> {
     match key {
         "version"
         | "key_version"
@@ -181,7 +185,7 @@ fn validate_payload_field(key: &str, value: &Value) -> Result<(), LedgerError> {
         "created_at" | "activated_at" | "retired_at" => validate_source_event_at_value(key, value),
         _ => Err(LedgerError::UnknownPayloadKey {
             key: key.to_owned(),
-            entry_type: LedgerEntryType::SecretCreated,
+            entry_type,
         }),
     }
 }
