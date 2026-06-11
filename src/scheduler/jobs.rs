@@ -725,7 +725,7 @@ async fn fetch_full_ledger_material_rows(
     Ok((chain_head, rows))
 }
 
-fn verify_hash_chain_rows(
+pub(crate) fn verify_hash_chain_rows(
     chain_head: LedgerChainHead,
     rows: Vec<LedgerVerificationMaterialRow>,
 ) -> Result<LedgerVerificationSummary, &'static str> {
@@ -764,35 +764,40 @@ fn restore_entries_checking_forbidden_keys(
     Ok(RestoreResult::Restored(entries))
 }
 
-fn verify_chain_links(
+pub(crate) fn verify_chain_links(
     entries: &[SignedLedgerEntry],
     chain_head: LedgerChainHead,
 ) -> Result<LedgerVerificationSummary, &'static str> {
     let mut previous_sequence_no = LedgerChainHead::genesis().last_sequence_no();
     let mut previous_hash = LedgerChainHead::genesis().last_entry_hash();
+    let mut checked_count: u64 = 0;
     for entry in entries {
         let expected_sequence_no = previous_sequence_no
             .checked_add(1)
             .ok_or("ledger_sequence_overflow")?;
 
         if let Some(error_code) = chain_link_error(entry, expected_sequence_no, previous_hash) {
-            return Ok(ledger_chain_failure_summary(entries, error_code));
+            return Ok(LedgerVerificationSummary::invalid(
+                checked_count,
+                error_code,
+            ));
         }
 
         previous_sequence_no = entry.sequence_no().get();
         previous_hash = entry.entry_hash();
+        checked_count += 1;
     }
 
     if previous_sequence_no != chain_head.last_sequence_no()
         || previous_hash != chain_head.last_entry_hash()
     {
-        return Ok(ledger_chain_failure_summary(
-            entries,
+        return Ok(LedgerVerificationSummary::invalid(
+            checked_count,
             "ledger_chain_head_mismatch",
         ));
     }
 
-    Ok(LedgerVerificationSummary::valid(entry_count(entries.len())))
+    Ok(LedgerVerificationSummary::valid(checked_count))
 }
 
 fn chain_link_error(
@@ -811,14 +816,7 @@ fn chain_link_error(
     }
 }
 
-fn ledger_chain_failure_summary(
-    entries: &[SignedLedgerEntry],
-    error_code: &'static str,
-) -> LedgerVerificationSummary {
-    LedgerVerificationSummary::invalid(entry_count(entries.len()), error_code)
-}
-
-fn verify_signature_rows(
+pub(crate) fn verify_signature_rows(
     rows: Vec<LedgerVerificationMaterialRow>,
 ) -> Result<LedgerVerificationSummary, &'static str> {
     let mut checked_count = 0;
@@ -838,14 +836,14 @@ fn verify_signature_rows(
             .map_err(|_| "ledger_key_restore_failed")?
         else {
             return Ok(LedgerVerificationSummary::invalid(
-                entry_count(rows.len()),
+                checked_count,
                 "ledger_signature_key_missing",
             ));
         };
 
         if entry.verify_signature(&key).is_err() {
             return Ok(LedgerVerificationSummary::invalid(
-                entry_count(rows.len()),
+                checked_count,
                 "ledger_signature_invalid",
             ));
         }

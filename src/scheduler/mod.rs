@@ -49,3 +49,7 @@ pub struct SchedulerConfig {
 #[cfg(test)]
 #[path = "../../tests/unit/server/scheduler/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/server/scheduler/ledger_verification_count_tests.rs"]
+mod ledger_verification_count_tests;
