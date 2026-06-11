@@ -25,6 +25,7 @@ pub use recorder::{
     record_non_auditor_ledger_read, scheduler_incident_type, severity_for_incident,
 };
 pub use sink::{IncidentError, IncidentNotifier, NotificationSink, NotificationSinkError};
+pub use text_guard::FORBIDDEN_NOTIFICATION_TEXT;
 pub use types::{
     IncidentNotificationPayload, IncidentRecordInput, IncidentSeverity, IncidentType,
     NotificationResult,

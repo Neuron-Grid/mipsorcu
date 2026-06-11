@@ -314,12 +314,16 @@ fn map_envelope_migration_error_classifies_retryable_conflict() {
     );
     assert_ne!(
         map_envelope_migration_error(&KeyRotationCliError::EnvelopeMigrationConflict),
-        map_envelope_migration_error(&KeyRotationCliError::Supabase(SupabaseRpcError::EmptyResult))
+        map_envelope_migration_error(&KeyRotationCliError::Supabase(
+            SupabaseRpcError::EmptyResult
+        ))
     );
 
     // 残りのバリアントのマッピングも回帰固定する（網羅性の担保）。
     assert_eq!(
-        map_envelope_migration_error(&KeyRotationCliError::Supabase(SupabaseRpcError::EmptyResult)),
+        map_envelope_migration_error(&KeyRotationCliError::Supabase(
+            SupabaseRpcError::EmptyResult
+        )),
         "envelope_migration_supabase_failed"
     );
     assert_eq!(
