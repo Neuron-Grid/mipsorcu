@@ -7,10 +7,13 @@ use crate::archive::{
     ArchiveBackend, ArchiveObjectKey, ArchiveOpaqueObject, LocalFileArchiveBackend,
 };
 use crate::audit::{AuditTrigger, RequestId};
-use crate::incident::ledger_payload_contains_forbidden_key;
+use crate::incident::{
+    IncidentRecordInput, dedupe_key, ledger_payload_contains_forbidden_key,
+    monthly_digest_incident_type, severity_for_incident,
+};
 use crate::ledger::{
-    DigestHash, LedgerChainHead, LedgerHash, LedgerSequenceNo, MonthlyDigestPeriod,
-    SignedLedgerEntry, SignedMonthlyDigest, build_monthly_digest_canonical_form,
+    LedgerChainHead, LedgerHash, LedgerSequenceNo, MonthlyDigestPeriod, SignedLedgerEntry,
+    SignedMonthlyDigest,
 };
 use crate::server::incident::{
     DetectedIncident, record_and_dispatch_incident, record_siem_long_failure_incident,
@@ -29,6 +32,9 @@ use crate::server::use_cases::generate_monthly_digest::{
     record_monthly_digest_success_audit,
 };
 use crate::server::use_cases::request_timestamping_for_digest::request_timestamping_for_digest_with_incident;
+use crate::server::use_cases::verify_monthly_digest::{
+    VerifyMonthlyDigestError, verify_digest_hash_and_signature_materials,
+};
 use crate::siem::SIEM_MAX_BATCH_SIZE;
 use crate::timestamping::{InMemoryTimestampingService, TimestampingToken, TimestampingTokenHash};
 use crate::types::SourceEventAt;
@@ -136,7 +142,12 @@ async fn run_monthly_archive_scheduler_job(
     started: Instant,
 ) -> Result<JobExecutionSummary, &'static str> {
     let period = previous_month_period_from_now()?;
-    let digest = fetch_required_signed_digest(state.supabase_client.as_ref(), &period).await?;
+    let digest = fetch_required_verified_signed_digest(
+        state,
+        &period,
+        ScheduledJobName::MonthlyArchiveUpload.as_str(),
+    )
+    .await?;
     run_archive_export_job(state, config, digest).await?;
     Ok(monthly_archive_summary(period, started))
 }
@@ -147,7 +158,12 @@ async fn run_monthly_timestamping_scheduler_job(
     started: Instant,
 ) -> Result<JobExecutionSummary, &'static str> {
     let period = previous_month_period_from_now()?;
-    let digest = fetch_required_signed_digest(state.supabase_client.as_ref(), &period).await?;
+    let digest = fetch_required_verified_signed_digest(
+        state,
+        &period,
+        ScheduledJobName::MonthlyTimestampingObtain.as_str(),
+    )
+    .await?;
     let token = run_monthly_timestamping_obtain_job(state, config, digest).await?;
     Ok(monthly_timestamping_summary(period, &token, started))
 }
@@ -305,7 +321,33 @@ async fn fetch_required_signed_digest(
 ) -> Result<SignedMonthlyDigest, &'static str> {
     fetch_signed_digest(client, period)
         .await
-        .map_err(|_| "scheduler_precondition_monthly_digest_missing")
+        .map_err(|error_code| {
+            if error_code == "monthly_digest_not_found" {
+                "scheduler_precondition_monthly_digest_missing"
+            } else {
+                error_code
+            }
+        })
+}
+
+async fn fetch_required_verified_signed_digest(
+    state: &AppState,
+    period: &MonthlyDigestPeriod,
+    detection_source: &'static str,
+) -> Result<SignedMonthlyDigest, &'static str> {
+    match fetch_required_signed_digest(state.supabase_client.as_ref(), period).await {
+        Ok(digest) => Ok(digest),
+        Err(error_code) => {
+            record_monthly_digest_externalization_incident(
+                state,
+                detection_source,
+                period,
+                error_code,
+            )
+            .await;
+            Err(error_code)
+        }
+    }
 }
 
 async fn ensure_monthly_verification_preconditions(state: &AppState) -> Result<(), &'static str> {
@@ -554,6 +596,36 @@ async fn record_ledger_anomaly_incident(
                 "ledger anomaly incident detection failed"
             );
         }
+    }
+}
+
+async fn record_monthly_digest_externalization_incident(
+    state: &AppState,
+    detection_source: &'static str,
+    period: &MonthlyDigestPeriod,
+    error_code: &'static str,
+) {
+    let Some(incident_type) = monthly_digest_incident_type(error_code) else {
+        return;
+    };
+    let input = IncidentRecordInput::new(
+        incident_type,
+        severity_for_incident(incident_type),
+        detection_source,
+        dedupe_key(incident_type, detection_source, Some(period)),
+        error_code,
+    )
+    .with_target_year_month(period.clone());
+
+    if let Err(error) = state.incident_recorder.record(input).await {
+        tracing::error!(
+            period = period.as_str(),
+            detection_source,
+            error_code,
+            incident_type = incident_type.as_str(),
+            error = %error,
+            "monthly digest externalization incident recording failed"
+        );
     }
 }
 
@@ -867,27 +939,18 @@ pub(crate) async fn fetch_signed_digest(
         .await
         .map_err(|_| "monthly_digest_fetch_failed")?
         .ok_or("monthly_digest_not_found")?;
-    signed_digest_from_materials(materials)
+    signed_digest_from_materials(period, materials)
 }
 
 fn signed_digest_from_materials(
+    period: &MonthlyDigestPeriod,
     materials: MonthlyDigestVerificationMaterials,
 ) -> Result<SignedMonthlyDigest, &'static str> {
-    let canonical_bytes = build_monthly_digest_canonical_form(
-        &materials.target_year_month,
-        materials.start_sequence_no,
-        materials.end_sequence_no,
-        materials.start_entry_hash,
-        materials.end_entry_hash,
-        materials.stored_entry_count,
-        &materials.digest_generated_at,
-        materials.signature_key_version,
-    )
-    .map_err(|_| "monthly_digest_canonical_build_failed")?;
-    let digest_hash = DigestHash::from_canonical_bytes(&canonical_bytes);
+    let verified = verify_digest_hash_and_signature_materials(period, &materials)
+        .map_err(monthly_digest_verification_error_code)?;
 
     Ok(SignedMonthlyDigest {
-        period: materials.target_year_month,
+        period: period.clone(),
         start_sequence_no: materials.start_sequence_no,
         end_sequence_no: materials.end_sequence_no,
         start_entry_hash: materials.start_entry_hash,
@@ -895,10 +958,25 @@ fn signed_digest_from_materials(
         entry_count: materials.stored_entry_count,
         digest_generated_at: materials.digest_generated_at,
         signature_key_version: materials.signature_key_version,
-        canonical_bytes,
-        digest_hash,
+        canonical_bytes: verified.canonical_bytes,
+        digest_hash: verified.digest_hash,
         sbc_signature: materials.sbc_signature,
     })
+}
+
+fn monthly_digest_verification_error_code(error: VerifyMonthlyDigestError) -> &'static str {
+    match error {
+        VerifyMonthlyDigestError::UnknownSignatureKey => "monthly_digest_unknown_signature_key",
+        VerifyMonthlyDigestError::DigestHashMismatch => "monthly_digest_hash_mismatch",
+        VerifyMonthlyDigestError::DigestSignatureInvalid => "monthly_digest_signature_invalid",
+        VerifyMonthlyDigestError::FetchFailed { code } => code,
+        VerifyMonthlyDigestError::DigestNotFound
+        | VerifyMonthlyDigestError::ChainContinuityError { .. }
+        | VerifyMonthlyDigestError::EndHashMismatch
+        | VerifyMonthlyDigestError::RangeModifiedAfterDigest => {
+            "monthly_digest_verification_failed"
+        }
+    }
 }
 
 pub(crate) fn previous_month_period(

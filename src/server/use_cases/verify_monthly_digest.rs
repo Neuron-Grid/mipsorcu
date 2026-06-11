@@ -20,9 +20,9 @@ use crate::audit::{
     AuditAction, AuditEventId, AuditRecorder, AuditResult, MonthlyDigestVerifyMetadata, RequestId,
 };
 use crate::ledger::{
-    DigestHash, LedgerChainHead, LedgerError, LedgerHash, LedgerSequenceNo, LedgerVerifyingKey,
-    MonthlyDigestPeriod, SignedLedgerEntry, build_monthly_digest_canonical_form,
-    verify_ledger_chain,
+    DigestCanonicalBytes, DigestHash, LedgerChainHead, LedgerError, LedgerHash, LedgerSequenceNo,
+    LedgerVerifyingKey, MonthlyDigestPeriod, SignedLedgerEntry,
+    build_monthly_digest_canonical_form, verify_ledger_chain,
 };
 use crate::server::audit_reporter::{OperationalAuditEvent, build_operational_audit_event};
 use crate::server::supabase::{
@@ -103,6 +103,12 @@ pub struct VerifiedMonthlyDigestInfo {
     pub start_sequence_no: LedgerSequenceNo,
     pub end_sequence_no: LedgerSequenceNo,
     pub entry_count: u64,
+}
+
+/// 外部化前にも再利用する digest hash / signature 検証済み素材。
+pub(crate) struct VerifiedMonthlyDigestSignature {
+    pub(crate) canonical_bytes: DigestCanonicalBytes,
+    pub(crate) digest_hash: DigestHash,
 }
 
 /// 月次 digest を検証する。
@@ -341,24 +347,16 @@ fn verify_chain_continuity(
     Ok(())
 }
 
-/// 手順7-9: 公開鍵の存在確認、canonical bytes の hash 再計算、Ed25519 署名検証。
-fn verify_digest_hash_and_signature(
-    input: &VerifyMonthlyDigestInput,
+/// 外部化前に再利用する、月次 digest の hash / Ed25519 署名検証。
+///
+/// 副作用を持たず、検証済み canonical bytes と digest hash だけを返す。
+pub(crate) fn verify_digest_hash_and_signature_materials(
+    period: &MonthlyDigestPeriod,
     materials: &MonthlyDigestVerificationMaterials,
-) -> Result<(), VerifyMonthlyDigestError> {
-    let period = &input.period;
-
+) -> Result<VerifiedMonthlyDigestSignature, VerifyMonthlyDigestError> {
     let public_key = match materials.public_key {
         Some(ref key) => key,
-        None => {
-            tracing::warn!(
-                request_id = %input.request_id.as_canonical_string(),
-                period = period.as_str(),
-                error_code = "monthly_digest_unknown_signature_key",
-                "no public key registered for digest signature_key_version"
-            );
-            return Err(VerifyMonthlyDigestError::UnknownSignatureKey);
-        }
+        None => return Err(VerifyMonthlyDigestError::UnknownSignatureKey),
     };
 
     let canonical_bytes = build_monthly_digest_canonical_form(
@@ -371,46 +369,87 @@ fn verify_digest_hash_and_signature(
         &materials.digest_generated_at,
         materials.signature_key_version,
     )
-    .map_err(|error| {
-        tracing::error!(
-            request_id = %input.request_id.as_canonical_string(),
-            period = period.as_str(),
-            error = %error,
-            error_code = "monthly_digest_canonical_rebuild_failed",
-            "failed to rebuild digest canonical form"
-        );
-        VerifyMonthlyDigestError::FetchFailed {
-            code: "monthly_digest_canonical_rebuild_failed",
-        }
+    .map_err(|_| VerifyMonthlyDigestError::FetchFailed {
+        code: "monthly_digest_canonical_rebuild_failed",
     })?;
 
-    let computed_hash = DigestHash::from_canonical_bytes(&canonical_bytes).to_hex();
-    if computed_hash != materials.stored_digest_hash {
-        tracing::warn!(
-            request_id = %input.request_id.as_canonical_string(),
-            period = period.as_str(),
-            error_code = "monthly_digest_hash_mismatch",
-            "recomputed digest hash does not match stored hash"
-        );
+    let digest_hash = DigestHash::from_canonical_bytes(&canonical_bytes);
+    if digest_hash.to_hex() != materials.stored_digest_hash {
         return Err(VerifyMonthlyDigestError::DigestHashMismatch);
     }
 
     // sbc_signature は monthly_digest payload に保存された digest 専用署名であり、
     // ledger_entries.signature（ledger entry 自体の署名）ではない。
-    if let Err(error) =
-        public_key.verify_digest_bytes(canonical_bytes.as_bytes(), &materials.sbc_signature)
+    if public_key
+        .verify_digest_bytes(canonical_bytes.as_bytes(), &materials.sbc_signature)
+        .is_err()
     {
-        tracing::warn!(
-            request_id = %input.request_id.as_canonical_string(),
-            period = period.as_str(),
-            error = %error,
-            error_code = "monthly_digest_signature_invalid",
-            "digest Ed25519 signature verification failed"
-        );
         return Err(VerifyMonthlyDigestError::DigestSignatureInvalid);
     }
 
-    Ok(())
+    Ok(VerifiedMonthlyDigestSignature {
+        canonical_bytes,
+        digest_hash,
+    })
+}
+
+/// 手順7-9: 公開鍵の存在確認、canonical bytes の hash 再計算、Ed25519 署名検証。
+fn verify_digest_hash_and_signature(
+    input: &VerifyMonthlyDigestInput,
+    materials: &MonthlyDigestVerificationMaterials,
+) -> Result<(), VerifyMonthlyDigestError> {
+    match verify_digest_hash_and_signature_materials(&input.period, materials) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            log_digest_hash_and_signature_failure(input, &error);
+            Err(error)
+        }
+    }
+}
+
+fn log_digest_hash_and_signature_failure(
+    input: &VerifyMonthlyDigestInput,
+    error: &VerifyMonthlyDigestError,
+) {
+    let period = &input.period;
+
+    match error {
+        VerifyMonthlyDigestError::UnknownSignatureKey => {
+            tracing::warn!(
+                request_id = %input.request_id.as_canonical_string(),
+                period = period.as_str(),
+                error_code = "monthly_digest_unknown_signature_key",
+                "no public key registered for digest signature_key_version"
+            );
+        }
+        VerifyMonthlyDigestError::FetchFailed {
+            code: "monthly_digest_canonical_rebuild_failed",
+        } => {
+            tracing::error!(
+                request_id = %input.request_id.as_canonical_string(),
+                period = period.as_str(),
+                error_code = "monthly_digest_canonical_rebuild_failed",
+                "failed to rebuild digest canonical form"
+            );
+        }
+        VerifyMonthlyDigestError::DigestHashMismatch => {
+            tracing::warn!(
+                request_id = %input.request_id.as_canonical_string(),
+                period = period.as_str(),
+                error_code = "monthly_digest_hash_mismatch",
+                "recomputed digest hash does not match stored hash"
+            );
+        }
+        VerifyMonthlyDigestError::DigestSignatureInvalid => {
+            tracing::warn!(
+                request_id = %input.request_id.as_canonical_string(),
+                period = period.as_str(),
+                error_code = "monthly_digest_signature_invalid",
+                "digest Ed25519 signature verification failed"
+            );
+        }
+        _ => {}
+    }
 }
 
 /// 手順10: 現在の range と digest の range を比較し、生成後の変更を検知する。

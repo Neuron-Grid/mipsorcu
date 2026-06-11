@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use time::{Date, Time};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::jobs::{
-    map_envelope_migration_error, persist_timestamping_token_to_archive,
-    run_monthly_timestamping_obtain_job,
+    fetch_signed_digest, map_envelope_migration_error, persist_timestamping_token_to_archive,
+    run_job_body, run_monthly_timestamping_obtain_job,
 };
 use super::*;
 use crate::archive::{AnyArchiveBackend, LocalFileArchiveBackend};
@@ -137,6 +137,128 @@ fn test_signed_monthly_digest() -> SignedMonthlyDigest {
         digest_hash,
         sbc_signature,
     }
+}
+
+struct DigestFetchFixture {
+    period: MonthlyDigestPeriod,
+    start_hash: LedgerHash,
+    end_hash: LedgerHash,
+    generated_at: SourceEventAt,
+    key_version: LedgerSignatureKeyVersion,
+    start_sequence_no: LedgerSequenceNo,
+    end_sequence_no: LedgerSequenceNo,
+    entry_count: u64,
+    digest_hash_hex: String,
+    sbc_signature_hex: String,
+    public_key_hex: String,
+}
+
+fn digest_fetch_fixture() -> DigestFetchFixture {
+    let period = test_period();
+    let start_hash = LedgerHash::from_bytes(&[0xaa; 32]).expect("valid hash");
+    let end_hash = LedgerHash::from_bytes(&[0xbb; 32]).expect("valid hash");
+    let generated_at = SourceEventAt::parse("2026-06-01T00:00:00Z").expect("valid timestamp");
+    let key_version = LedgerSignatureKeyVersion::new(1).expect("valid key version");
+    let start_sequence_no = LedgerSequenceNo::new(1).expect("valid seq");
+    let end_sequence_no = LedgerSequenceNo::new(42).expect("valid seq");
+    let entry_count = 42;
+    let signing_key = LedgerSigningKey::from_secret_key_bytes(
+        key_version,
+        &[9u8; LEDGER_ED25519_SECRET_KEY_LENGTH],
+    )
+    .expect("valid signing key");
+
+    let canonical_bytes = build_monthly_digest_canonical_form(
+        &period,
+        start_sequence_no,
+        end_sequence_no,
+        start_hash,
+        end_hash,
+        entry_count,
+        &generated_at,
+        key_version,
+    )
+    .expect("canonical form build must succeed");
+    let digest_hash_hex = DigestHash::from_canonical_bytes(&canonical_bytes).to_hex();
+    let sbc_signature = signing_key
+        .sign_raw_bytes(key_version, canonical_bytes.as_bytes())
+        .expect("digest signing must succeed");
+    let public_key_hex = format!(
+        "\\x{}",
+        hex::encode(signing_key.verification_key().as_bytes())
+    );
+
+    DigestFetchFixture {
+        period,
+        start_hash,
+        end_hash,
+        generated_at,
+        key_version,
+        start_sequence_no,
+        end_sequence_no,
+        entry_count,
+        digest_hash_hex,
+        sbc_signature_hex: sbc_signature.to_lower_hex(),
+        public_key_hex,
+    }
+}
+
+fn digest_fetch_body(fixture: &DigestFetchFixture) -> Value {
+    json!([{
+        "start_sequence_no": fixture.start_sequence_no.get(),
+        "end_sequence_no": fixture.end_sequence_no.get(),
+        "stored_entry_count": fixture.entry_count,
+        "stored_digest_hash": fixture.digest_hash_hex,
+        "target_year_month": fixture.period.as_str(),
+        "digest_generated_at": fixture.generated_at.as_str(),
+        "signature": format!("\\x{}", "11".repeat(64)),
+        "sbc_signature": fixture.sbc_signature_hex,
+        "signature_key_version": fixture.key_version.get(),
+        "public_key": fixture.public_key_hex,
+        "start_entry_hash": fixture.start_hash.to_bytea_hex(),
+        "end_entry_hash": fixture.end_hash.to_bytea_hex()
+    }])
+}
+
+fn digest_fetch_body_with_hash(fixture: &DigestFetchFixture, stored_digest_hash: &str) -> Value {
+    let mut body = digest_fetch_body(fixture);
+    body[0]["stored_digest_hash"] = Value::String(stored_digest_hash.to_owned());
+    body
+}
+
+fn digest_fetch_body_with_signature(fixture: &DigestFetchFixture, sbc_signature: &str) -> Value {
+    let mut body = digest_fetch_body(fixture);
+    body[0]["sbc_signature"] = Value::String(sbc_signature.to_owned());
+    body
+}
+
+fn digest_fetch_body_without_public_key(fixture: &DigestFetchFixture) -> Value {
+    let mut body = digest_fetch_body(fixture);
+    body[0]["public_key"] = Value::Null;
+    body
+}
+
+fn corrupt_signature_hex(signature_hex: &str) -> String {
+    let mut corrupted = signature_hex.to_owned();
+    let replacement = if signature_hex.starts_with("00") {
+        "01"
+    } else {
+        "00"
+    };
+    corrupted.replace_range(0..2, replacement);
+    corrupted
+}
+
+async fn mock_digest_fetch(body: Value) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/rest/v1/rpc/rpc_fetch_monthly_digest_for_verification",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    server
 }
 
 fn test_app_state(
@@ -378,6 +500,151 @@ fn scheduled_job_specs_use_task_12_cron_and_timeouts() {
             ("siem_buffer_flush", "0 */5 * * * *", 2 * 60),
         ]
     );
+}
+
+#[tokio::test]
+async fn fetch_signed_digest_accepts_verified_materials() {
+    let fixture = digest_fetch_fixture();
+    let server = mock_digest_fetch(digest_fetch_body(&fixture)).await;
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        server.uri(),
+        "service-role-key",
+        "publishable-key",
+    );
+
+    let digest = fetch_signed_digest(&client, &fixture.period)
+        .await
+        .expect("valid digest materials should be accepted");
+
+    assert_eq!(digest.period.as_str(), fixture.period.as_str());
+    assert_eq!(digest.digest_hash.to_hex(), fixture.digest_hash_hex);
+    assert_eq!(
+        digest.sbc_signature.to_lower_hex(),
+        fixture.sbc_signature_hex
+    );
+}
+
+#[tokio::test]
+async fn fetch_signed_digest_rejects_stored_hash_mismatch() {
+    let fixture = digest_fetch_fixture();
+    let server = mock_digest_fetch(digest_fetch_body_with_hash(&fixture, &"00".repeat(32))).await;
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        server.uri(),
+        "service-role-key",
+        "publishable-key",
+    );
+
+    let result = fetch_signed_digest(&client, &fixture.period).await;
+
+    assert!(matches!(result, Err("monthly_digest_hash_mismatch")));
+}
+
+#[tokio::test]
+async fn fetch_signed_digest_rejects_invalid_sbc_signature() {
+    let fixture = digest_fetch_fixture();
+    let corrupted_signature = corrupt_signature_hex(&fixture.sbc_signature_hex);
+    let server = mock_digest_fetch(digest_fetch_body_with_signature(
+        &fixture,
+        &corrupted_signature,
+    ))
+    .await;
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        server.uri(),
+        "service-role-key",
+        "publishable-key",
+    );
+
+    let result = fetch_signed_digest(&client, &fixture.period).await;
+
+    assert!(matches!(result, Err("monthly_digest_signature_invalid")));
+}
+
+#[tokio::test]
+async fn fetch_signed_digest_rejects_missing_public_key() {
+    let fixture = digest_fetch_fixture();
+    let server = mock_digest_fetch(digest_fetch_body_without_public_key(&fixture)).await;
+    let client = SupabaseClient::new(
+        reqwest::Client::new(),
+        server.uri(),
+        "service-role-key",
+        "publishable-key",
+    );
+
+    let result = fetch_signed_digest(&client, &fixture.period).await;
+
+    assert!(matches!(
+        result,
+        Err("monthly_digest_unknown_signature_key")
+    ));
+}
+
+#[tokio::test]
+async fn fetch_signed_digest_invalid_hash_prevents_timestamping_externalization()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = digest_fetch_fixture();
+    let server = mock_digest_fetch(digest_fetch_body_with_hash(&fixture, &"00".repeat(32))).await;
+    let state = test_app_state(
+        &server.uri(),
+        unique_temp_path("invalid-digest-timestamp-audit"),
+    )?;
+    let local_archive_dir = unique_temp_path("invalid-digest-token-archive");
+    let config = test_scheduler_config(
+        local_archive_dir.clone(),
+        None,
+        Some(Arc::new(AnyTimestampingProvider::LocalDummy(
+            InMemoryTimestampingService::new(),
+        ))),
+    );
+    let spec = SCHEDULED_JOB_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.name == ScheduledJobName::MonthlyTimestampingObtain)
+        .expect("timestamping spec exists");
+
+    let result = run_job_body(&state, &config, spec).await;
+
+    assert!(matches!(result, Err("monthly_digest_hash_mismatch")));
+    assert!(
+        !local_archive_dir.try_exists()?,
+        "timestamping token archive must not be created for unverified digest"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fetch_signed_digest_invalid_hash_prevents_archive_externalization()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = digest_fetch_fixture();
+    let server = mock_digest_fetch(digest_fetch_body_with_hash(&fixture, &"00".repeat(32))).await;
+    let state = test_app_state(
+        &server.uri(),
+        unique_temp_path("invalid-digest-archive-audit"),
+    )?;
+    let archive_dir = unique_temp_path("invalid-digest-archive-backend");
+    let archive_backend =
+        AnyArchiveBackend::LocalFile(LocalFileArchiveBackend::new(archive_dir.clone()));
+    let config = test_scheduler_config(
+        unique_temp_path("invalid-digest-archive-local-fallback"),
+        Some(Arc::new(archive_backend)),
+        None,
+    );
+    let spec = SCHEDULED_JOB_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.name == ScheduledJobName::MonthlyArchiveUpload)
+        .expect("archive spec exists");
+
+    let result = run_job_body(&state, &config, spec).await;
+
+    assert!(matches!(result, Err("monthly_digest_hash_mismatch")));
+    assert!(
+        !archive_dir.try_exists()?,
+        "archive backend must not be created for unverified digest"
+    );
+    Ok(())
 }
 
 #[test]
