@@ -143,7 +143,12 @@ impl TryFrom<DigestForVerificationResponse> for MonthlyDigestVerificationMateria
             )
         })?;
 
-        let signature_key_version = LedgerSignatureKeyVersion::new(r.signature_key_version as u32)
+        let signature_key_version_raw = u32::try_from(r.signature_key_version).map_err(|_| {
+            SupabaseRpcError::InvalidResponse(
+                "digest verification RPC returned invalid signature_key_version".to_owned(),
+            )
+        })?;
+        let signature_key_version = LedgerSignatureKeyVersion::new(signature_key_version_raw)
             .map_err(|_| {
                 SupabaseRpcError::InvalidResponse(
                     "digest verification RPC returned invalid signature_key_version".to_owned(),
@@ -207,6 +212,45 @@ fn decode_public_key_bytes(
             "digest verification RPC returned invalid Ed25519 public_key".to_owned(),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_response(signature_key_version: i32) -> DigestForVerificationResponse {
+        let hash = format!("\\x{}", "00".repeat(32));
+        let signature = format!("\\x{}", "00".repeat(64));
+
+        DigestForVerificationResponse {
+            start_sequence_no: 1,
+            end_sequence_no: 1,
+            stored_entry_count: 1,
+            stored_digest_hash: "00".repeat(32),
+            target_year_month: "2026-04".to_owned(),
+            digest_generated_at: "2026-04-08T12:00:00Z".to_owned(),
+            signature,
+            sbc_signature: "00".repeat(64),
+            signature_key_version,
+            public_key: None,
+            start_entry_hash: hash.clone(),
+            end_entry_hash: hash,
+        }
+    }
+
+    #[test]
+    fn response_rejects_negative_signature_key_version() {
+        let result = MonthlyDigestVerificationMaterials::try_from(valid_response(-1));
+
+        assert!(
+            matches!(
+                result,
+                Err(SupabaseRpcError::InvalidResponse(ref message))
+                    if message.contains("invalid signature_key_version")
+            ),
+            "expected invalid signature_key_version response, got {result:?}"
+        );
+    }
 }
 
 // ---- Error classification ----

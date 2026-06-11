@@ -218,6 +218,12 @@ select is(
     'rpc_audit_ui_ledger_entries entry_type filter returns matching type'
 );
 
+select throws_like(
+    $$select * from public.rpc_audit_ui_ledger_entries(100, 0, null, null, 'not_a_real_type', null)$$,
+    '%invalid_rpc_input%',
+    'rpc_audit_ui_ledger_entries rejects invalid p_entry_type'
+);
+
 -- ページネーション + 降順 (sequence_no desc): 先頭ページは seq 3,2
 select is(
     (select array_agg(sequence_no order by sequence_no desc)

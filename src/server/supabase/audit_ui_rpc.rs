@@ -2,10 +2,10 @@
 //!
 //! The RPCs exposed here return non-secret metadata and verification material only.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::ledger::LedgerSequenceNo;
+use crate::ledger::{LedgerEntryType, LedgerSequenceNo};
 
 use super::response::ensure_success;
 use super::{SupabaseClient, SupabaseRpcError};
@@ -197,8 +197,22 @@ pub struct AuditUiLedgerEntriesParams {
     pub p_offset: u32,
     pub p_start_sequence_no: Option<i64>,
     pub p_end_sequence_no: Option<i64>,
-    pub p_entry_type: Option<String>,
+    #[serde(serialize_with = "serialize_optional_ledger_entry_type")]
+    pub p_entry_type: Option<LedgerEntryType>,
     pub p_result: Option<String>,
+}
+
+fn serialize_optional_ledger_entry_type<S>(
+    value: &Option<LedgerEntryType>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(entry_type) => serializer.serialize_some(entry_type.as_str()),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

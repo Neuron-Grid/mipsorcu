@@ -29,6 +29,19 @@ fn audit_result_parse_is_strict_inverse_of_as_str() {
 }
 
 #[test]
+fn ledger_entry_type_parse_is_strict_inverse_of_as_str() {
+    for value in [
+        "secret_created",
+        "secret_decrypted",
+        "monthly_digest",
+        "incident_detected",
+    ] {
+        let parsed = LedgerEntryType::parse(value).expect("known entry_type parses");
+        assert_eq!(parsed.as_str(), value);
+    }
+}
+
+#[test]
 fn parse_optional_audit_action_none_is_none() {
     assert_eq!(parse_optional_audit_action(None).expect("ok"), None);
 }
@@ -74,6 +87,27 @@ fn parse_optional_result_rejects_unknown_value() {
     ));
 }
 
+#[test]
+fn parse_optional_ledger_entry_type_none_is_none() {
+    assert_eq!(parse_optional_ledger_entry_type(None).expect("ok"), None);
+}
+
+#[test]
+fn parse_optional_ledger_entry_type_parses_known_value() {
+    assert_eq!(
+        parse_optional_ledger_entry_type(Some("secret_created")).expect("ok"),
+        Some(LedgerEntryType::SecretCreated)
+    );
+}
+
+#[test]
+fn parse_optional_ledger_entry_type_rejects_unknown_value() {
+    assert!(matches!(
+        parse_optional_ledger_entry_type(Some("not_a_real_type")),
+        Err(ApiError::BadRequest(_))
+    ));
+}
+
 /// 送信される wire 値（`parse(...).as_str()`）が入力と一致することを、handler が
 /// RPC へ渡すマッピングと同じ式で確認する。
 #[test]
@@ -83,4 +117,28 @@ fn normalized_wire_value_matches_input_for_accepted_action() {
         action.map(|action| action.as_str().to_owned()),
         Some("monthly_digest_generate".to_owned())
     );
+}
+
+#[test]
+fn normalized_wire_value_matches_input_for_accepted_ledger_entry_type() {
+    let entry_type = parse_optional_ledger_entry_type(Some("monthly_digest")).expect("ok");
+    assert_eq!(
+        entry_type.map(|entry_type| entry_type.as_str().to_owned()),
+        Some("monthly_digest".to_owned())
+    );
+}
+
+#[test]
+fn audit_ui_ledger_entries_params_serializes_entry_type_as_canonical_string() {
+    let params = AuditUiLedgerEntriesParams {
+        p_limit: 100,
+        p_offset: 0,
+        p_start_sequence_no: None,
+        p_end_sequence_no: None,
+        p_entry_type: Some(LedgerEntryType::SecretCreated),
+        p_result: None,
+    };
+
+    let value = serde_json::to_value(&params).expect("params should serialize");
+    assert_eq!(value["p_entry_type"], serde_json::json!("secret_created"));
 }

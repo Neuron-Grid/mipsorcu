@@ -9,8 +9,8 @@ use crate::audit::{
 use crate::authorization::authorize_audit_ui_read;
 use crate::incident::ledger_payload_contains_forbidden_key;
 use crate::ledger::{
-    LedgerChainHead, LedgerError, LedgerSequenceNo, LedgerVerifyingKey, MonthlyDigestPeriod,
-    SignedLedgerEntry, verify_ledger_chain,
+    LedgerChainHead, LedgerEntryType, LedgerError, LedgerSequenceNo, LedgerVerifyingKey,
+    MonthlyDigestPeriod, SignedLedgerEntry, verify_ledger_chain,
 };
 use crate::server::audit_reporter::{OperationalAuditEvent, build_operational_audit_event};
 use crate::server::errors::{ApiError, RequestAwareApiError, ServerResult};
@@ -268,6 +268,8 @@ async fn list_ledger_entries(
     }
     let result = parse_optional_result(query.result.as_deref())
         .map_err(|error| error.with_request_id(&request_id))?;
+    let entry_type = parse_optional_ledger_entry_type(query.entry_type.as_deref())
+        .map_err(|error| error.with_request_id(&request_id))?;
 
     let params = AuditUiLedgerEntriesParams {
         p_limit: page.rpc_limit(),
@@ -282,7 +284,7 @@ async fn list_ledger_entries(
             .transpose()
             .map_err(|_| ApiError::BadRequest("invalid sequence range".to_owned()))
             .map_err(|error| error.with_request_id(&request_id))?,
-        p_entry_type: query.entry_type,
+        p_entry_type: entry_type,
         p_result: result.map(|result| result.as_str().to_owned()),
     };
     let mut rows = match state
@@ -867,6 +869,17 @@ fn parse_optional_result(value: Option<&str>) -> Result<Option<AuditResult>, Api
     value
         .map(|value| {
             AuditResult::parse(value).map_err(|_| ApiError::BadRequest("invalid result".to_owned()))
+        })
+        .transpose()
+}
+
+fn parse_optional_ledger_entry_type(
+    value: Option<&str>,
+) -> Result<Option<LedgerEntryType>, ApiError> {
+    value
+        .map(|value| {
+            LedgerEntryType::parse(value)
+                .map_err(|_| ApiError::BadRequest("invalid entry_type".to_owned()))
         })
         .transpose()
 }

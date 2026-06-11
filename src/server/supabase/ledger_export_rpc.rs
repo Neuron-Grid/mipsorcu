@@ -20,8 +20,10 @@ impl SupabaseClient {
         start_sequence_no: LedgerSequenceNo,
         end_sequence_no: LedgerSequenceNo,
     ) -> Result<Vec<LedgerVerificationMaterialRow>, SupabaseRpcError> {
-        let params =
-            ExportLedgerVerificationMaterialsParams::from_range(start_sequence_no, end_sequence_no);
+        let params = ExportLedgerVerificationMaterialsParams::from_range(
+            start_sequence_no,
+            end_sequence_no,
+        )?;
         let response = self
             .post_rpc("rpc_export_ledger_verification_materials", &params)
             .await?;
@@ -44,12 +46,23 @@ struct ExportLedgerVerificationMaterialsParams {
 }
 
 impl ExportLedgerVerificationMaterialsParams {
-    fn from_range(start_sequence_no: LedgerSequenceNo, end_sequence_no: LedgerSequenceNo) -> Self {
-        Self {
-            p_start_sequence_no: start_sequence_no.get() as i64,
-            p_end_sequence_no: end_sequence_no.get() as i64,
-        }
+    fn from_range(
+        start_sequence_no: LedgerSequenceNo,
+        end_sequence_no: LedgerSequenceNo,
+    ) -> Result<Self, SupabaseRpcError> {
+        Ok(Self {
+            p_start_sequence_no: sequence_to_i64(start_sequence_no, "start_sequence_no")?,
+            p_end_sequence_no: sequence_to_i64(end_sequence_no, "end_sequence_no")?,
+        })
     }
+}
+
+fn sequence_to_i64(value: LedgerSequenceNo, field: &'static str) -> Result<i64, SupabaseRpcError> {
+    value.as_i64().map_err(|_| {
+        SupabaseRpcError::InvalidResponse(format!(
+            "export ledger verification materials request {field} is outside i64 range"
+        ))
+    })
 }
 
 // DTO
@@ -118,7 +131,11 @@ impl LedgerVerificationMaterialRow {
         }
 
         // key_version must match.
-        let key_version = LedgerSignatureKeyVersion::new(pk_key_version as u32)?;
+        let key_version_raw =
+            u32::try_from(pk_key_version).map_err(|_| LedgerError::InvalidPositiveInteger {
+                field: "signature_key_version",
+            })?;
+        let key_version = LedgerSignatureKeyVersion::new(key_version_raw)?;
         if key_version != self.signature_key_version {
             return Err(LedgerError::SignatureKeyVersionMismatch {
                 expected: self.signature_key_version.get(),
@@ -330,9 +347,10 @@ impl TryFrom<LedgerVerificationMaterialResponse> for LedgerVerificationMaterialR
 
         let signature_key_version_raw =
             require(response.signature_key_version, "signature_key_version")?;
-        let signature_key_version =
-            LedgerSignatureKeyVersion::new(signature_key_version_raw as u32)
-                .map_err(|_| invalid_field_error("signature_key_version"))?;
+        let signature_key_version_raw = u32::try_from(signature_key_version_raw)
+            .map_err(|_| invalid_field_error("signature_key_version"))?;
+        let signature_key_version = LedgerSignatureKeyVersion::new(signature_key_version_raw)
+            .map_err(|_| invalid_field_error("signature_key_version"))?;
 
         let entry_type = require(response.entry_type, "entry_type")?;
         let source_event_at = require(response.source_event_at, "source_event_at")?;
@@ -379,6 +397,67 @@ impl TryFrom<LedgerVerificationMaterialResponse> for LedgerVerificationMaterialR
 fn decode_bytea_hex(value: &str) -> Result<Vec<u8>, ()> {
     let hex_value = value.strip_prefix("\\x").ok_or(())?;
     hex::decode(hex_value).map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn valid_response(signature_key_version: i32) -> LedgerVerificationMaterialResponse {
+        let hash = format!("\\x{}", "00".repeat(32));
+        let signature = format!("\\x{}", "00".repeat(64));
+
+        LedgerVerificationMaterialResponse {
+            ledger_entry_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            sequence_no: 1,
+            entry_hash: Some(hash.clone()),
+            previous_entry_hash: Some(hash),
+            signature: Some(signature),
+            signature_key_version: Some(signature_key_version),
+            entry_type: Some("secret_created".to_owned()),
+            source_event_at: Some("2026-04-08T12:00:00Z".to_owned()),
+            request_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned()),
+            source_event_id: None,
+            target_secret_id: None,
+            target_secret_version_id: None,
+            actor_user_id: None,
+            actor_device_id: None,
+            result: Some("success".to_owned()),
+            error_code: None,
+            payload: Some(json!({
+                "algorithm": "xchacha20-poly1305",
+                "classification": "confidential",
+                "key_version": 1,
+                "version": 1
+            })),
+            canonicalization_version: Some(1),
+            hash_algorithm: Some("sha3-256".to_owned()),
+            signature_algorithm: Some("ed25519".to_owned()),
+            pk_key_version: None,
+            pk_public_key: None,
+            pk_algorithm: None,
+            pk_status: None,
+            pk_created_at: None,
+            pk_activated_at: None,
+            pk_retired_at: None,
+        }
+    }
+
+    #[test]
+    fn response_rejects_negative_signature_key_version() {
+        let result = LedgerVerificationMaterialRow::try_from(valid_response(-1));
+
+        assert!(
+            matches!(
+                result,
+                Err(SupabaseRpcError::InvalidResponse(ref message))
+                    if message.contains("invalid signature_key_version")
+            ),
+            "expected invalid signature_key_version response, got {result:?}"
+        );
+    }
 }
 
 // Error classification

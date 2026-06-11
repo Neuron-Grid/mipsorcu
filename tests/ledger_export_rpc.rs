@@ -232,6 +232,24 @@ fn detect_key_version_mismatch() {
 }
 
 #[test]
+fn reject_negative_public_key_version_before_mismatch() {
+    let (signed, public_key_bytes) = test_signed_ledger_entry();
+    let mut row = make_dto_row(&signed, &public_key_bytes, Some("active"));
+    row.pk_key_version = Some(-1);
+
+    let result = row.try_restore_verifying_key();
+    assert!(
+        matches!(
+            result,
+            Err(LedgerError::InvalidPositiveInteger {
+                field: "signature_key_version"
+            })
+        ),
+        "expected InvalidPositiveInteger for negative pk_key_version, got {result:?}"
+    );
+}
+
+#[test]
 fn detect_invalid_bytea_public_key_encoding() {
     let (signed, _public_key_bytes) = test_signed_ledger_entry();
     let row = LedgerVerificationMaterialRow {
