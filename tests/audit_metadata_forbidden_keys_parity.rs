@@ -1,14 +1,31 @@
 use std::collections::{BTreeSet, HashMap};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use mipsorcu::{
-    AuditAction, AuditMetadata, AuditResult, FORBIDDEN_AUDIT_METADATA_KEYS,
-    FORBIDDEN_LEDGER_PAYLOAD_KEYS, INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST,
-    INCIDENT_SEVERITY_ALLOWLIST, INCIDENT_TYPE_ALLOWLIST,
+    AuditAction, AuditResult, FORBIDDEN_AUDIT_METADATA_KEYS, FORBIDDEN_LEDGER_PAYLOAD_KEYS,
+    INCIDENT_NOTIFICATION_CATEGORY_ALLOWLIST, INCIDENT_SEVERITY_ALLOWLIST, INCIDENT_TYPE_ALLOWLIST,
     INTEGRITY_CHECK_VIOLATION_SUMMARY_ALLOWLIST, NOTIFICATION_RESULT_ALLOWLIST,
     NOTIFIER_KIND_ALLOWLIST, required_metadata_keys,
 };
+
+#[path = "support/sql_cutoff_parity/audit_metadata_expectations.rs"]
+mod audit_metadata_expectations;
+#[path = "support/sql_cutoff_parity/audit_metadata_runtime_tests.rs"]
+mod audit_metadata_runtime_tests;
+#[path = "support/sql_cutoff_parity/hard_gate_contract_tests.rs"]
+mod hard_gate_contract_tests;
+#[path = "support/sql_cutoff_parity/mod.rs"]
+pub mod sql_cutoff_parity;
+
+use audit_metadata_expectations::{all_actions, rust_allowlist_for_action_result};
+use sql_cutoff_parity::definitions::latest_definition;
+use sql_cutoff_parity::fixture::ThrowawayMigrationRoot;
+use sql_cutoff_parity::markers::{
+    LEGACY_MARKER_FAMILIES, MarkerFamily, has_standalone_marker, latest_effective_occurrence,
+    marker_occurrences_in_migration,
+};
+use sql_cutoff_parity::migrations::{MigrationFile, read_migrations};
+use sql_cutoff_parity::resolver::resolve_from_environment;
 
 // このガードは固定パスを参照しない。SQL の「実効最新定義」を、マーカー
 // （-- *_ALLOWLIST_START/END）を含む辞書順最後の migration として自動発見する
@@ -43,6 +60,7 @@ const REQUIRED_KEY_END_MARKER: &str = "-- REQUIRED_KEY_END";
 // SQL 側ガード関数名（実効最新定義の自動発見・メタテスト用）。
 const UNKNOWN_KEY_FN: &str = "audit_metadata_has_unknown_key_for_action";
 const FORBIDDEN_KEY_FN: &str = "audit_metadata_has_forbidden_key";
+const LEDGER_FORBIDDEN_KEY_FN: &str = "ledger_payload_has_forbidden_key";
 const INVALID_VALUE_FN: &str = "audit_metadata_has_invalid_value_for_action";
 const INCIDENT_TYPE_FN: &str = "incident_type_allowed";
 const SEVERITY_FN: &str = "incident_severity_allowed";
@@ -51,6 +69,7 @@ const REQUIRED_KEY_FN: &str = "audit_metadata_has_missing_required_key_for_actio
 
 #[test]
 fn forbidden_keys_parity_between_rust_and_sql() {
+    let context = candidate_assertion_context();
     let migration = read_latest_migration_containing(FORBIDDEN_START_MARKER);
     let sql_keys = extract_sql_forbidden_keys(&migration);
     let rust_keys = FORBIDDEN_AUDIT_METADATA_KEYS
@@ -58,15 +77,20 @@ fn forbidden_keys_parity_between_rust_and_sql() {
         .map(|key| (*key).to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(sql_keys, rust_keys);
+    assert_eq!(
+        sql_keys, rust_keys,
+        "forbidden-key parity drifted ({context})"
+    );
 }
 
 #[test]
 fn forbidden_keys_parity_between_audit_metadata_and_ledger_payload() {
-    let migration = read_latest_migration_containing(FORBIDDEN_START_MARKER);
-    let sql_audit_keys = extract_sql_forbidden_keys(&migration);
+    let context = candidate_assertion_context();
+    let audit_migration = read_latest_migration_containing(FORBIDDEN_START_MARKER);
+    let ledger_migration = read_latest_migration_containing(LEDGER_FORBIDDEN_START_MARKER);
+    let sql_audit_keys = extract_sql_forbidden_keys(&audit_migration);
     let sql_ledger_keys = extract_sql_keys_between(
-        &migration,
+        &ledger_migration,
         LEDGER_FORBIDDEN_START_MARKER,
         LEDGER_FORBIDDEN_END_MARKER,
     );
@@ -79,13 +103,23 @@ fn forbidden_keys_parity_between_audit_metadata_and_ledger_payload() {
         .map(|key| (*key).to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(rust_audit_keys, sql_audit_keys);
-    assert_eq!(rust_ledger_keys, sql_ledger_keys);
-    assert_eq!(rust_audit_keys, rust_ledger_keys);
+    assert_eq!(
+        rust_audit_keys, sql_audit_keys,
+        "audit forbidden-key parity drifted ({context})"
+    );
+    assert_eq!(
+        rust_ledger_keys, sql_ledger_keys,
+        "ledger forbidden-key parity drifted ({context})"
+    );
+    assert_eq!(
+        rust_audit_keys, rust_ledger_keys,
+        "Rust audit/ledger forbidden-key sets drifted ({context})"
+    );
 }
 
 #[test]
 fn allowlist_parity_between_rust_and_sql() {
+    let context = candidate_assertion_context();
     // SQL 実効最新の allowlist 定義（ACTION_ALLOWLIST マーカーを持つ辞書順最後の migration）を
     // 自動発見する。新 action / キーを追加する場合は最新 migration の ACTION_ALLOWLIST_START/END 内と
     // rust_allowlist_for_action_result（このファイル内）の両方を更新すること。
@@ -115,7 +149,7 @@ fn allowlist_parity_between_rust_and_sql() {
 
             assert_eq!(
                 rust_allowed, *sql_allowed,
-                "Rust/SQL allowlist mismatch for {sql_key} (action={action:?}, result={result:?})"
+                "Rust/SQL allowlist mismatch for {sql_key} (action={action:?}, result={result:?}; {context})"
             );
         }
     }
@@ -123,6 +157,7 @@ fn allowlist_parity_between_rust_and_sql() {
 
 #[test]
 fn integrity_check_violation_summary_allowlist_parity() {
+    let context = candidate_assertion_context();
     // 実効最新の allowlist 定義は violation_summary キーも保持する。
     let migration = read_latest_migration_containing(ALLOWLIST_START_MARKER);
     let sql_summary = extract_sql_violation_summary_keys(&migration);
@@ -131,13 +166,17 @@ fn integrity_check_violation_summary_allowlist_parity() {
         .map(|k| (*k).to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(rust_summary, sql_summary);
+    assert_eq!(
+        rust_summary, sql_summary,
+        "integrity summary allowlist parity drifted ({context})"
+    );
 }
 
 // ─── Meta-guards: 実効最新定義がマーカーを保持しているか（陳腐化再発防止の核心） ───
 
 #[test]
 fn latest_unknown_key_definition_carries_allowlist_markers() {
+    let context = candidate_assertion_context();
     // 「ガード関数 audit_metadata_has_unknown_key_for_action の最新定義を持つ migration」が
     // 「ACTION_ALLOWLIST_START を持つ migration」と一致することを保証する。将来 delegating 再定義を
     // マーカー無しで足すと、両者がずれて必ず mismatch で落ちる（= 陳腐化を検知できる）。
@@ -145,47 +184,104 @@ fn latest_unknown_key_definition_carries_allowlist_markers() {
         latest_migration_defining_function(UNKNOWN_KEY_FN),
         latest_migration_containing(ALLOWLIST_START_MARKER),
         "audit_metadata_has_unknown_key_for_action の最新定義がマーカー付き完全 allowlist を保持していない。\
-         再定義する migration は ACTION_ALLOWLIST_START/END 込みで全 action を完全再掲すること（docs/coding-rules.md §14）。"
+         再定義する migration は ACTION_ALLOWLIST_START/END 込みで全 action を完全再掲すること（docs/coding-rules.md §14）。\
+         candidate context: {context}"
     );
 }
 
 #[test]
 fn latest_forbidden_key_definition_carries_forbidden_markers() {
+    let context = candidate_assertion_context();
     assert_eq!(
         latest_migration_defining_function(FORBIDDEN_KEY_FN),
         latest_migration_containing(FORBIDDEN_START_MARKER),
-        "audit_metadata_has_forbidden_key の最新定義が FORBIDDEN_AUDIT_METADATA_KEYS マーカーを保持していない。"
+        "audit_metadata_has_forbidden_key の最新定義が FORBIDDEN_AUDIT_METADATA_KEYS マーカーを保持していない。candidate context: {context}"
     );
 }
 
 #[test]
+fn latest_ledger_forbidden_key_definition_carries_ledger_markers() {
+    let resolved = resolve_from_environment(Path::new(env!("CARGO_MANIFEST_DIR")), None, None)
+        .unwrap_or_else(|error| panic!("candidate migration resolution failed: {error}"));
+    let context = resolved.assertion_context();
+    assert_marker_owner_matches(
+        resolved.root(),
+        LEDGER_FORBIDDEN_KEY_FN,
+        LEDGER_FORBIDDEN_START_MARKER,
+    )
+    .unwrap_or_else(|error| panic!("{error}; candidate context: {context}"));
+}
+
+#[test]
+fn ledger_guard_redefinition_without_marker_is_rejected() {
+    let fixture = ThrowawayMigrationRoot::new("ledger-marker-mutation")
+        .unwrap_or_else(|error| panic!("ledger mutation fixture must be creatable: {error}"));
+    fixture
+        .write_migration(
+            "0100_guard_with_marker.sql",
+            "\
+create or replace function public.ledger_payload_has_forbidden_key(p_payload jsonb)\n\
+returns boolean language sql as $$ select false $$;\n\
+-- FORBIDDEN_LEDGER_PAYLOAD_KEYS_START\n\
+select 'fixture_value';\n\
+-- FORBIDDEN_LEDGER_PAYLOAD_KEYS_END\n",
+        )
+        .unwrap_or_else(|error| panic!("ledger marker fixture must be writable: {error}"));
+    fixture
+        .write_migration(
+            "0200_guard_without_marker.sql",
+            "\
+create or replace function public.ledger_payload_has_forbidden_key(p_payload jsonb)\n\
+returns boolean language sql as $$ select true $$;\n",
+        )
+        .unwrap_or_else(|error| panic!("ledger mutation fixture must be writable: {error}"));
+
+    let result = assert_marker_owner_matches(
+        fixture.path(),
+        LEDGER_FORBIDDEN_KEY_FN,
+        LEDGER_FORBIDDEN_START_MARKER,
+    );
+
+    assert!(
+        result.is_err(),
+        "a later ledger guard definition without a moved marker must make the hard gate red"
+    );
+    fixture
+        .close()
+        .unwrap_or_else(|error| panic!("ledger mutation fixture cleanup must succeed: {error}"));
+}
+
+#[test]
 fn latest_value_guard_definitions_carry_value_markers() {
+    let context = candidate_assertion_context();
     assert_eq!(
         latest_migration_defining_function(INCIDENT_TYPE_FN),
         latest_migration_containing(INCIDENT_TYPE_START_MARKER),
-        "incident_type_allowed の最新定義が INCIDENT_TYPE_ALLOWLIST マーカーを保持していない。"
+        "incident_type_allowed の最新定義が INCIDENT_TYPE_ALLOWLIST マーカーを保持していない。candidate context: {context}"
     );
     assert_eq!(
         latest_migration_defining_function(INVALID_VALUE_FN),
         latest_migration_containing(INCIDENT_CATEGORY_START_MARKER),
-        "audit_metadata_has_invalid_value_for_action の最新定義が INCIDENT_CATEGORY_ALLOWLIST マーカーを保持していない。"
+        "audit_metadata_has_invalid_value_for_action の最新定義が INCIDENT_CATEGORY_ALLOWLIST マーカーを保持していない。candidate context: {context}"
     );
     assert_eq!(
         latest_migration_defining_function(INVALID_VALUE_FN),
         latest_migration_containing(NOTIFIER_KIND_START_MARKER),
-        "audit_metadata_has_invalid_value_for_action の最新定義が NOTIFIER_KIND_ALLOWLIST マーカーを保持していない。"
+        "audit_metadata_has_invalid_value_for_action の最新定義が NOTIFIER_KIND_ALLOWLIST マーカーを保持していない。candidate context: {context}"
     );
     assert_eq!(
         latest_migration_defining_function(SEVERITY_FN),
         latest_migration_containing(SEVERITY_START_MARKER),
         "incident_severity_allowed の最新定義が SEVERITY_ALLOWLIST マーカーを保持していない。\
-         再定義する migration は SEVERITY_ALLOWLIST_START/END 込みで全値を完全再掲すること（docs/coding-rules.md §14.3）。"
+         再定義する migration は SEVERITY_ALLOWLIST_START/END 込みで全値を完全再掲すること（docs/coding-rules.md §14.3）。\
+         candidate context: {context}"
     );
     assert_eq!(
         latest_migration_defining_function(NOTIFICATION_RESULT_FN),
         latest_migration_containing(NOTIFICATION_RESULT_START_MARKER),
         "incident_notification_result_allowed の最新定義が NOTIFICATION_RESULT_ALLOWLIST マーカーを保持していない。\
-         再定義する migration は NOTIFICATION_RESULT_ALLOWLIST_START/END 込みで全値を完全再掲すること（docs/coding-rules.md §14.3）。"
+         再定義する migration は NOTIFICATION_RESULT_ALLOWLIST_START/END 込みで全値を完全再掲すること（docs/coding-rules.md §14.3）。\
+         candidate context: {context}"
     );
 }
 
@@ -193,6 +289,7 @@ fn latest_value_guard_definitions_carry_value_markers() {
 
 #[test]
 fn incident_type_allowlist_parity_between_rust_and_sql() {
+    let context = candidate_assertion_context();
     let migration = read_latest_migration_containing(INCIDENT_TYPE_START_MARKER);
     let sql = extract_sql_keys_between(
         &migration,
@@ -204,11 +301,12 @@ fn incident_type_allowlist_parity_between_rust_and_sql() {
         .map(|k| (*k).to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(rust, sql);
+    assert_eq!(rust, sql, "incident type parity drifted ({context})");
 }
 
 #[test]
 fn incident_notification_category_allowlist_parity_between_rust_and_sql() {
+    let context = candidate_assertion_context();
     let migration = read_latest_migration_containing(INCIDENT_CATEGORY_START_MARKER);
     let sql = extract_sql_keys_between(
         &migration,
@@ -220,11 +318,15 @@ fn incident_notification_category_allowlist_parity_between_rust_and_sql() {
         .map(|k| (*k).to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(rust, sql);
+    assert_eq!(
+        rust, sql,
+        "incident notification category parity drifted ({context})"
+    );
 }
 
 #[test]
 fn notifier_kind_allowlist_parity_between_rust_and_sql() {
+    let context = candidate_assertion_context();
     let migration = read_latest_migration_containing(NOTIFIER_KIND_START_MARKER);
     let sql = extract_sql_keys_between(
         &migration,
@@ -236,11 +338,12 @@ fn notifier_kind_allowlist_parity_between_rust_and_sql() {
         .map(|k| (*k).to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(rust, sql);
+    assert_eq!(rust, sql, "notifier-kind parity drifted ({context})");
 }
 
 #[test]
 fn incident_severity_allowlist_parity_between_rust_and_sql() {
+    let context = candidate_assertion_context();
     let migration = read_latest_migration_containing(SEVERITY_START_MARKER);
     let sql = extract_sql_keys_between(&migration, SEVERITY_START_MARKER, SEVERITY_END_MARKER);
     let rust = INCIDENT_SEVERITY_ALLOWLIST
@@ -248,11 +351,12 @@ fn incident_severity_allowlist_parity_between_rust_and_sql() {
         .map(|k| (*k).to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(rust, sql);
+    assert_eq!(rust, sql, "incident severity parity drifted ({context})");
 }
 
 #[test]
 fn notification_result_allowlist_parity_between_rust_and_sql() {
+    let context = candidate_assertion_context();
     let migration = read_latest_migration_containing(NOTIFICATION_RESULT_START_MARKER);
     let sql = extract_sql_keys_between(
         &migration,
@@ -264,13 +368,14 @@ fn notification_result_allowlist_parity_between_rust_and_sql() {
         .map(|k| (*k).to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(rust, sql);
+    assert_eq!(rust, sql, "notification result parity drifted ({context})");
 }
 
 // ─── 必須キー parity: Rust required_metadata_keys ↔ SQL 実効定義（bug-05 二次ギャップの解消） ───
 
 #[test]
 fn required_keys_parity_between_rust_and_sql() {
+    let context = candidate_assertion_context();
     // SQL 実効最新の必須キー定義（-- REQUIRED_KEY マーカーを持つ辞書順最後の migration）を
     // 自動発見し、action+result ごとの base 必須キー集合を抽出する。Rust 真値は
     // mipsorcu::required_metadata_keys（いずれも source_event_at を含まない base 集合）。
@@ -293,7 +398,7 @@ fn required_keys_parity_between_rust_and_sql() {
 
             assert_eq!(
                 rust_required, *sql_allowed,
-                "Rust/SQL required-key mismatch for {sql_key} (action={action:?}, result={result:?})"
+                "Rust/SQL required-key mismatch for {sql_key} (action={action:?}, result={result:?}; {context})"
             );
         }
     }
@@ -301,6 +406,7 @@ fn required_keys_parity_between_rust_and_sql() {
 
 #[test]
 fn latest_required_key_definition_carries_required_markers() {
+    let context = candidate_assertion_context();
     // 「ガード関数 audit_metadata_has_missing_required_key_for_action の最新定義を持つ migration」が
     // 「REQUIRED_KEY_START を持つ migration」と一致することを保証する。将来 delegating 再定義を
     // マーカー無しで足すと、両者がずれて必ず mismatch で落ちる（= 陳腐化を検知できる）。
@@ -308,7 +414,8 @@ fn latest_required_key_definition_carries_required_markers() {
         latest_migration_defining_function(REQUIRED_KEY_FN),
         latest_migration_containing(REQUIRED_KEY_START_MARKER),
         "audit_metadata_has_missing_required_key_for_action の最新定義がマーカー付き完全必須キー集合を保持していない。\
-         再定義する migration は REQUIRED_KEY_START/END 込みで全 action を完全再掲すること（docs/coding-rules.md §14）。"
+         再定義する migration は REQUIRED_KEY_START/END 込みで全 action を完全再掲すること（docs/coding-rules.md §14）。\
+         candidate context: {context}"
     );
 }
 
@@ -362,1151 +469,150 @@ comment on function public.f(text) is 'restates allowlist with -- ACTION_ALLOWLI
     );
 }
 
-#[test]
-fn rust_allowlist_rejects_unknown_key() {
-    // decrypt success: source_event_at のみ
-    let metadata =
-        serde_json::json!({ "source_event_at": "2026-04-08T12:00:00Z", "unknown_key": "value" });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result = audit.validate_allowlist_for_action(AuditAction::Decrypt, AuditResult::Success);
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::UnknownMetadataKey { .. })
-        ),
-        "unknown key in decrypt success should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn rust_allowlist_rejects_decrypt_success_missing_source_event_at() {
-    let metadata = AuditMetadata::empty();
-    let result = metadata.validate_allowlist_for_action(AuditAction::Decrypt, AuditResult::Success);
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::MissingMetadataKey {
-                key: "source_event_at"
-            })
-        ),
-        "empty metadata should fail because source_event_at is required: {result:?}"
-    );
-}
-
-#[test]
-fn rust_allowlist_accepts_known_keys_per_action() {
-    // encrypt_create success は write_success_only なので rust 側 validation step で落ちるが、
-    // allowlist structurally allowlist は version/secret_version_id/source_event_at のみが OK
-    let metadata = serde_json::json!({
-        "version": 1,
-        "secret_version_id": "550e8400-e29b-41d4-a716-446655440000",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::EncryptCreate, AuditResult::Failure);
-    assert!(
-        result.is_ok(),
-        "valid encrypt_create keys should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_allowlist_rejects_integrity_check_unknown_summary_key() {
-    let metadata = serde_json::json!({
-        "check_name": "mvp_integrity_check",
-        "checked_secret_count": 0,
-        "checked_secret_version_count": 0,
-        "checked_audit_event_count": 0,
-        "duration_ms": 0,
-        "violation_count": 0,
-        "violation_summary": {
-            "current_version_invalid": 0,
-            "version_invalid": 0,
-            "retention_exceeded": 0,
-            "ciphertext_empty": 0,
-            "encrypted_data_key_empty": 0,
-            "nonce_length_invalid": 0,
-            "algorithm_invalid": 0,
-            "nonce_duplicate": 0,
-            "aad_keys_invalid": 0,
-            "aad_row_mismatch": 0,
-            "created_at_mismatch": 0,
-            "audit_action_invalid": 0,
-            "audit_result_invalid": 0,
-            "audit_metadata_not_object": 0,
-            "audit_metadata_forbidden_key": 0,
-            "audit_source_event_at_invalid": 0,
-            "unknown_summary_key": 1
-        },
-        "trigger": "startup",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::IntegrityCheck, AuditResult::Success);
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::UnknownMetadataKey { .. })
-        ),
-        "unknown violation_summary key should be rejected: {result:?}"
-    );
-}
-
-#[test]
-fn rust_allowlist_accepts_decrypt_failure_with_attempted_secret_id() {
-    let metadata = serde_json::json!({
-        "attempted_secret_id": "550e8400-e29b-41d4-a716-446655440000",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result = audit.validate_allowlist_for_action(AuditAction::Decrypt, AuditResult::Failure);
-    assert!(
-        result.is_ok(),
-        "decrypt failure with attempted_secret_id should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_allowlist_rejects_decrypt_failure_without_attempted_secret_id_unknown() {
-    let metadata = serde_json::json!({
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result = audit.validate_allowlist_for_action(AuditAction::Decrypt, AuditResult::Failure);
-    // attempted_secret_id は任意なのでなくても OK
-    assert!(
-        result.is_ok(),
-        "decrypt failure with only source_event_at should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_allowlist_accepts_secret_alias_metadata() {
-    let create_metadata = serde_json::json!({
-        "alias_fingerprint": "aa".repeat(32),
-        "alias_fingerprint_key_version": 1,
-        "alias_fingerprint_schema_version": 1,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let create_audit = AuditMetadata::new(create_metadata).unwrap();
-    assert!(
-        create_audit
-            .validate_allowlist_for_action(AuditAction::SecretAliasCreate, AuditResult::Success)
-            .is_ok()
-    );
-
-    let update_metadata = serde_json::json!({
-        "old_alias_fingerprint": "aa".repeat(32),
-        "new_alias_fingerprint": "bb".repeat(32),
-        "alias_fingerprint_key_version": 1,
-        "alias_fingerprint_schema_version": 1,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let update_audit = AuditMetadata::new(update_metadata).unwrap();
-    assert!(
-        update_audit
-            .validate_allowlist_for_action(AuditAction::SecretAliasUpdate, AuditResult::Success)
-            .is_ok()
-    );
-
-    let list_metadata = serde_json::json!({
-        "result_count": 3,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let list_audit = AuditMetadata::new(list_metadata).unwrap();
-    assert!(
-        list_audit
-            .validate_allowlist_for_action(AuditAction::SecretAliasList, AuditResult::Success)
-            .is_ok()
-    );
-}
-
-#[test]
-fn rust_allowlist_rejects_invalid_secret_alias_metadata() {
-    let metadata = serde_json::json!({
-        "alias_fingerprint": "aa".repeat(31),
-        "alias_fingerprint_key_version": 1,
-        "alias_fingerprint_schema_version": 1,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::SecretAliasCreate, AuditResult::Success);
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::InvalidMetadataValue {
-                key: "alias_fingerprint"
-            })
-        ),
-        "invalid alias fingerprint should be rejected: {result:?}"
-    );
-}
-
-#[test]
-fn rust_allowlist_accepts_secret_alias_failure_without_fingerprint() {
-    for action in [
-        AuditAction::SecretAliasCreate,
-        AuditAction::SecretAliasUpdate,
-        AuditAction::SecretAliasDelete,
-        AuditAction::SecretAliasList,
-    ] {
-        let metadata = serde_json::json!({
-            "source_event_at": "2026-04-08T12:00:00Z"
-        });
-        let audit = AuditMetadata::new(metadata).unwrap();
-        let result = audit.validate_allowlist_for_action(action, AuditResult::Failure);
-
-        assert!(
-            result.is_ok(),
-            "{action:?} failure should accept source_event_at-only metadata: {result:?}"
-        );
-    }
-}
-
-#[test]
-fn rust_allowlist_rejects_secret_alias_success_with_error_code() {
-    let metadata = serde_json::json!({
-        "alias_fingerprint": "aa".repeat(32),
-        "alias_fingerprint_key_version": 1,
-        "alias_fingerprint_schema_version": 1,
-        "error_code": "should_only_appear_on_failure",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::SecretAliasCreate, AuditResult::Success);
-
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "error_code" })
-        ),
-        "secret_alias_create success should reject error_code: {result:?}"
-    );
-}
-
-#[test]
-fn rust_allowlist_accepts_scheduler_lifecycle_metadata() {
-    let started = AuditMetadata::new(serde_json::json!({
-        "job_name": "monthly_hash_chain_verify",
-        "scheduled_at": "2026-04-08T12:00:00Z",
-        "started_at": "2026-04-08T12:00:01Z",
-        "source_event_at": "2026-04-08T12:00:01Z"
-    }))
-    .unwrap();
-    assert!(
-        started
-            .validate_allowlist_for_action(AuditAction::SchedulerJobStarted, AuditResult::Success)
-            .is_ok()
-    );
-
-    let completed = AuditMetadata::new(serde_json::json!({
-        "job_name": "monthly_hash_chain_verify",
-        "started_at": "2026-04-08T12:00:01Z",
-        "completed_at": "2026-04-08T12:00:02Z",
-        "duration_ms": 1000,
-        "result_summary": { "valid": true },
-        "source_event_at": "2026-04-08T12:00:02Z"
-    }))
-    .unwrap();
-    assert!(
-        completed
-            .validate_allowlist_for_action(AuditAction::SchedulerJobCompleted, AuditResult::Success)
-            .is_ok()
-    );
-
-    let failed = AuditMetadata::new(serde_json::json!({
-        "job_name": "monthly_hash_chain_verify",
-        "started_at": "2026-04-08T12:00:01Z",
-        "failed_at": "2026-04-08T12:00:02Z",
-        "error_code": "scheduler_job_timeout",
-        "retry_count": 0,
-        "source_event_at": "2026-04-08T12:00:02Z"
-    }))
-    .unwrap();
-    assert!(
-        failed
-            .validate_allowlist_for_action(AuditAction::SchedulerJobFailed, AuditResult::Failure)
-            .is_ok()
-    );
-
-    let skipped = AuditMetadata::new(serde_json::json!({
-        "job_name": "monthly_hash_chain_verify",
-        "skipped_at": "2026-04-08T12:00:01Z",
-        "reason": "lock_not_acquired",
-        "source_event_at": "2026-04-08T12:00:01Z"
-    }))
-    .unwrap();
-    assert!(
-        skipped
-            .validate_allowlist_for_action(AuditAction::SchedulerJobSkipped, AuditResult::Success)
-            .is_ok()
-    );
-}
-
-#[test]
-fn rust_allowlist_rejects_scheduler_lifecycle_invalid_values() {
-    let retry = AuditMetadata::new(serde_json::json!({
-        "job_name": "monthly_hash_chain_verify",
-        "started_at": "2026-04-08T12:00:01Z",
-        "failed_at": "2026-04-08T12:00:02Z",
-        "error_code": "scheduler_job_failed",
-        "retry_count": "one",
-        "source_event_at": "2026-04-08T12:00:02Z"
-    }))
-    .unwrap();
-    assert!(matches!(
-        retry.validate_allowlist_for_action(AuditAction::SchedulerJobFailed, AuditResult::Failure),
-        Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "retry_count" })
-    ));
-
-    let reason = AuditMetadata::new(serde_json::json!({
-        "job_name": "monthly_hash_chain_verify",
-        "skipped_at": "2026-04-08T12:00:01Z",
-        "reason": "maintenance",
-        "source_event_at": "2026-04-08T12:00:01Z"
-    }))
-    .unwrap();
-    assert!(matches!(
-        reason
-            .validate_allowlist_for_action(AuditAction::SchedulerJobSkipped, AuditResult::Success),
-        Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "reason" })
-    ));
-}
-
-#[test]
-fn rust_allowlist_accepts_siem_operational_metadata() {
-    let forwarded = AuditMetadata::new(serde_json::json!({
-        "exporter_kind": "splunk_hec",
-        "batch_size": 100,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    }))
-    .unwrap();
-    assert!(
-        forwarded
-            .validate_allowlist_for_action(AuditAction::SiemEventForwarded, AuditResult::Success)
-            .is_ok()
-    );
-
-    let failed = AuditMetadata::new(serde_json::json!({
-        "exporter_kind": "splunk_hec",
-        "error_code": "siem_splunk_http_503",
-        "buffered": true,
-        "batch_size": 3,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    }))
-    .unwrap();
-    assert!(
-        failed
-            .validate_allowlist_for_action(AuditAction::SiemEventFailed, AuditResult::Failure)
-            .is_ok()
-    );
-
-    let flushed = AuditMetadata::new(serde_json::json!({
-        "flushed_count": 3,
-        "buffer_remaining_bytes": 1048576,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    }))
-    .unwrap();
-    assert!(
-        flushed
-            .validate_allowlist_for_action(AuditAction::SiemBufferFlushed, AuditResult::Success)
-            .is_ok()
-    );
-}
-
-#[test]
-fn rust_allowlist_rejects_invalid_siem_operational_metadata() {
-    let exporter_kind = AuditMetadata::new(serde_json::json!({
-        "exporter_kind": "webhook",
-        "batch_size": 1,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    }))
-    .unwrap();
-    assert!(matches!(
-        exporter_kind
-            .validate_allowlist_for_action(AuditAction::SiemEventForwarded, AuditResult::Success),
-        Err(mipsorcu::AuditEventError::InvalidMetadataValue {
-            key: "exporter_kind"
-        })
-    ));
-
-    let buffered = AuditMetadata::new(serde_json::json!({
-        "exporter_kind": "splunk_hec",
-        "error_code": "siem_splunk_http_503",
-        "buffered": "true",
-        "batch_size": 1,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    }))
-    .unwrap();
-    assert!(matches!(
-        buffered.validate_allowlist_for_action(AuditAction::SiemEventFailed, AuditResult::Failure),
-        Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "buffered" })
-    ));
-
-    let batch_size = AuditMetadata::new(serde_json::json!({
-        "exporter_kind": "splunk_hec",
-        "batch_size": 0,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    }))
-    .unwrap();
-    assert!(matches!(
-        batch_size
-            .validate_allowlist_for_action(AuditAction::SiemEventForwarded, AuditResult::Success),
-        Err(mipsorcu::AuditEventError::InvalidMetadataValue { key: "batch_size" })
-    ));
-}
-
-#[test]
-fn rust_allowlist_accepts_siem_buffer_overflow_incident_notification_category() {
-    let metadata = AuditMetadata::new(serde_json::json!({
-        "incident_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        "category": "siem_buffer_overflow",
-        "notifier_kind": "webhook",
-        "duration_ms": 25,
-        "source_event_at": "2026-06-01T02:00:00Z"
-    }))
-    .unwrap();
-
-    assert!(
-        metadata
-            .validate_allowlist_for_action(
-                AuditAction::IncidentNotificationSent,
-                AuditResult::Success
-            )
-            .is_ok()
-    );
-}
-
-// ─── Parity: Rust ↔ SQL same case, same accept/reject ───
-
-#[test]
-fn rust_parity_integrity_check_success_valid() {
-    let metadata = serde_json::json!({
-        "check_name": "mvp_integrity_check",
-        "checked_secret_count": 0,
-        "checked_secret_version_count": 0,
-        "checked_audit_event_count": 0,
-        "duration_ms": 0,
-        "violation_count": 0,
-        "violation_summary": {
-            "current_version_invalid": 0,
-            "version_invalid": 0,
-            "retention_exceeded": 0,
-            "ciphertext_empty": 0,
-            "encrypted_data_key_empty": 0,
-            "nonce_length_invalid": 0,
-            "algorithm_invalid": 0,
-            "nonce_duplicate": 0,
-            "aad_keys_invalid": 0,
-            "aad_row_mismatch": 0,
-            "created_at_mismatch": 0,
-            "audit_action_invalid": 0,
-            "audit_result_invalid": 0,
-            "audit_metadata_not_object": 0,
-            "audit_metadata_forbidden_key": 0,
-            "audit_source_event_at_invalid": 0
-        },
-        "trigger": "startup",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::IntegrityCheck, AuditResult::Success);
-    assert!(
-        result.is_ok(),
-        "integrity_check success with full allowlist should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_integrity_check_violation_summary_non_object() {
-    let metadata = serde_json::json!({
-        "check_name": "mvp_integrity_check",
-        "checked_secret_count": 0,
-        "checked_secret_version_count": 0,
-        "checked_audit_event_count": 0,
-        "duration_ms": 0,
-        "violation_count": 0,
-        "violation_summary": "not_an_object",
-        "trigger": "startup",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::IntegrityCheck, AuditResult::Success);
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::ViolationSummaryMustBeObject)
-        ),
-        "integrity_check violation_summary non-object should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_restore_test_success_valid() {
-    let metadata = serde_json::json!({
-        "phase": "verify",
-        "sample_count": 5,
-        "trigger": "background",
-        "duration_ms": 100,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::RestoreTest, AuditResult::Success);
-    assert!(
-        result.is_ok(),
-        "restore_test success with allowlist keys should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_restore_test_failure_valid() {
-    let metadata = serde_json::json!({
-        "phase": "verify",
-        "sample_count": 0,
-        "trigger": "cli",
-        "duration_ms": 0,
-        "error_code": "sample_fetch_failed",
-        "failed_version": null,
-        "reason": "no_current_secret_versions",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::RestoreTest, AuditResult::Failure);
-    assert!(
-        result.is_ok(),
-        "restore_test failure with all optional keys should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_auth_failure_failure_valid() {
-    let metadata = serde_json::json!({
-        "error_code": "authorization_header_missing",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::AuthFailure, AuditResult::Failure);
-    assert!(
-        result.is_ok(),
-        "auth_failure with allowlist keys should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_auth_failure_unknown_key() {
-    let metadata = serde_json::json!({
-        "error_code": "bad",
-        "source_event_at": "2026-04-08T12:00:00Z",
-        "extra": "bad"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::AuthFailure, AuditResult::Failure);
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::UnknownMetadataKey { .. })
-        ),
-        "auth_failure with unknown key should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_key_rotation_start_valid() {
-    let metadata = serde_json::json!({
-        "old_key_version": 1,
-        "new_key_version": 2,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::KeyRotationStart, AuditResult::Success);
-    assert!(
-        result.is_ok(),
-        "key_rotation_start with allowlist keys should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_key_rotation_reencrypt_valid() {
-    let metadata = serde_json::json!({
-        "old_key_version": 1,
-        "new_key_version": 2,
-        "batch_size": 100,
-        "processed_count": 50,
-        "remaining_count": 50,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result = audit
-        .validate_allowlist_for_action(AuditAction::KeyRotationReencrypt, AuditResult::Success);
-    assert!(
-        result.is_ok(),
-        "key_rotation_reencrypt with allowlist keys should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_key_rotation_complete_valid() {
-    let metadata = serde_json::json!({
-        "old_key_version": 1,
-        "new_key_version": 2,
-        "remaining_count": 0,
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::KeyRotationComplete, AuditResult::Success);
-    assert!(
-        result.is_ok(),
-        "key_rotation_complete with allowlist keys should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_metadata_non_object_rejected() {
-    let result = AuditMetadata::new(serde_json::json!("not_an_object"));
-    assert!(
-        matches!(result, Err(mipsorcu::AuditEventError::MetadataMustBeObject)),
-        "non-object metadata should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_forbidden_key_nested_inside_object() {
-    let metadata = serde_json::json!({
-        "nested": [{"plaintext": "leak"}],
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let result = AuditMetadata::new(metadata);
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::ForbiddenMetadataKey { .. })
-        ),
-        "nested forbidden key should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_invalid_source_event_at() {
-    // non-canonical offset
-    let metadata = serde_json::json!({ "source_event_at": "2026-04-08T12:00:00+00:00" });
-    let result = AuditMetadata::new(metadata);
-    assert!(
-        matches!(result, Err(mipsorcu::AuditEventError::InvalidSourceEventAt)),
-        "non-canonical source_event_at should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_decrypt_success_valid() {
-    let metadata = serde_json::json!({
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result = audit.validate_allowlist_for_action(AuditAction::Decrypt, AuditResult::Success);
-    assert!(
-        result.is_ok(),
-        "decrypt success with source_event_at only should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_decrypt_failure_valid() {
-    let metadata = serde_json::json!({
-        "attempted_secret_id": "550e8400-e29b-41d4-a716-446655440000",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result = audit.validate_allowlist_for_action(AuditAction::Decrypt, AuditResult::Failure);
-    assert!(
-        result.is_ok(),
-        "decrypt failure with attempted_secret_id should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_encrypt_create_failure_valid() {
-    let metadata = serde_json::json!({
-        "version": 1,
-        "secret_version_id": "550e8400-e29b-41d4-a716-446655440000",
-        "source_event_at": "2026-04-08T12:00:00Z"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::EncryptCreate, AuditResult::Failure);
-    assert!(
-        result.is_ok(),
-        "encrypt_create failure with allowlist keys should pass: {result:?}"
-    );
-}
-
-#[test]
-fn rust_parity_encrypt_create_failure_unknown_key() {
-    let metadata = serde_json::json!({
-        "version": 1,
-        "source_event_at": "2026-04-08T12:00:00Z",
-        "extra": "bad"
-    });
-    let audit = AuditMetadata::new(metadata).unwrap();
-    let result =
-        audit.validate_allowlist_for_action(AuditAction::EncryptCreate, AuditResult::Failure);
-    assert!(
-        matches!(
-            result,
-            Err(mipsorcu::AuditEventError::UnknownMetadataKey { .. })
-        ),
-        "encrypt_create failure with unknown key should be rejected, got {result:?}"
-    );
-}
-
-fn all_actions() -> Vec<AuditAction> {
-    vec![
-        AuditAction::EncryptCreate,
-        AuditAction::EncryptRotate,
-        AuditAction::VersionPurge,
-        AuditAction::Decrypt,
-        AuditAction::IntegrityCheck,
-        AuditAction::RestoreTest,
-        AuditAction::AuthFailure,
-        AuditAction::KeyRotationStart,
-        AuditAction::KeyRotationReencrypt,
-        AuditAction::KeyRotationComplete,
-        AuditAction::KeyRotationEnvelopeMigrated,
-        AuditAction::KeyRotationEnvelopeFailed,
-        AuditAction::SignatureKeyCreated,
-        AuditAction::SignatureKeyActivated,
-        AuditAction::SignatureKeyRetired,
-        AuditAction::MonthlyDigestGenerate,
-        AuditAction::MonthlyDigestVerify,
-        AuditAction::ArchiveExport,
-        AuditAction::DigestTimestamping,
-        AuditAction::SiemForwardFailure,
-        AuditAction::SiemEventForwarded,
-        AuditAction::SiemEventFailed,
-        AuditAction::SiemBufferFlushed,
-        AuditAction::AuditReportGenerate,
-        AuditAction::AuditUiRead,
-        AuditAction::SchedulerJob,
-        AuditAction::SchedulerJobStarted,
-        AuditAction::SchedulerJobCompleted,
-        AuditAction::SchedulerJobFailed,
-        AuditAction::SchedulerJobSkipped,
-        AuditAction::IncidentDetected,
-        AuditAction::IncidentNotificationSent,
-        AuditAction::IncidentNotificationFailed,
-        AuditAction::IncidentNotificationSuppressed,
-        AuditAction::SecretAliasCreate,
-        AuditAction::SecretAliasUpdate,
-        AuditAction::SecretAliasDelete,
-        AuditAction::SecretAliasList,
-    ]
-}
-
-fn rust_allowlist_for_action_result(action: AuditAction, result: AuditResult) -> BTreeSet<String> {
-    // AuditMetadata::validate_allowlist_for_action と同一ロジック
-    let mut keys = match action {
-        AuditAction::EncryptCreate | AuditAction::EncryptRotate | AuditAction::VersionPurge => {
-            vec!["version", "secret_version_id", "source_event_at"]
-        }
-        AuditAction::Decrypt => {
-            if result == AuditResult::Failure {
-                vec!["attempted_secret_id", "source_event_at"]
-            } else {
-                vec!["source_event_at"]
-            }
-        }
-        AuditAction::IntegrityCheck => {
-            vec![
-                "check_name",
-                "checked_secret_count",
-                "checked_secret_version_count",
-                "checked_audit_event_count",
-                "duration_ms",
-                "violation_count",
-                "violation_summary",
-                "trigger",
-                "error_code",
-                "source_event_at",
-            ]
-        }
-        AuditAction::RestoreTest => {
-            vec![
-                "phase",
-                "sample_count",
-                "trigger",
-                "duration_ms",
-                "error_code",
-                "failed_version",
-                "reason",
-                "source_event_at",
-            ]
-        }
-        AuditAction::AuthFailure => {
-            vec!["error_code", "source_event_at"]
-        }
-        AuditAction::KeyRotationStart => {
-            vec!["old_key_version", "new_key_version", "source_event_at"]
-        }
-        AuditAction::KeyRotationReencrypt => {
-            vec![
-                "old_key_version",
-                "new_key_version",
-                "batch_size",
-                "processed_count",
-                "remaining_count",
-                "source_event_at",
-            ]
-        }
-        AuditAction::KeyRotationComplete => {
-            vec![
-                "old_key_version",
-                "new_key_version",
-                "remaining_count",
-                "source_event_at",
-            ]
-        }
-        AuditAction::KeyRotationEnvelopeMigrated => {
-            vec![
-                "batch_size",
-                "success_count",
-                "failure_count",
-                "source_event_at",
-            ]
-        }
-        AuditAction::KeyRotationEnvelopeFailed => {
-            vec![
-                "secret_version_id",
-                "version",
-                "error_code",
-                "source_event_at",
-            ]
-        }
-        AuditAction::SignatureKeyCreated => {
-            vec![
-                "created_at",
-                "public_key_fingerprint",
-                "signature_key_version",
-                "source_event_at",
-            ]
-        }
-        AuditAction::SignatureKeyActivated => {
-            vec![
-                "activated_at",
-                "public_key_fingerprint",
-                "signature_key_version",
-                "source_event_at",
-            ]
-        }
-        AuditAction::SignatureKeyRetired => {
-            vec![
-                "public_key_fingerprint",
-                "retired_at",
-                "signature_key_version",
-                "source_event_at",
-            ]
-        }
-        // 月次 digest 生成（成功・失敗両方を記録、allowlist は result 共通の union）
-        AuditAction::MonthlyDigestGenerate => {
-            vec![
-                "digest_hash",
-                "end_sequence_no",
-                "entry_count",
-                "error_code",
-                "signature_key_version",
-                "start_sequence_no",
-                "target_year_month",
-                "source_event_at",
-            ]
-        }
-        // 月次 digest 検証（成功・失敗両方を記録、allowlist は result 共通）
-        AuditAction::MonthlyDigestVerify => {
-            vec![
-                "error_code",
-                "target_year_month",
-                "verify_result",
-                "source_event_at",
-            ]
-        }
-        // archive export（成功・失敗両方を記録、allowlist は result 共通）
-        AuditAction::ArchiveExport => {
-            vec![
-                "archive_key",
-                "digest_hash",
-                "error_code",
-                "source_event_at",
-                "target_year_month",
-            ]
-        }
-        // digest timestamping（成功・失敗両方を記録、allowlist は result 共通）
-        AuditAction::DigestTimestamping => {
-            vec![
-                "digest_hash",
-                "error_code",
-                "source_event_at",
-                "target_year_month",
-                "timestamp_token_hash",
-            ]
-        }
-        // SIEM forward failure（failure-only）
-        AuditAction::SiemForwardFailure => {
-            vec!["error_code", "event_count", "event_type", "source_event_at"]
-        }
-        AuditAction::SiemEventForwarded => {
-            vec!["exporter_kind", "batch_size", "source_event_at"]
-        }
-        AuditAction::SiemEventFailed => {
-            vec![
-                "exporter_kind",
-                "error_code",
-                "buffered",
-                "batch_size",
-                "source_event_at",
-            ]
-        }
-        AuditAction::SiemBufferFlushed => {
-            vec!["flushed_count", "buffer_remaining_bytes", "source_event_at"]
-        }
-        // audit report generation（成功・失敗両方を記録）
-        AuditAction::AuditReportGenerate => {
-            vec![
-                "error_code",
-                "format",
-                "period_end",
-                "period_start",
-                "source_event_at",
-            ]
-        }
-        AuditAction::SchedulerJob => {
-            vec![
-                "duration_ms",
-                "error_code",
-                "job_name",
-                "source_event_at",
-                "target_year_month",
-                "trigger",
-            ]
-        }
-        AuditAction::SchedulerJobStarted => {
-            vec!["job_name", "scheduled_at", "source_event_at", "started_at"]
-        }
-        AuditAction::SchedulerJobCompleted => {
-            vec![
-                "completed_at",
-                "duration_ms",
-                "job_name",
-                "result_summary",
-                "source_event_at",
-                "started_at",
-            ]
-        }
-        AuditAction::SchedulerJobFailed => {
-            vec![
-                "error_code",
-                "failed_at",
-                "job_name",
-                "retry_count",
-                "source_event_at",
-                "started_at",
-            ]
-        }
-        AuditAction::SchedulerJobSkipped => {
-            vec!["job_name", "reason", "skipped_at", "source_event_at"]
-        }
-        AuditAction::IncidentDetected => {
-            vec![
-                "dedupe_key",
-                "detection_source",
-                "error_code",
-                "incident_type",
-                "notification_result",
-                "notification_sink",
-                "source_event_at",
-                "source_event_id",
-                "target_sequence_no",
-                "target_year_month",
-                "severity",
-            ]
-        }
-        AuditAction::IncidentNotificationSent => {
-            vec![
-                "category",
-                "duration_ms",
-                "incident_id",
-                "notifier_kind",
-                "source_event_at",
-            ]
-        }
-        AuditAction::IncidentNotificationFailed => {
-            vec![
-                "category",
-                "error_code",
-                "incident_id",
-                "notifier_kind",
-                "retry_count",
-                "source_event_at",
-            ]
-        }
-        AuditAction::IncidentNotificationSuppressed => {
-            vec![
-                "category",
-                "incident_id",
-                "reason",
-                "source_event_at",
-                "suppressed_count",
-                "window_remaining_sec",
-            ]
-        }
-        AuditAction::SecretAliasCreate => {
-            vec![
-                "alias_fingerprint",
-                "alias_fingerprint_key_version",
-                "alias_fingerprint_schema_version",
-                "error_code",
-                "source_event_at",
-            ]
-        }
-        AuditAction::SecretAliasUpdate => {
-            vec![
-                "old_alias_fingerprint",
-                "new_alias_fingerprint",
-                "alias_fingerprint_key_version",
-                "alias_fingerprint_schema_version",
-                "error_code",
-                "source_event_at",
-            ]
-        }
-        AuditAction::SecretAliasDelete => {
-            vec![
-                "alias_fingerprint",
-                "alias_fingerprint_key_version",
-                "alias_fingerprint_schema_version",
-                "error_code",
-                "source_event_at",
-            ]
-        }
-        AuditAction::SecretAliasList => {
-            vec!["error_code", "result_count", "source_event_at"]
-        }
-        AuditAction::AuditUiRead => {
-            vec![
-                "endpoint",
-                "method",
-                "resource",
-                "result_count",
-                "period_start",
-                "period_end",
-                "start_sequence_no",
-                "end_sequence_no",
-                "target_year_month",
-                "error_code",
-                "source_event_at",
-            ]
-        }
-    };
-    keys.sort();
-    keys.into_iter().map(|s| s.to_owned()).collect()
-}
-
-fn migration_paths() -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = fs::read_dir(Path::new("supabase/migrations"))
-        .expect("supabase/migrations should be readable")
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
-        .collect();
-    // 4 桁ゼロパディング連番のため、辞書順 == 適用順（実効最新 = 辞書順最後）。
-    paths.sort();
-    paths
-}
-
 /// `content` 内に「行全体（前後空白除去後）が `marker` に完全一致する行」が 1 つでもあるか。
 /// 散文中の同綴り（コメントの "-- FOO_START/END" 等）は行全体一致でないため採用しない。
 fn has_marker_line(content: &str, marker: &str) -> bool {
-    content.lines().any(|line| line.trim() == marker)
+    has_standalone_marker(content, marker)
 }
 
 /// `marker` を独立行として持つ辞書順最後の migration（= 実効最新の定義を持つファイル）を返す。
-fn latest_migration_containing(marker: &str) -> PathBuf {
-    migration_paths()
-        .into_iter()
-        .rfind(|path| {
-            fs::read_to_string(path)
-                .map(|content| has_marker_line(&content, marker))
-                .unwrap_or(false)
-        })
-        .unwrap_or_else(|| panic!("no migration has a standalone marker line {marker}"))
+fn latest_migration_containing(marker: &str) -> std::path::PathBuf {
+    let (migrations, context) = resolved_candidate_migrations()
+        .unwrap_or_else(|error| panic!("candidate migration resolution failed: {error}"));
+    let family = marker_family(marker)
+        .unwrap_or_else(|error| panic!("marker family lookup failed ({context}): {error}"));
+    latest_effective_occurrence(&migrations, family)
+        .unwrap_or_else(|error| panic!("effective marker lookup failed ({context}): {error}"))
+        .path
 }
 
 /// `start_marker` / `end_marker` が「行全体」になっている行に挟まれた領域を返す。
 /// 散文中の同綴りは行全体一致でないため境界に採用されない。1 ファイルに複数ガードを
 /// 再掲しても（consolidation）、ヘッダ／`comment on` の散文が抽出窓を広げて誤抽出する事故を
 /// 構造的に防ぐ。返値はマーカー行自身を含まない、間の各行を改行付きで連結した文字列。
-fn marker_block(sql: &str, start_marker: &str, end_marker: &str) -> String {
-    let mut block = String::new();
-    let mut in_block = false;
-
-    for line in sql.lines() {
-        let trimmed = line.trim();
-        if trimmed == start_marker {
-            assert!(!in_block, "duplicate start marker line {start_marker}");
-            in_block = true;
-            continue;
-        }
-        if trimmed == end_marker {
-            assert!(
-                in_block,
-                "end marker line {end_marker} appears before start marker line {start_marker}"
-            );
-            return block;
-        }
-        if in_block {
-            block.push_str(line);
-            block.push('\n');
-        }
-    }
-
-    panic!("standalone marker block {start_marker}..{end_marker} not found in migration");
+fn marker_block(sql: &str, start_marker: &'static str, end_marker: &'static str) -> String {
+    let family = MarkerFamily {
+        name: "INLINE_TEST_MARKER",
+        start: start_marker,
+        end: end_marker,
+    };
+    let migration = MigrationFile {
+        ordinal: 0,
+        path: std::path::PathBuf::from("0000_inline_marker_fixture.sql"),
+        basename: "0000_inline_marker_fixture.sql".to_owned(),
+        timestamp: "0000".to_owned(),
+        sql: sql.to_owned(),
+    };
+    let occurrences = marker_occurrences_in_migration(&migration, family)
+        .unwrap_or_else(|error| panic!("inline marker parser rejected the fixture: {error}"));
+    assert_eq!(
+        occurrences.len(),
+        1,
+        "inline marker fixture must contain exactly one {start_marker}..{end_marker} block"
+    );
+    occurrences
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("validated inline marker occurrence must exist"))
+        .payload
 }
 
-/// `create [or replace] function public.<fn_name>(` を含む辞書順最後の migration を返す。
-/// `_before_NNNN` 委譲版（別名）・`alter ... rename`・`comment on` 行は定義として数えない。
-fn latest_migration_defining_function(fn_name: &str) -> PathBuf {
-    let needle = format!("function public.{fn_name}(");
-    migration_paths()
-        .into_iter()
-        .rfind(|path| {
-            fs::read_to_string(path)
-                .map(|content| {
-                    content
-                        .lines()
-                        .any(|line| line.contains("create") && line.contains(&needle))
-                })
-                .unwrap_or(false)
-        })
-        .unwrap_or_else(|| panic!("no migration defines function {fn_name}"))
+/// exact canonical identity で実効最新 CREATE FUNCTION carrier を返す。
+fn latest_migration_defining_function(fn_name: &str) -> std::path::PathBuf {
+    let (migrations, context) = resolved_candidate_migrations()
+        .unwrap_or_else(|error| panic!("candidate migration resolution failed: {error}"));
+    let identity = guard_identity(fn_name)
+        .unwrap_or_else(|error| panic!("guard identity lookup failed ({context}): {error}"));
+    latest_definition(&migrations, identity)
+        .unwrap_or_else(|error| panic!("effective definition lookup failed ({context}): {error}"))
+        .path
+}
+
+fn assert_marker_owner_matches(root: &Path, fn_name: &str, marker: &str) -> Result<(), String> {
+    let migrations = read_migrations(root)?;
+    let identity = guard_identity(fn_name)?;
+    let family = marker_family(marker)?;
+    let definition_path = latest_definition(&migrations, identity)?.path;
+    let marker_path = latest_effective_occurrence(&migrations, family)?.path;
+    if definition_path == marker_path {
+        return Ok(());
+    }
+
+    Err(format!(
+        "latest definition of {fn_name} is in {}, but latest standalone marker {marker} is in {}",
+        definition_path.display(),
+        marker_path.display()
+    ))
 }
 
 fn read_latest_migration_containing(needle: &str) -> String {
-    let path = latest_migration_containing(needle);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("migration {} should be readable", path.display()))
+    let (migrations, context) = resolved_candidate_migrations()
+        .unwrap_or_else(|error| panic!("candidate migration resolution failed: {error}"));
+    let family = marker_family(needle)
+        .unwrap_or_else(|error| panic!("marker family lookup failed ({context}): {error}"));
+    let occurrence = latest_effective_occurrence(&migrations, family)
+        .unwrap_or_else(|error| panic!("effective marker lookup failed ({context}): {error}"));
+    migrations
+        .into_iter()
+        .find(|migration| migration.path == occurrence.path)
+        .unwrap_or_else(|| {
+            panic!(
+                "effective marker carrier {} is outside the resolved candidate ({context})",
+                occurrence.path.display()
+            )
+        })
+        .sql
+}
+
+fn resolved_candidate_migrations() -> Result<(Vec<MigrationFile>, String), String> {
+    let resolved = resolve_from_environment(Path::new(env!("CARGO_MANIFEST_DIR")), None, None)
+        .map_err(|error| error.to_string())?;
+    let context = resolved.assertion_context().to_owned();
+    let migrations = read_migrations(resolved.root())?;
+    Ok((migrations, context))
+}
+
+fn candidate_assertion_context() -> String {
+    resolve_from_environment(Path::new(env!("CARGO_MANIFEST_DIR")), None, None)
+        .unwrap_or_else(|error| panic!("candidate migration resolution failed: {error}"))
+        .assertion_context()
+        .to_owned()
+}
+
+fn marker_family(start_marker: &str) -> Result<MarkerFamily, String> {
+    LEGACY_MARKER_FAMILIES
+        .into_iter()
+        .find(|family| family.start == start_marker)
+        .ok_or_else(|| format!("unknown parity marker start line {start_marker}"))
+}
+
+fn guard_identity(fn_name: &str) -> Result<&'static str, String> {
+    match fn_name {
+        UNKNOWN_KEY_FN => Ok("public.audit_metadata_has_unknown_key_for_action(text,text,jsonb)"),
+        FORBIDDEN_KEY_FN => Ok("public.audit_metadata_has_forbidden_key(jsonb)"),
+        LEDGER_FORBIDDEN_KEY_FN => Ok("public.ledger_payload_has_forbidden_key(jsonb)"),
+        INVALID_VALUE_FN => {
+            Ok("public.audit_metadata_has_invalid_value_for_action(text,text,jsonb)")
+        }
+        INCIDENT_TYPE_FN => Ok("public.incident_type_allowed(text)"),
+        SEVERITY_FN => Ok("public.incident_severity_allowed(text)"),
+        NOTIFICATION_RESULT_FN => Ok("public.incident_notification_result_allowed(text)"),
+        REQUIRED_KEY_FN => {
+            Ok("public.audit_metadata_has_missing_required_key_for_action(text,text,jsonb,boolean)")
+        }
+        _ => Err(format!("unknown parity guard function {fn_name}")),
+    }
 }
 
 fn extract_sql_forbidden_keys(sql: &str) -> BTreeSet<String> {
     extract_sql_keys_between(sql, FORBIDDEN_START_MARKER, FORBIDDEN_END_MARKER)
 }
 
-fn extract_sql_keys_between(sql: &str, start_marker: &str, end_marker: &str) -> BTreeSet<String> {
+fn extract_sql_keys_between(
+    sql: &str,
+    start_marker: &'static str,
+    end_marker: &'static str,
+) -> BTreeSet<String> {
     let key_block = marker_block(sql, start_marker, end_marker);
 
     let mut keys = BTreeSet::new();
