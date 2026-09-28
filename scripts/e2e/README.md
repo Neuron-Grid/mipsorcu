@@ -1,106 +1,51 @@
 # E2E scripts
 
-mipsorcu v0.1.0 の seed なし代表 E2E シナリオを実行する bash スクリプト群です。
+起動済みの mipsorcu server に対して、seed なしの代表シナリオを実行する bash スクリプトです。secret 作成 → alias 作成 → alias 経由の rotation → alias 経由の復号 → 監査・台帳の確認 → `auditor verify` の順に確認します。
 
-## 依存ツール
+## 前提
 
-- `bash`
-- `curl`
-- `jq`
-- `xxd`
-- `shasum`
-- `docker compose` (`MIPSORCU_E2E_MODE=container` の場合)
-- `mipsorcu` binary (`MIPSORCU_E2E_MODE=host` の場合)
-
-`shellcheck` は必須依存ではありません。現行スクリプトは `openssl` を使いません。
+- server が起動し、`/health` が `up`、`/ready` が `ready` であること
+- 台帳の署名鍵（`MIPSORCU_SIGNATURE_KEY_VERSION`、既定 `1`）が `active` であること
+- 通常の利用者の JWT と、`mipsorcu_roles` に `auditor` を含む利用者の JWT を用意していること
+- コマンド: `bash`, `curl`, `jq`, `xxd`, `shasum`。container モードでは `docker`、host モードでは `PATH` 上の `mipsorcu`
 
 ## 環境変数
 
-- `MIPSORCU_BASE_URL`: 任意。既定値は `http://127.0.0.1:3000`
-- `MIPSORCU_JWT`: 必須。secret create / alias / rotate / decrypt 用の owner JWT
-- `MIPSORCU_AUDITOR_JWT`: 必須。`/audit/v1` 読み取り用の auditor JWT
-- `MIPSORCU_E2E_MODE`: 任意。`container` または `host`。既定値は `container`
-- `MIPSORCU_E2E_STATE_DIR`: 任意。既定値は `/tmp/mipsorcu-e2e-state`
-- `STATE_DIR`: 任意。`MIPSORCU_E2E_STATE_DIR` 未指定時の互換 alias
-- `MIPSORCU_SIGNATURE_KEY_VERSION`: 任意。既定値は `1`
+| 変数 | 必須 | 既定値 | 内容 |
+|---|---|---|---|
+| `MIPSORCU_JWT` | 必須 | なし | secret と alias の操作に使う利用者の JWT |
+| `MIPSORCU_AUDITOR_JWT` | 必須 | なし | `/audit/v1` の読み取りに使う auditor の JWT |
+| `MIPSORCU_BASE_URL` | 任意 | `http://127.0.0.1:3000` | server の URL |
+| `MIPSORCU_E2E_MODE` | 任意 | `container` | `container`（`docker compose exec -T mipsorcu mipsorcu ...` で CLI を実行）または `host`（`mipsorcu ...`） |
+| `MIPSORCU_E2E_STATE_DIR` | 任意 | `/tmp/mipsorcu-e2e-state` | 手順間で ID などを受け渡すディレクトリ（`STATE_DIR` も互換名として読む） |
+| `MIPSORCU_SIGNATURE_KEY_VERSION` | 任意 | `1` | 確認する署名鍵の version |
+| `MIPSORCU_AUDIT_UI_BASE_URL` | 任意 | なし | 設定すると container モードで audit-ui への疎通も確認する |
 
-JWT、service role key、Master Key、ledger signing key、plaintext、`plaintext_hex` は `.env`、ドキュメント、ログ、チケットへ保存しないでください。
+JWT はファイル・ログ・チケットに保存しないでください。スクリプトは固定のテスト用平文を使い、復号結果はハッシュで照合します。
 
-## 一括実行
+## 実行
 
-リポジトリルート `/Users/neurongrid/Filen/Git/Individual_Projects/mipsorcu` で実行します。
+source repo のルートで実行します。
 
 ```sh
-cd "/Users/neurongrid/Filen/Git/Individual_Projects/mipsorcu"
-
-export MIPSORCU_BASE_URL="http://127.0.0.1:3000"
 export MIPSORCU_JWT="<owner_jwt>"
 export MIPSORCU_AUDITOR_JWT="<auditor_jwt>"
-export MIPSORCU_E2E_STATE_DIR="/tmp/mipsorcu-e2e-state"
-
 bash "scripts/e2e/run-all.sh"
 ```
 
-期待:
+成功すると終了コード 0 で `===== E2E PASSED =====` を出力します。state ディレクトリは残ります。
 
-- exit code 0
-- `===== E2E PASSED =====`
-- state が `/tmp/mipsorcu-e2e-state` に残る
-- `plaintext` ファイルは残らない
+個別に実行する場合も、`00-precheck.sh` から順に実行してください（`00` が state ディレクトリを初期化します）。
 
-## 個別実行順
+| スクリプト | 内容 |
+|---|---|
+| `00-precheck.sh` | 依存コマンド、`/health`・`/ready`、署名鍵の状態を確認し、state を初期化する |
+| `01-create-secret.sh` | `POST /v1/secrets` で secret を作成する |
+| `02-create-alias.sh` | alias を作成する |
+| `03-rotate-by-alias.sh` | alias を指定して rotation する |
+| `04-decrypt-current.sh` | alias を指定して復号し、平文のハッシュを照合する |
+| `05-verify-audit.sh` | `/audit/v1/audit-events` で `encrypt_create`・`secret_alias_create`・`encrypt_rotate`・`decrypt` を確認する |
+| `06-verify-ledger.sh` | `/audit/v1/ledger-entries` で `secret_created`・`secret_version_created`・`secret_decrypted` と、sequence の連続性・署名の形式を確認する |
+| `07-auditor-verify.sh` | `mipsorcu auditor verify` が `valid: true` かつ `checked_count > 0` を返すことを確認する |
 
-`00-precheck.sh` が state directory を初期化します。個別実行時も必ず 00 から順に実行します。
-
-```sh
-cd "/Users/neurongrid/Filen/Git/Individual_Projects/mipsorcu"
-
-bash "scripts/e2e/00-precheck.sh"
-bash "scripts/e2e/01-create-secret.sh"
-bash "scripts/e2e/02-create-alias.sh"
-bash "scripts/e2e/03-rotate-by-alias.sh"
-bash "scripts/e2e/04-decrypt-current.sh"
-bash "scripts/e2e/05-verify-audit.sh"
-bash "scripts/e2e/06-verify-ledger.sh"
-bash "scripts/e2e/07-auditor-verify.sh"
-```
-
-## Container 実行
-
-```sh
-cd "/Users/neurongrid/Filen/Git/Individual_Projects/mipsorcu"
-
-docker compose build
-docker compose up -d
-
-MIPSORCU_BASE_URL="http://127.0.0.1:3000" \
-MIPSORCU_JWT="<owner_jwt>" \
-MIPSORCU_AUDITOR_JWT="<auditor_jwt>" \
-bash "scripts/e2e/run-all.sh"
-```
-
-## Bare Metal 実行
-
-server が別プロセスで起動済みで、`mipsorcu` binary が `PATH` 上にあることを前提にします。
-
-```sh
-MIPSORCU_E2E_MODE="host" \
-MIPSORCU_BASE_URL="http://127.0.0.1:3000" \
-MIPSORCU_JWT="<owner_jwt>" \
-MIPSORCU_AUDITOR_JWT="<auditor_jwt>" \
-bash "scripts/e2e/run-all.sh"
-```
-
-## 確認内容
-
-- `/health` と `/ready`
-- signature key が `active`
-- secret create / alias create / alias rotate / alias decrypt
-- decrypt 結果の hash 一致
-- audit event: `encrypt_create`, `secret_alias_create`, `encrypt_rotate`, `decrypt`
-- ledger entry: `secret_created`, `secret_version_created`, `secret_decrypted`
-- ledger response 全体の sequence 連続性
-- ledger response 全体の Ed25519 署名と `signature_key_version > 0`
-- `mipsorcu auditor verify` の `valid: true` と `checked_count > 0`
-
-詳しい手順は、独立した docs repository の `e2e-v0.1.0.md` を参照してください（source repository の `docs/` には含まれません）。
+API と CLI の仕様は docs repo の `reference/http-api.md` と `reference/cli.md`、テスト全体は `development/testing.md` を参照してください。
