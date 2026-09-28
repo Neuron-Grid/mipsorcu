@@ -4,13 +4,13 @@
 
 mipsorcu v0.1.0 は、実験フェーズを閉じ、限定環境で安全に運用練習できる最初の安定版です。
 
-この release は「全機能が本番完成した版」ではありません。SBC を唯一の信頼境界とし、鍵・平文・認可判断を SBC 内部に閉じる中核設計を維持しながら、限定された環境で secret 管理、監査、復旧、検証の基本運用を反復できる状態を到達目標とします。
+この release は production-ready の完成版ではありません。single SBC / single replica の限定環境を前提に、SBC を唯一の信頼境界とし、鍵・平文・認可判断を SBC 内部に閉じながら、secret 管理、監査、復旧、検証の基本運用を反復できる範囲を対象とします。
 
 監査証跡、signed ledger、local audit fallback は v0.1.0 の core security property です。これらは補助機能ではなく、保存・復号・検証の安全性を説明するための中核要素として扱います。
 
 ## Core Scope
 
-| Area | v0.1.0 で保証する範囲 | Notes |
+| Area | v0.1.0 の対象範囲 | Notes |
 |---|---|---|
 | secret lifecycle | secret 作成、rotation、current version decrypt、owner scope alias | 復号対象は current version のみ。alias は `secret_id` の入力補助であり、AAD、暗号、監査、ledger の正本 ID ではありません。 |
 | Supabase boundary | Supabase RPC、RLS、JWT 認証認可 | 書き込みは SBC 経由の RPC に限定します。RLS と GRANT / REVOKE により client の直接書き込みを拒否します。 |
@@ -18,7 +18,7 @@ mipsorcu v0.1.0 は、実験フェーズを閉じ、限定環境で安全に運�
 | audit | audit event、成功監査、失敗監査、local audit fallback | `audit_events` を監査の正本とし、監査追記失敗時は SBC ローカルの fallback に残して再送します。 |
 | restore / integrity | restore test、integrity check | 限定環境で復元手順と整合性確認を運用練習できることを目標にします。 |
 | signed ledger | signed ledger、auditor verify、signature-key lifecycle | Ed25519 署名付き ledger と公開鍵 lifecycle により、監査対象の検証材料を保持します。署名秘密鍵は SBC 内に閉じます。 |
-| audit read path | read-only audit API、`audit-ui` | `audit-ui` は read-only 監査コンソールです。write / decrypt / repair 系の導線は持ちません。 |
+| audit read path | read-only audit API、`mipsorcu-audit-ui` | audit-ui は外部 companion repository の read-only 監査コンソールです。write / decrypt / repair 系の導線は持ちません。 |
 
 ## Limited Scope
 
@@ -48,6 +48,3 @@ mipsorcu v0.1.0 は、実験フェーズを閉じ、限定環境で安全に運�
 ## Related Documents
 
 - [known limitations](known-limitations.md)
-- [requirements](requirements.md)
-- [coding rules](coding-rules.md)
-- [v0.1.0 release task overview](v0.1.0-release-tasks/task-00-overview.md)

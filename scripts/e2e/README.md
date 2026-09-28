@@ -103,4 +103,4 @@ bash "scripts/e2e/run-all.sh"
 - ledger response 全体の Ed25519 署名と `signature_key_version > 0`
 - `mipsorcu auditor verify` の `valid: true` と `checked_count > 0`
 
-詳細は `docs/e2e-v0.1.0.md` を参照してください。
+詳しい手順は、独立した docs repository の `e2e-v0.1.0.md` を参照してください（source repository の `docs/` には含まれません）。

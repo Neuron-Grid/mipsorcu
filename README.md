@@ -1,6 +1,6 @@
 # mipsorcu
 
-機密情報を保存前に暗号化し、暗号文のみを外部ストレージへ保管する秘密情報管理システム。
+機密情報を保存前に暗号化し、平文を外部ストレージへ保管しない秘密情報管理システム。
 
 鍵管理・暗号操作・認可判断をプライベートネットワーク内部に設置した SBC（Single Board Computer）に集約することで、データベース側が侵害された場合でも平文を復元できない設計を採用しています。
 
@@ -12,11 +12,11 @@
 ## 1. 特徴
 
 - **信頼境界の集約**: 鍵の保持・暗号操作・認可判断を SBC 内部に閉じ込め、外部に露出しない構成。
-- **暗号文のみを永続化**: データベースには暗号文と関連メタデータのみを保存。Master Key を持たない限り平文を復元できない。
+- **平文を外部へ保存しない**: Supabase には暗号文、保護された Data Key、非秘密メタデータ、監査記録を保存。鍵の平文は保存しない。
 - **エンベロープ暗号化**: Master Key で各 secret 専用の Data Key を保護し、Data Key で平文を AEAD 暗号化する 2 段構成。
 - **監査台帳**: 操作イベントを正本として記録し、Ed25519 署名付き台帳によって改ざん検出を可能にする。
-- **fail-close 設計**: 認可・暗号・監査・整合性確認のいずれかが失敗した処理を成功として扱わない。
-- **読み取り専用の監査コンソール**: 監査担当者向けの UI を独立コンテナとして提供。書き込み・復号・修復系の導線は持たない。
+- **fail-close 設計**: 認可・暗号・監査正本・必須の台帳記録・整合性確認の失敗を成功として扱わない。SIEM など副次連携の失敗は別に扱う。
+- **読み取り専用の監査コンソール**: 外部 companion repository `mipsorcu-audit-ui` で提供。書き込み・復号・修復系の導線は持たない。
 
 ---
 
@@ -27,13 +27,13 @@
 本システムの信頼境界は SBC（Single Board Computer）です。以下の操作は SBC 内部でのみ実行されます。
 
 - Master Key の保持と使用
-- Data Key の生成・復号・再利用判断
+- Data Key の生成・unwrap / rewrap
 - 平文の暗号化・復号
 - JWT の検証
 - 認可判断
 - 署名秘密鍵の保持と署名生成
 
-外部データベースおよび UI コンテナは信頼境界の外側に位置し、復号能力・認可判断・鍵素材を持ちません。
+外部データベースおよび UI コンテナは信頼境界の外側に位置し、復号能力・認可判断・鍵の平文を持ちません。
 
 ### 2.2 リクエストフロー
 
@@ -101,9 +101,12 @@ mipsorcu/
 │   └── migrations/         # スキーマ / RLS / RPC 定義
 ├── compose.yaml
 ├── .env.example
-└── scripts/
+├── docs/                   # source repo に含まれる v0.1.0 release 文書
+│   ├── release-scope.md
+│   └── known-limitations.md
+└── scripts/                # E2E・失敗系など
 
-../mipsorcu-audit-ui/       # 外部必須成果物。監査担当者向け read-only UI
+../mipsorcu-audit-ui/       # 隣接配置した場合の外部 companion repo（read-only UI）
 ├── Dockerfile
 ├── nginx.conf
 ├── src/
@@ -117,7 +120,7 @@ mipsorcu/
 ### 5.1 前提
 
 - Docker および Docker Compose が利用可能であること
-- 外部データベース（Supabase project）が用意済み、または Supabase CLI でローカル起動できること
+- Supabase CLI でローカル開発用 DB を起動できること（外部 project を使う場合は migration 適用済みであること）
 - 監査 UI を使う場合は、外部 companion repo `../mipsorcu-audit-ui` が用意済みであること
 - JWT issuer / audience / JWKS URL が確定していること
 - Master Key、台帳署名鍵などの秘密値が生成済みであること
@@ -125,12 +128,13 @@ mipsorcu/
 ### 5.2 起動
 
 ```sh
-# 1. 環境変数を準備
+# 1. ローカル開発用 Supabase を起動し、migration を適用
+supabase start
+supabase db reset
+
+# 2. 環境変数を準備
 cp ".env.example" ".env"
 # .env を編集し、必要な値を実値に置換する
-
-# 2. データベース migration を適用
-supabase db push
 
 # 3. server container の build と起動
 docker compose build
@@ -141,16 +145,23 @@ curl http://127.0.0.1:3000/health
 curl http://127.0.0.1:3000/ready
 
 # 5. 監査 UI を外部 repo で build / run する場合
-cd "../mipsorcu-audit-ui"
-docker build -t "mipsorcu-audit-ui:local" "."
-docker run --rm -d --name "mipsorcu-audit-ui-local" -p "127.0.0.1:8080:8080" "mipsorcu-audit-ui:local"
-curl -fsS "http://127.0.0.1:8080/healthz"
-docker rm -f "mipsorcu-audit-ui-local"
+# 公開用 VITE_* の build 設定は外部 repo の README を確認する
+(
+  cd "../mipsorcu-audit-ui"
+  docker build -t "mipsorcu-audit-ui:local" "."
+  docker run --rm -d --name "mipsorcu-audit-ui-local" -p "127.0.0.1:8080:8080" "mipsorcu-audit-ui:local"
+  curl -fsS "http://127.0.0.1:8080/healthz"
+  docker rm -f "mipsorcu-audit-ui-local"
+)
 ```
+
+この例はローカル開発用 DB を前提とします。`supabase db reset` はローカル DB のデータを消去します。外部 project を使う場合は、接続先を確認してからその project に migration を適用してください。`.env` の Supabase / JWKS URL は server container から到達できる値を設定します（container 内の `127.0.0.1` はホストではありません）。監査 UI の例は静的配信の疎通確認です。ログイン・閲覧には外部 repo の README に従い、公開可能な `VITE_*` 値を build 時に指定してください。
 
 `.env` および永続化ボリュームには秘密値が含まれます。バージョン管理から除外し、アクセス制御・バックアップ対象として運用してください。
 
 ### 5.3 開発時のテスト
+
+以下は source repository のルートから実行します。Supabase のテストにはローカル開発用 DB を使用します。
 
 ```sh
 # Rust サーバー
@@ -158,7 +169,8 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 
-# データベース
+# データベース（ローカル開発用 DB のみ。reset はデータを消去します）
+supabase start
 supabase db reset
 supabase test db
 
@@ -182,11 +194,11 @@ bun run test:e2e
 | 復号 | 最新バージョンの復号 |
 | 監査イベント | 成功・失敗・認証失敗を記録。永続化失敗時は SBC 内部の fallback にバッファし、後で再送 |
 | 署名付き台帳 | Ed25519 署名により改ざんを検出可能にする |
-| Master Key rotation | バージョン管理されたキーリングによる再暗号化 |
+| Master Key rotation | 既存の Data Key を新しい Master Key で rewrap（本文は再暗号化しない） |
 | 整合性確認 / 復元テスト | 暗号文と平文の対応関係を確認する運用機能 |
 | 監査コンソール | read-only の閲覧 UI。書き込み・復号・修復系の導線は持たない |
 
-v0.1.0 で保証する範囲、限定的に扱う範囲、対象外の範囲については、リリース時のリリースノートで明示します。
+v0.1.0 の core scope と限定範囲は [release scope](docs/release-scope.md)、運用上の注意点は [known limitations](docs/known-limitations.md) を参照してください。scheduler、SIEM、archive、timestamping、incident notification、monthly digest / report は本番完成版として扱いません。
 
 ---
 
@@ -206,11 +218,9 @@ v0.1.0 で保証する範囲、限定的に扱う範囲、対象外の範囲に�
 
 ## 8. 開発ステータス
 
-本プロジェクトは v0.1.0 のリリース準備フェーズにあります。v0.1.0 は、限定環境で secret 管理・監査・復旧・検証の基本運用を反復するための最初の安定版として位置づけられており、全機能が本番完成した版ではありません。
+v0.1.0 は、single SBC / single replica の限定環境で secret 管理・監査・復旧・検証の基本運用を反復するための最初の安定版です。production-ready の完成版ではなく、本番 SLA や HA / multi-replica は対象外です。
 
-詳細なリリース範囲・既知の制限事項・運用前提は、リリース時に公開予定のリリースノートおよびドキュメントを参照してください。
-
-v0.2.0 の計画範囲は [v0.2.0 release scope](docs/release-scope-v0.2.0.md)、既知の制限は [v0.2.0 known limitations](docs/known-limitations-v0.2.0.md)、v0.3 以降の方向性は [release roadmap](docs/release-roadmap.md) を参照してください。
+本 README のリリース範囲は v0.1.0 を対象とします。開発中の追加機能を v0.1.0 の提供範囲や将来バージョンの確定した計画として扱いません。
 
 ---
 

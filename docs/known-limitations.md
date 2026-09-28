@@ -4,9 +4,9 @@
 
 この文書は、mipsorcu v0.1.0 の known limitations を定義します。
 
-v0.1.0 は、限定環境で secret 管理、監査、復旧、検証を安全に運用練習するための release です。全機能が本番完成した状態、または任意の運用環境で同じ保証を提供する状態ではありません。
+v0.1.0 は、single SBC / single replica の限定環境で secret 管理、監査、復旧、検証を運用練習するための release です。production-ready の完成版ではなく、任意の運用環境で同じ保証を提供する状態でもありません。
 
-監査証跡、signed ledger、local audit fallback は core security property です。これらは v0.1.0 の保証範囲に含めますが、SIEM、archive、timestamping、scheduler、incident notification、monthly digest / audit report は以下の制限を持ちます。
+監査証跡、signed ledger、local audit fallback は v0.1.0 の core scope です。一方、SIEM、archive、timestamping、scheduler、incident notification、monthly digest / audit report は以下の制限を持ちます。
 
 ## Not Guaranteed in v0.1.0
 
@@ -76,7 +76,7 @@ monthly digest / audit report は運用補助機能です。
 
 ## Audit UI
 
-`audit-ui` は read-only 監査コンソールです。
+外部 companion repository `mipsorcu-audit-ui` の audit-ui は read-only 監査コンソールです。
 
 - read-only audit API の閲覧だけを目的とします。
 - secret 作成、更新、削除、rotation、decrypt の導線を持ちません。
@@ -87,5 +87,3 @@ monthly digest / audit report は運用補助機能です。
 ## Related Documents
 
 - [release scope](release-scope.md)
-- [requirements](requirements.md)
-- [coding rules](coding-rules.md)
