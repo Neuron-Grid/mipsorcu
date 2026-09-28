@@ -39,6 +39,8 @@ const NOTIFICATION_RESULT_START_MARKER: &str = "-- NOTIFICATION_RESULT_ALLOWLIST
 const NOTIFICATION_RESULT_END_MARKER: &str = "-- NOTIFICATION_RESULT_ALLOWLIST_END";
 const REQUIRED_KEY_START_MARKER: &str = "-- REQUIRED_KEY_START";
 const REQUIRED_KEY_END_MARKER: &str = "-- REQUIRED_KEY_END";
+const INTEGRITY_CHECK_ACTIONS_START_MARKER: &str = "-- INTEGRITY_CHECK_AUDIT_ACTIONS_START";
+const INTEGRITY_CHECK_ACTIONS_END_MARKER: &str = "-- INTEGRITY_CHECK_AUDIT_ACTIONS_END";
 
 // SQL 側ガード関数名（実効最新定義の自動発見・メタテスト用）。
 const UNKNOWN_KEY_FN: &str = "audit_metadata_has_unknown_key_for_action";
@@ -48,6 +50,9 @@ const INCIDENT_TYPE_FN: &str = "incident_type_allowed";
 const SEVERITY_FN: &str = "incident_severity_allowed";
 const NOTIFICATION_RESULT_FN: &str = "incident_notification_result_allowed";
 const REQUIRED_KEY_FN: &str = "audit_metadata_has_missing_required_key_for_action";
+const INTEGRITY_CHECK_FN: &str = "rpc_integrity_check";
+// audit_events.action の CHECK 制約名（DB が受け付ける action 語彙）。
+const AUDIT_ACTION_CONSTRAINT: &str = "audit_events_action_allowed";
 
 #[test]
 fn forbidden_keys_parity_between_rust_and_sql() {
@@ -134,6 +139,51 @@ fn integrity_check_violation_summary_allowlist_parity() {
     assert_eq!(rust_summary, sql_summary);
 }
 
+#[test]
+fn integrity_check_audit_action_vocabulary_parity_between_rust_and_sql() {
+    // rpc_integrity_check が正当とみなす action 語彙（実効最新定義の marker 区間）は、
+    // Rust の AuditAction の全 variant と一致しなければならない。
+    let migration = read_latest_migration_containing(INTEGRITY_CHECK_ACTIONS_START_MARKER);
+    let sql_actions = extract_sql_keys_between(
+        &migration,
+        INTEGRITY_CHECK_ACTIONS_START_MARKER,
+        INTEGRITY_CHECK_ACTIONS_END_MARKER,
+    );
+    let rust_actions = all_actions()
+        .into_iter()
+        .map(|action| action.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        rust_actions, sql_actions,
+        "rpc_integrity_check の action 語彙が Rust の AuditAction と一致しない。"
+    );
+    for action in &sql_actions {
+        assert!(
+            AuditAction::parse(action).is_ok(),
+            "rpc_integrity_check の action 語彙に Rust が解釈できない値がある: {action}"
+        );
+    }
+}
+
+#[test]
+fn integrity_check_audit_action_vocabulary_matches_audit_events_constraint() {
+    // audit_events_action_allowed 制約だけを拡張して rpc_integrity_check の語彙を
+    // 更新し忘れると、正当なイベントが audit_action_invalid として数えられる。
+    let migration = read_latest_migration_containing(INTEGRITY_CHECK_ACTIONS_START_MARKER);
+    let integrity_check_actions = extract_sql_keys_between(
+        &migration,
+        INTEGRITY_CHECK_ACTIONS_START_MARKER,
+        INTEGRITY_CHECK_ACTIONS_END_MARKER,
+    );
+
+    assert_eq!(
+        latest_audit_action_constraint_values(),
+        integrity_check_actions,
+        "rpc_integrity_check の action 語彙が最新の audit_events_action_allowed 制約と一致しない。"
+    );
+}
+
 // ─── Meta-guards: 実効最新定義がマーカーを保持しているか（陳腐化再発防止の核心） ───
 
 #[test]
@@ -146,6 +196,17 @@ fn latest_unknown_key_definition_carries_allowlist_markers() {
         latest_migration_containing(ALLOWLIST_START_MARKER),
         "audit_metadata_has_unknown_key_for_action の最新定義がマーカー付き完全 allowlist を保持していない。\
          再定義する migration は ACTION_ALLOWLIST_START/END 込みで全 action を完全再掲すること（docs/coding-rules.md §14）。"
+    );
+}
+
+#[test]
+fn latest_integrity_check_definition_carries_audit_action_markers() {
+    assert_eq!(
+        latest_migration_defining_function(INTEGRITY_CHECK_FN),
+        latest_migration_containing(INTEGRITY_CHECK_ACTIONS_START_MARKER),
+        "rpc_integrity_check の最新定義が INTEGRITY_CHECK_AUDIT_ACTIONS マーカーを保持していない。\
+         再定義する migration は INTEGRITY_CHECK_AUDIT_ACTIONS_START/END 込みで全 action を完全再掲すること\
+         （docs/development/coding-rules.md §7）。"
     );
 }
 
@@ -1494,6 +1555,53 @@ fn latest_migration_defining_function(fn_name: &str) -> PathBuf {
                 .unwrap_or(false)
         })
         .unwrap_or_else(|| panic!("no migration defines function {fn_name}"))
+}
+
+/// `add constraint audit_events_action_allowed check (` を独立行として持つ辞書順最後の
+/// migration から、`action in (` 直後の各行の値を返す（= DB が受け付ける最新の action 語彙）。
+fn latest_audit_action_constraint_values() -> BTreeSet<String> {
+    let constraint_line = format!("add constraint {AUDIT_ACTION_CONSTRAINT} check (");
+    let path = migration_paths()
+        .into_iter()
+        .rfind(|path| {
+            fs::read_to_string(path)
+                .map(|content| content.lines().any(|line| line.trim() == constraint_line))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("no migration adds constraint {AUDIT_ACTION_CONSTRAINT}"));
+    let sql = fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("migration {} should be readable", path.display()));
+
+    let mut lines = sql
+        .lines()
+        .skip_while(|line| line.trim() != constraint_line)
+        .skip(1);
+    assert_eq!(
+        lines.next().map(str::trim),
+        Some("action in ("),
+        "{AUDIT_ACTION_CONSTRAINT} in {} should start with `action in (`",
+        path.display()
+    );
+
+    let mut values = BTreeSet::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == ")" {
+            return values;
+        }
+        let value = trimmed.trim_end_matches(',');
+        assert!(
+            value.len() >= 2 && value.starts_with('\'') && value.ends_with('\''),
+            "unexpected line in {AUDIT_ACTION_CONSTRAINT} of {}: {trimmed}",
+            path.display()
+        );
+        values.insert(value[1..value.len() - 1].to_owned());
+    }
+
+    panic!(
+        "{AUDIT_ACTION_CONSTRAINT} in {} is not terminated",
+        path.display()
+    );
 }
 
 fn read_latest_migration_containing(needle: &str) -> String {

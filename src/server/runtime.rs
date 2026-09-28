@@ -173,7 +173,7 @@ fn parse_entrypoint_command(args: &[String]) -> EntrypointCommand<'_> {
 }
 
 pub async fn run() {
-    init_tracing();
+    init_server_tracing();
 
     let config = config::load_config().unwrap_or_else(|error| {
         tracing::error!(error = %error, "configuration loading failed");
@@ -183,11 +183,32 @@ pub async fn run() {
     run_server_with_config(config).await;
 }
 
+/// `RUST_LOG` が未設定または空のときに server が使う filter directive。
+/// mipsorcu 自身の info 以上を出し、依存 crate は従来どおり error 以上に留める。
+const SERVER_DEFAULT_LOG_DIRECTIVES: &str = "error,mipsorcu=info";
+
 fn init_tracing() {
     fmt::fmt()
         .json()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+}
+
+fn init_server_tracing() {
+    let rust_log = std::env::var(EnvFilter::DEFAULT_ENV).ok();
+    fmt::fmt()
+        .json()
+        .with_env_filter(server_env_filter(rust_log.as_deref()))
+        .init();
+}
+
+/// server 用の filter を組み立てる。`RUST_LOG` に値があれば従来どおりその値に従い
+/// （不正な directive は無視する）、未設定または空なら既定の directive を使う。
+fn server_env_filter(rust_log: Option<&str>) -> EnvFilter {
+    match rust_log {
+        Some(directives) if !directives.trim().is_empty() => EnvFilter::new(directives),
+        _ => EnvFilter::new(SERVER_DEFAULT_LOG_DIRECTIVES),
+    }
 }
 
 async fn run_server_with_config(config: config::AppConfig) {

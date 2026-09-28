@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,7 +17,7 @@ use crate::server::supabase::{SupabaseAuditAppender, SupabaseClient};
 use crate::types::SourceEventAt;
 
 use super::{
-    EntrypointCommand, drain_incident_aggregate_flush, parse_entrypoint_command,
+    EntrypointCommand, drain_incident_aggregate_flush, parse_entrypoint_command, server_env_filter,
     spawn_incident_aggregate_flush_loop,
 };
 
@@ -167,4 +167,108 @@ async fn incident_aggregate_drain_waits_for_loop_and_runs_final_flush() {
 
     assert!(loop_waited.load(Ordering::SeqCst));
     assert_eq!(observed_sink.notification_count(), 2);
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+struct CapturedLogWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl CapturedLogs {
+    fn contents(&self) -> String {
+        let bytes = self
+            .bytes
+            .lock()
+            .expect("captured log buffer lock should be available");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogWriter {
+            bytes: self.bytes.clone(),
+        }
+    }
+}
+
+impl std::io::Write for CapturedLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut bytes = self
+            .bytes
+            .lock()
+            .expect("captured log buffer lock should be available");
+        bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// filter を通して、mipsorcu 自身（本 module の target）と依存 crate 相当の target の
+/// event を 1 件ずつ出し、出力されたログを返す。
+fn logs_emitted_through(filter: tracing_subscriber::EnvFilter) -> String {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(logs.clone())
+        .with_env_filter(filter)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!("mipsorcu info event");
+        tracing::info!(target: "dependency_crate", "dependency info event");
+        tracing::warn!(target: "dependency_crate", "dependency warn event");
+        tracing::error!(target: "dependency_crate", "dependency error event");
+    });
+
+    logs.contents()
+}
+
+fn assert_server_default_log_filter(logs: &str) {
+    assert!(logs.contains("mipsorcu info event"));
+    assert!(!logs.contains("dependency info event"));
+    assert!(!logs.contains("dependency warn event"));
+    assert!(logs.contains("dependency error event"));
+}
+
+#[test]
+fn server_log_filter_emits_mipsorcu_info_when_rust_log_is_unset() {
+    assert_server_default_log_filter(&logs_emitted_through(server_env_filter(None)));
+}
+
+#[test]
+fn server_log_filter_treats_empty_or_blank_rust_log_as_unset() {
+    for value in ["", "   "] {
+        assert_server_default_log_filter(&logs_emitted_through(server_env_filter(Some(value))));
+    }
+}
+
+#[test]
+fn server_log_filter_follows_rust_log_when_set() {
+    let warn_logs = logs_emitted_through(server_env_filter(Some("warn")));
+    assert!(!warn_logs.contains("mipsorcu info event"));
+    assert!(!warn_logs.contains("dependency info event"));
+    assert!(warn_logs.contains("dependency warn event"));
+    assert!(warn_logs.contains("dependency error event"));
+
+    let info_logs = logs_emitted_through(server_env_filter(Some("info")));
+    assert!(info_logs.contains("mipsorcu info event"));
+    assert!(info_logs.contains("dependency info event"));
+}
+
+#[test]
+fn server_log_filter_keeps_ignoring_invalid_rust_log_directives() {
+    let logs = logs_emitted_through(server_env_filter(Some("mipsorcu=not-a-level")));
+    assert!(!logs.contains("mipsorcu info event"));
+    assert!(!logs.contains("dependency warn event"));
+    assert!(logs.contains("dependency error event"));
 }

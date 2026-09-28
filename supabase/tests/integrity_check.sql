@@ -200,6 +200,82 @@ select is(
 
 reset role;
 
+-- Every action allowed by the audit_events vocabulary (the
+-- audit_events_action_allowed CHECK constraint) is a legitimate action and
+-- must not be counted as audit_action_invalid.
+create temp table integrity_allowed_actions as
+select distinct matched[1] as action
+from pg_constraint c
+cross join lateral regexp_matches(
+    pg_get_constraintdef(c.oid),
+    '''([a-z0-9_]+)''::text',
+    'g'
+) as matched
+where c.conrelid = 'public.audit_events'::regclass
+    and c.conname = 'audit_events_action_allowed';
+
+do $$
+declare
+    v_action text;
+begin
+    for v_action in select action from integrity_allowed_actions order by action
+    loop
+        begin
+            insert into public.audit_events (request_id, action, result)
+            values (gen_random_uuid(), v_action, 'success');
+        exception
+            when check_violation then
+                insert into public.audit_events (request_id, action, result)
+                values (gen_random_uuid(), v_action, 'failure');
+        end;
+    end loop;
+end;
+$$;
+
+select is(
+    (
+        select count(distinct ae.action)::integer
+        from public.audit_events ae
+        where ae.action in (select action from integrity_allowed_actions)
+    ),
+    (select count(*)::integer from integrity_allowed_actions),
+    'fixture has an audit event for every action allowed by audit_events_action_allowed'
+);
+
+select is(
+    (
+        select (violation_summary ->> 'audit_action_invalid')::integer
+        from public.rpc_integrity_check()
+    ),
+    0,
+    'integrity check does not count actions allowed by audit_events_action_allowed as invalid'
+);
+
+select is(
+    (
+        select violation_count
+        from public.rpc_integrity_check()
+    ),
+    0,
+    'integrity check returns zero violations when every allowed action is present'
+);
+
+-- An action outside the vocabulary can only exist if the CHECK constraint is
+-- bypassed; drop it inside this rolled-back transaction to inject one row.
+alter table public.audit_events drop constraint audit_events_action_allowed;
+
+insert into public.audit_events (request_id, action, result)
+values (gen_random_uuid(), 'integrity_check_unknown_test_action', 'success');
+
+select is(
+    (
+        select (violation_summary ->> 'audit_action_invalid')::integer
+        from public.rpc_integrity_check()
+    ),
+    1,
+    'integrity check counts an audit event whose action is outside the vocabulary'
+);
+
 select * from finish();
 
 rollback;
