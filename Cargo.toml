@@ -10,25 +10,25 @@ axum = { version = "0.8", features = ["json"] }
 chacha20poly1305 = "0.10.1"
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["fast", "std", "zeroize"] }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
-getrandom = "0.4.2"
+getrandom = "0.4.3"
 hex = "0.4"
 hmac = "0.13"
 http = "1"
 jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
 libc = "0.2"
 reqwest = { version = "0.13", features = ["rustls", "json"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-sha2 = "0.11.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
 sha3 = "0.12"
-time = { version = "0.3.47", features = ["formatting", "parsing"] }
+time = { version = "0.3.55", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tokio-cron-scheduler = "0.15.1"
 tower-http = { version = "0.6", features = ["trace", "sensitive-headers"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-uuid = "1.23.2"
-zeroize = "1.8.2"
+uuid = "1.29.2"
+zeroize = "1.9.1"
 fs4 = "1.1.0"
 x509-tsp = "0.1"
 cms = { version = "0.2", default-features = false, features = ["alloc", "std"] }
@@ -40,7 +40,7 @@ spki = "0.7"
 cmpv2 = "0.2"
 cms = { version = "0.2", default-features = false, features = ["alloc", "std"] }
 der = { version = "0.7", features = ["alloc", "oid"] }
-proptest = "1.11.0"
+proptest = "1.12.0"
 spki = "0.7"
 tokio = { version = "1", features = ["test-util"] }
 wiremock = "0.6"
