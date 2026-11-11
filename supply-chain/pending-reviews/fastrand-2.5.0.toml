@@ -1,0 +1,13 @@
+# This file is evidence for human review, not a cargo-vet audit.
+status = "pending-human-review"
+reviewer = "OpenAI Codex (automated source review)"
+crate = "fastrand"
+version = "2.5.0"
+proposed_criteria = "safe-to-run"
+source = "https://static.crates.io/crates/fastrand/fastrand-2.5.0.crate"
+sha256 = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+reviewed_files = ["Cargo.toml", "src/lib.rs", "src/global_rng.rs", "tests/", "benches/"]
+test_command = "cargo test --locked"
+test_result = "On the host: 32 integration tests and 9 doctests passed."
+findings = "No build script, unsafe code, filesystem, network, process or environment access was found in the library. The optional wasm js path calls getrandom. Wyrand is not cryptographically secure."
+limitations = "No human approval. Wasm execution and getrandom's implementation were not reviewed; transitive dependencies require separate vetting. This review does not certify cryptographic use."

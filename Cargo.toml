@@ -14,14 +14,14 @@ getrandom = "0.4.3"
 hex = "0.4"
 hmac = "0.13"
 http = "1"
-jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
 libc = "0.2"
 reqwest = { version = "0.13", features = ["rustls", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 sha3 = "0.12"
-time = { version = "0.3.55", features = ["formatting", "parsing"] }
+time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tokio-cron-scheduler = "0.15.1"
 tower-http = { version = "0.6", features = ["trace", "sensitive-headers"] }
@@ -37,6 +37,7 @@ cmpv2 = "0.2"
 spki = "0.7"
 
 [dev-dependencies]
+jsonwebtoken = { version = "10.4.0", features = ["use_pem"] }
 cmpv2 = "0.2"
 cms = { version = "0.2", default-features = false, features = ["alloc", "std"] }
 der = { version = "0.7", features = ["alloc", "oid"] }

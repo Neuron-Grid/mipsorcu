@@ -67,4 +67,4 @@ jobs:
       - if: ${{ !cancelled() && steps.install_deny.outcome == 'success' }}
         run: cargo deny --locked check
       - if: ${{ !cancelled() && steps.install_vet.outcome == 'success' }}
-        run: cargo vet --locked
+        run: cargo vet --locked --no-minimize-exemptions
