@@ -56,10 +56,15 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
-      - run: cargo install --locked cargo-deny --version 0.20.2
+      - id: toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
+      - id: install_deny
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo install --locked cargo-deny --version 0.20.2
       - id: install_vet
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: cargo install --locked cargo-vet --version 0.10.2
-      - run: cargo deny --locked check
+      - if: ${{ !cancelled() && steps.install_deny.outcome == 'success' }}
+        run: cargo deny --locked check
       - if: ${{ !cancelled() && steps.install_vet.outcome == 'success' }}
         run: cargo vet --locked

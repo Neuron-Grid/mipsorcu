@@ -1,7 +1,11 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.fastrand]]
+who = "OpenAI Codex (automated source review)"
+criteria = "safe-to-run"
+version = "2.5.0"
+notes = "Automated review of published fastrand 2.5.0 source, manifest, tests and benches; crate checksum da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223 matches Cargo.lock. No build script, unsafe code, filesystem, network, process or environment access in the library; optional getrandom is wasm-only with js. Test-only dependency through proptest and tempfile. Wyrand is not cryptographically secure and this review does not certify cryptographic use. Local crate tests and doctests passed. Wasm execution and getrandom implementation were not reviewed; transitive dependencies require separate vetting. No human review."
 
 [[trusted.hyper]]
 criteria = "safe-to-deploy"
