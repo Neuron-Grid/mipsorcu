@@ -53,52 +53,44 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
-      - run: cargo install --locked cargo-deny --version 0.20.2
-      - run: cargo deny --locked check
-
-  cargo-vet:
-    name: cargo-vet (informational)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
       - id: toolchain
         run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
+      - id: install_deny
+        if: ${{ always() && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: cargo install --locked cargo-deny --version 0.20.2
+      - id: deny
+        if: ${{ always() && steps.install_deny.outcome == 'success' }}
+        run: cargo deny --locked check
       - id: install_vet
+        if: ${{ always() && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo install --locked cargo-vet --version 0.10.2
       - id: vet
-        run: cargo vet --locked --no-minimize-exemptions 2>&1 | tee "$RUNNER_TEMP/cargo-vet.log"
-      - name: Summarize cargo-vet
+        if: ${{ always() && steps.install_vet.outcome == 'success' }}
+        run: cargo vet --locked --no-minimize-exemptions
+      - name: Summarize security checks
         if: ${{ always() }}
         env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
           TOOLCHAIN_OUTCOME: ${{ steps.toolchain.outcome }}
+          INSTALL_DENY_OUTCOME: ${{ steps.install_deny.outcome }}
+          DENY_OUTCOME: ${{ steps.deny.outcome }}
           INSTALL_OUTCOME: ${{ steps.install_vet.outcome }}
           VET_OUTCOME: ${{ steps.vet.outcome }}
         run: |
           {
-            echo '## cargo-vet (informational)'
-            echo "Toolchain: ${TOOLCHAIN_OUTCOME:-not run}; installation: ${INSTALL_OUTCOME:-not run}; check: ${VET_OUTCOME:-not run}."
-            if [ "$VET_OUTCOME" = success ]; then
-              echo 'The cargo-vet check passed.'
-            elif [ "$VET_OUTCOME" = failure ]; then
-              if grep -q 'unvetted dependencies:' "$RUNNER_TEMP/cargo-vet.log"; then
-                echo 'The check failed with unvetted dependencies. See the output below for counts and details.'
-              else
-                echo 'The check failed. See the output below for the cause.'
-              fi
-            else
-              echo 'The check did not run. See the setup step logs for the cause.'
-            fi
-            if [ -f "$RUNNER_TEMP/cargo-vet.log" ]; then
-              printf '\n<details><summary>cargo-vet output</summary>\n\n```text\n'
-              cat "$RUNNER_TEMP/cargo-vet.log"
-              printf '\n```\n</details>\n'
-            fi
+            echo '## Security validation'
+            echo "Checkout: ${CHECKOUT_OUTCOME:-not run}; toolchain: ${TOOLCHAIN_OUTCOME:-not run}."
+            echo "cargo-deny installation: ${INSTALL_DENY_OUTCOME:-not run}; check: ${DENY_OUTCOME:-not run}."
+            echo "cargo-vet installation: ${INSTALL_OUTCOME:-not run}; check: ${VET_OUTCOME:-not run}."
+            echo 'See the individual step logs for check output.'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Require both security checks
+        if: ${{ always() }}
+        env:
+          DENY_OUTCOME: ${{ steps.deny.outcome }}
+          VET_OUTCOME: ${{ steps.vet.outcome }}
+        run: test "$DENY_OUTCOME" = success && test "$VET_OUTCOME" = success
