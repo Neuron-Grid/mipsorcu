@@ -7,6 +7,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 require_command "curl"
 require_command "docker"
 require_safe_mutating_environment
+require_env "MIPSORCU_JWT"
+require_env "TEST_SECRET_ID"
 
 log_info "Scenario 5: Supabase connectivity loss"
 
@@ -20,7 +22,11 @@ network_disconnected="0"
 restore_network() {
     if [[ "${network_disconnected}" == "1" ]]; then
         log_info "restoring compose network ${network_name}"
-        docker network connect "${network_name}" "${container_id}" >/dev/null 2>&1 || true
+        docker network connect "${network_name}" "${container_id}" >/dev/null 2>&1 || {
+            log_error "failed to restore compose network ${network_name}"
+            return 1
+        }
+        network_disconnected="0"
     fi
 }
 trap restore_network EXIT
@@ -46,28 +52,23 @@ case "${down_status}" in
     *) fail "/ready stayed healthy during Supabase connectivity loss: ${down_status}" ;;
 esac
 
-if [[ -n "${MIPSORCU_JWT:-}" && -n "${TEST_SECRET_ID:-}" ]]; then
-    log_info "checking decrypt path while Supabase connectivity is unavailable"
-    result="$(
-        http_request \
-            --max-time 10 \
-            -X POST \
-            -H "Authorization: Bearer ${MIPSORCU_JWT}" \
-            -H "Content-Type: application/json" \
-            --data '{}' \
-            "${MIPSORCU_BASE_URL}/v1/secrets/${TEST_SECRET_ID}/decrypt"
-    )"
-    status="${result%%|*}"
-    body="${result#*|}"
+log_info "checking decrypt path while Supabase connectivity is unavailable"
+result="$(
+    http_request \
+        --max-time 10 \
+        -X POST \
+        -H "Authorization: Bearer ${MIPSORCU_JWT}" \
+        -H "Content-Type: application/json" \
+        --data '{}' \
+        "${MIPSORCU_BASE_URL}/v1/secrets/${TEST_SECRET_ID}/decrypt"
+)"
+status="${result%%|*}"
+body="${result#*|}"
 
-    assert_not_success_status "${status}"
-    assert_no_forbidden_material "decrypt failure response body" "${body}"
-else
-    log_info "MIPSORCU_JWT or TEST_SECRET_ID is not set; skipping decrypt-path check"
-fi
+assert_not_success_status "${status}"
+assert_no_forbidden_material "decrypt failure response body" "${body}"
 
 restore_network
-network_disconnected="0"
 trap - EXIT
 
 wait_for_http_status "${MIPSORCU_BASE_URL}/ready" "200" "18" "5"

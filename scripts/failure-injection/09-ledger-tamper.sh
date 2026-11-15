@@ -14,14 +14,27 @@ require_local_test_db_url
 target_sequence=""
 original_signature_hex=""
 max_sequence=""
+tampering_started="0"
 
 restore_ledger_entry() {
+    local restore_failed=0
+
+    [[ "${tampering_started}" == "1" ]] || return 0
+
     log_info "restoring ledger entry and immutable trigger"
     if [[ -n "${target_sequence}" && -n "${original_signature_hex}" ]]; then
-        psql_exec "ALTER TABLE public.ledger_entries DISABLE TRIGGER ledger_entries_no_update_delete;" || true
-        psql_exec "UPDATE public.ledger_entries SET signature = decode('${original_signature_hex}', 'hex') WHERE sequence_no = ${target_sequence};" || true
+        psql_exec "ALTER TABLE public.ledger_entries DISABLE TRIGGER ledger_entries_no_update_delete;" || restore_failed=1
+        if [[ "${restore_failed}" == "0" ]]; then
+            psql_exec "UPDATE public.ledger_entries SET signature = decode('${original_signature_hex}', 'hex') WHERE sequence_no = ${target_sequence};" || restore_failed=1
+        fi
     fi
-    psql_exec "ALTER TABLE public.ledger_entries ENABLE TRIGGER ledger_entries_no_update_delete;" || true
+    psql_exec "ALTER TABLE public.ledger_entries ENABLE TRIGGER ledger_entries_no_update_delete;" || restore_failed=1
+
+    if [[ "${restore_failed}" == "1" ]]; then
+        log_error "ledger restore failed"
+        return 1
+    fi
+    tampering_started="0"
 }
 trap restore_ledger_entry EXIT
 
@@ -55,6 +68,7 @@ printf '%s' "${pre_output}" | jq -e '.valid == true' >/dev/null \
     || fail "precondition failed: auditor verify returned valid=false before tampering"
 
 log_info "tampering ledger entry signature at sequence ${target_sequence}"
+tampering_started="1"
 psql_exec "ALTER TABLE public.ledger_entries DISABLE TRIGGER ledger_entries_no_update_delete;"
 psql_exec "UPDATE public.ledger_entries SET signature = decode(repeat('00', 64), 'hex') WHERE sequence_no = ${target_sequence};"
 psql_exec "ALTER TABLE public.ledger_entries ENABLE TRIGGER ledger_entries_no_update_delete;"
