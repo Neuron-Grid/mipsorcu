@@ -48,6 +48,25 @@ jobs:
       - run: supabase start > /dev/null
       - run: bash scripts/check-core.sh db
 
+  orchestrator:
+    name: Orchestrator validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy && rustup default 1.95.0
+      - run: cargo fmt --manifest-path orchestrator/Cargo.toml -- --check
+      - run: cargo clippy --locked --manifest-path orchestrator/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --manifest-path orchestrator/Cargo.toml
+
+  orchestrator_postgres:
+    name: Disposable orchestrator PostgreSQL tests
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "echo 'FAIL: disposable orchestrator PostgreSQL runner is not implemented yet' >&2; exit 1"
+
   cargo_deny:
     name: cargo-deny
     runs-on: ubuntu-24.04
@@ -71,7 +90,8 @@ jobs:
       - run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
       - run: cargo install --locked cargo-vet --version 0.10.2
       - run: cargo vet --locked --no-minimize-exemptions
-      - run: python3 scripts/check-cargo-vet-exemptions.py
+      - if: ${{ always() }}
+        run: python3 scripts/check-cargo-vet-exemptions.py
 
   e2e:
     name: Disposable E2E
@@ -100,13 +120,15 @@ jobs:
   required:
     name: Required validation result
     if: ${{ always() }}
-    needs: [rust, supabase, cargo_deny, cargo_vet, e2e, failure_injection, validation_tests]
+    needs: [rust, supabase, orchestrator, orchestrator_postgres, cargo_deny, cargo_vet, e2e, failure_injection, validation_tests]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every validation job to succeed
         env:
           RUST_RESULT: ${{ needs.rust.result }}
           SUPABASE_RESULT: ${{ needs.supabase.result }}
+          ORCHESTRATOR_RESULT: ${{ needs.orchestrator.result }}
+          ORCHESTRATOR_POSTGRES_RESULT: ${{ needs.orchestrator_postgres.result }}
           CARGO_DENY_RESULT: ${{ needs.cargo_deny.result }}
           CARGO_VET_RESULT: ${{ needs.cargo_vet.result }}
           E2E_RESULT: ${{ needs.e2e.result }}
@@ -115,6 +137,8 @@ jobs:
         run: |
           test "$RUST_RESULT" = success &&
           test "$SUPABASE_RESULT" = success &&
+          test "$ORCHESTRATOR_RESULT" = success &&
+          test "$ORCHESTRATOR_POSTGRES_RESULT" = success &&
           test "$CARGO_DENY_RESULT" = success &&
           test "$CARGO_VET_RESULT" = success &&
           test "$E2E_RESULT" = success &&

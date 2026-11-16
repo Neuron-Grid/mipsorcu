@@ -2,6 +2,7 @@ use std::{env, time::Duration};
 
 use mipsorcu_orchestrator::{
     domain::{self, ObservedFacts, State, TaskRecord, TrustedPolicy},
+    mock_github::{MockGitHubAdapter, MockGitHubPolicy, MockGitHubRequest},
     postgres::{Lease, NewTask, OperationStatus, RecoveryVerifier, StoreError, TaskStore},
 };
 use tokio_postgres::NoTls;
@@ -44,6 +45,16 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         .batch_execute(include_str!("../migrations/0001_orchestrator.sql"))
         .await
         .expect("apply orchestrator migration to throwaway database");
+    bootstrap
+        .batch_execute(include_str!("../migrations/0002_execution_metadata.sql"))
+        .await
+        .expect("apply execution metadata migration to throwaway database");
+    bootstrap
+        .batch_execute(include_str!(
+            "../migrations/0003_mock_runtime_fingerprint.sql"
+        ))
+        .await
+        .expect("apply mock runtime fingerprint migration to throwaway database");
 
     let policy = TrustedPolicy {
         base_ref: "main".to_owned(),
@@ -87,6 +98,33 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             .expect("idempotent create replay"),
         task_a.task_id
     );
+    let task_a_fingerprint = "a".repeat(64);
+    left.bind_mock_runtime_config(task_a.task_id, &task_a_fingerprint)
+        .await
+        .expect("bind mock runtime fingerprint while queued");
+    right
+        .bind_mock_runtime_config(task_a.task_id, &task_a_fingerprint)
+        .await
+        .expect("accept matching fingerprint replay");
+    assert_eq!(
+        left.get(task_a.task_id)
+            .await
+            .expect("read persisted mock runtime fingerprint")
+            .mock_runtime_fingerprint
+            .as_deref(),
+        Some(task_a_fingerprint.as_str())
+    );
+    assert!(matches!(
+        left.bind_mock_runtime_config(task_a.task_id, "invalid")
+            .await,
+        Err(StoreError::InvalidInput)
+    ));
+    assert!(matches!(
+        right
+            .bind_mock_runtime_config(task_a.task_id, &"b".repeat(64))
+            .await,
+        Err(StoreError::OperationConflict)
+    ));
     let mut changed_timeout_replay = task_a.clone();
     changed_timeout_replay.execution_timeout = Duration::from_secs(601);
     assert!(matches!(
@@ -102,6 +140,10 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
     ));
     let task_b = new_task(102, Uuid::new_v4());
     left.create(&task_b).await.expect("create competing task");
+    let task_b_fingerprint = "c".repeat(64);
+    left.bind_mock_runtime_config(task_b.task_id, &task_b_fingerprint)
+        .await
+        .expect("bind second task mock runtime before claim");
     let mut queued_timeout_task = new_task(106, Uuid::new_v4());
     queued_timeout_task.execution_timeout = Duration::from_secs(1);
     left.create(&queued_timeout_task)
@@ -152,14 +194,14 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
     let (left_result, right_result) = tokio::join!(
         left.claim(
             task_a.task_id,
-            "worker-a",
+            "worker-process-a",
             Duration::from_secs(1),
             &policy,
             &facts
         ),
         right.claim(
             task_a.task_id,
-            "worker-a",
+            "worker-process-b",
             Duration::from_secs(1),
             &policy,
             &facts
@@ -170,6 +212,34 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         | (Err(StoreError::LeaseOccupied), Ok(lease)) => lease,
         outcomes => panic!("expected exactly one successful competing claim: {outcomes:?}"),
     };
+    left.bind_mock_runtime_config(task_a.task_id, &task_a_fingerprint)
+        .await
+        .expect("accept matching fingerprint after task claim");
+    assert_eq!(
+        left.get(task_a.task_id)
+            .await
+            .expect("read initial repair count")
+            .attempts,
+        0,
+        "claiming a task does not consume a repair"
+    );
+    let identity_row = bootstrap
+        .query_one(
+            "SELECT assigned_worker, issue_assignee FROM orchestrator.tasks WHERE id=$1",
+            &[&task_a.task_id],
+        )
+        .await
+        .expect("read separate execution and issue identities");
+    let identities: (String, Option<String>) = (identity_row.get(0), identity_row.get(1));
+    assert_eq!(identities, (lease.owner.clone(), None));
+    assert_eq!(
+        left.get(task_a.task_id)
+            .await
+            .expect("read preserved issue assignee")
+            .assignee
+            .as_deref(),
+        None
+    );
     let operation_key = Uuid::new_v4();
     let request_hash = [7u8; 32];
     assert_eq!(
@@ -262,7 +332,7 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
 
     let verifier = MockRecoveryVerifier {
         task_id: task_a.task_id,
-        owner: "worker-a".to_owned(),
+        owner: lease.owner.clone(),
         fencing_token: lease.fencing_token,
     };
     let recovered = restarted
@@ -355,14 +425,55 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
     let task_b_lease = restarted
         .claim(
             task_b.task_id,
-            "worker-a",
+            "worker-process-b",
             Duration::from_secs(10),
             &policy,
             &facts,
         )
         .await
         .expect("claim task for checkpoint resume");
+    assert!(matches!(
+        restarted
+            .bind_mock_runtime_config(task_b.task_id, &"d".repeat(64))
+            .await,
+        Err(StoreError::OperationConflict)
+    ));
     let resume_operation = Uuid::new_v4();
+    let mut mock_github = MockGitHubAdapter::new(
+        MockGitHubPolicy::new(vec!["develop".into()], vec!["ci".into()])
+            .expect("valid mock GitHub policy"),
+    );
+    mock_github
+        .execute(
+            "session-51-branch",
+            MockGitHubRequest::CreateBranch {
+                branch: "task-51".into(),
+                base_sha: BASE_SHA.into(),
+            },
+        )
+        .expect("create deterministic mock branch");
+    let persisted_journal =
+        serde_json::to_value(mock_github.journal()).expect("serialize deterministic mock journal");
+    let resume_facts = ObservedFacts {
+        approved_assignee: "worker-a".into(),
+        ..facts.clone()
+    };
+    let implementing = transition_task(
+        &mut restarted,
+        &task_b_lease,
+        &policy,
+        &resume_facts,
+        State::Implementing,
+        |task| {
+            task.assignee = Some("worker-a".into());
+            task.implementer = Some("codex".into());
+            task.reviewer = Some("claude".into());
+            task.session_id = Some("session-51".into());
+            task.mock_github_journal = Some(persisted_journal.clone());
+        },
+    )
+    .await;
+    assert_eq!(implementing.state, State::Implementing);
     restarted
         .prepare_operation(
             &task_b_lease,
@@ -376,12 +487,12 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         &mut restarted,
         &task_b_lease,
         &policy,
-        &facts,
+        &resume_facts,
         State::Paused,
-        |task| task.checkpoint = Some(State::Planning),
+        |task| task.checkpoint = Some(State::Implementing),
     )
     .await;
-    assert_eq!(paused.checkpoint, Some(State::Planning));
+    assert_eq!(paused.checkpoint, Some(State::Implementing));
     restarted
         .release(&task_b_lease)
         .await
@@ -392,7 +503,7 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             "worker-b",
             Duration::from_secs(10),
             &policy,
-            &facts,
+            &resume_facts,
         )
         .await
         .expect("resume same persisted task after fresh checks");
@@ -400,12 +511,20 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         .get(task_b.task_id)
         .await
         .expect("load resumed task");
-    assert_eq!(resumed.state, State::Planning);
+    assert_eq!(resumed.state, State::Implementing);
     assert_eq!(
         resumed.attempts, paused.attempts,
         "resume does not consume another attempt"
     );
     assert_eq!(resumed.checkpoint, None);
+    assert_eq!(resumed.implementer.as_deref(), Some("codex"));
+    assert_eq!(resumed.reviewer.as_deref(), Some("claude"));
+    assert_eq!(resumed.session_id.as_deref(), Some("session-51"));
+    assert_eq!(resumed.mock_github_journal, Some(persisted_journal));
+    assert_eq!(
+        resumed.mock_runtime_fingerprint.as_deref(),
+        Some(task_b_fingerprint.as_str())
+    );
     assert!(matches!(
         restarted.renew(&task_b_lease, Duration::from_secs(2)).await,
         Err(StoreError::LeaseLost)
@@ -425,6 +544,19 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
 
     let handoff_facts =
         advance_to_merging(&mut restarted, &resumed_lease, &policy, facts.clone(), 51).await;
+    let task_identities = bootstrap
+        .query_one(
+            "SELECT assigned_worker, issue_assignee FROM orchestrator.tasks WHERE id=$1",
+            &[&task_b.task_id],
+        )
+        .await
+        .expect("read current worker and issue assignee after resume");
+    let task_identities: (String, Option<String>) =
+        (task_identities.get(0), task_identities.get(1));
+    assert_eq!(
+        task_identities,
+        ("worker-b".into(), Some("worker-a".into()))
+    );
     let merging = restarted
         .get(task_b.task_id)
         .await
@@ -514,6 +646,12 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         )
         .await
         .expect("claim task for expired merge recovery");
+    assert!(matches!(
+        restarted
+            .bind_mock_runtime_config(task_c.task_id, &"e".repeat(64))
+            .await,
+        Err(StoreError::OperationConflict)
+    ));
     let merge_facts =
         advance_to_merging(&mut restarted, &merge_lease, &policy, facts.clone(), 52).await;
     tokio::time::sleep(Duration::from_millis(1_200)).await;
@@ -585,6 +723,41 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         )
         .await
         .expect("claim model budget boundary task");
+    let repair_facts = ObservedFacts {
+        approved_assignee: "worker-a".into(),
+        ..facts.clone()
+    };
+    transition_task(
+        &mut restarted,
+        &budget_lease,
+        &policy,
+        &repair_facts,
+        State::Implementing,
+        |task| task.assignee = Some("worker-a".into()),
+    )
+    .await;
+    let repaired = transition_task(
+        &mut restarted,
+        &budget_lease,
+        &policy,
+        &repair_facts,
+        State::Repairing,
+        |task| task.attempts += 1,
+    )
+    .await;
+    assert_eq!(
+        repaired.attempts, 1,
+        "repairing increments the repair counter"
+    );
+    assert_eq!(
+        restarted
+            .get(task_d.task_id)
+            .await
+            .expect("read persisted repair count")
+            .attempts,
+        1,
+        "the repair count survives a database reload"
+    );
     let overage_key = Uuid::new_v4();
     let overage_result = serde_json::json!({"model_tokens": 100_001, "stage": "plan"});
     restarted
@@ -623,9 +796,9 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         &mut restarted,
         &budget_lease,
         &policy,
-        &facts,
+        &repair_facts,
         State::Paused,
-        |task| task.checkpoint = Some(State::Planning),
+        |task| task.checkpoint = Some(State::Repairing),
     )
     .await;
     assert_eq!(paused_overage.model_tokens, 100_001);
@@ -650,8 +823,19 @@ async fn transition_task(
     let mut proposed = current.clone();
     proposed.state = to;
     mutate(&mut proposed);
-    domain::transition_from(&current, &mut proposed, to, policy, facts)
-        .expect("construct state transition from fresh evidence");
+    domain::transition_from(&current, &mut proposed, to, policy, facts).unwrap_or_else(|error| {
+        panic!(
+            "construct state transition from fresh evidence: {:?} -> {:?}, repairs={}, assignee={:?}, head={:?}, PR={:?}, validation={}, checkpoint={:?}: {error:?}",
+            current.state,
+            to,
+            current.attempts,
+            current.assignee,
+            current.head_sha,
+            current.pull_request,
+            current.validation_passed,
+            current.checkpoint,
+        )
+    });
     store
         .save(lease, current.state, &proposed, policy, facts)
         .await
@@ -667,10 +851,19 @@ async fn advance_to_merging(
     pull_request: u64,
 ) -> ObservedFacts {
     facts.approved_assignee = "worker-a".to_owned();
-    transition_task(store, lease, policy, &facts, State::Implementing, |task| {
-        task.assignee = Some("worker-a".to_owned());
-    })
-    .await;
+    let current = store
+        .get(lease.task_id)
+        .await
+        .expect("read task before preparing merge stages");
+    if current.state == State::Planning {
+        transition_task(store, lease, policy, &facts, State::Implementing, |task| {
+            task.assignee = Some("worker-a".to_owned());
+        })
+        .await;
+    } else {
+        assert_eq!(current.state, State::Implementing);
+        assert_eq!(current.assignee.as_deref(), Some("worker-a"));
+    }
 
     let head_sha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
     facts.head_sha = head_sha.to_owned();

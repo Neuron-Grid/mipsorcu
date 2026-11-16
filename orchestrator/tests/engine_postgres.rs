@@ -4,16 +4,17 @@ use std::{
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use mipsorcu_orchestrator::{
+    agent::{Failure, Provider},
     domain::{ObservedFacts, State, TaskRecord, TrustedPolicy},
     engine::{
         Engine, EngineError, EngineStore, EvidenceSource, ExecutionBudget, OperationLookup,
-        PostgresEngineStore, Stage, StageOutput, StageRunner, TrustedPolicySource,
+        PostgresEngineStore, Stage, StageFailure, StageOutput, StageRunner, TrustedPolicySource,
     },
     postgres::{Lease, NewTask, RecoveryVerifier, StoreError, TaskStore},
 };
@@ -41,15 +42,23 @@ impl EvidenceSource for Evidence {
 #[derive(Clone, Default)]
 struct Runner(Arc<AtomicUsize>);
 impl StageRunner for Runner {
+    fn validate_configuration(&self) -> Result<(), mipsorcu_orchestrator::agent::ConfigError> {
+        Ok(())
+    }
+
+    fn agent_roles(&self) -> (Provider, Provider) {
+        (Provider::Codex, Provider::Claude)
+    }
+
     async fn execute(
         &self,
         _: Stage,
         _: &TaskRecord,
         _: &TrustedPolicy,
         _: ExecutionBudget,
-    ) -> Result<StageOutput, ()> {
+    ) -> Result<StageOutput, StageFailure> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Err(())
+        Err(StageFailure::Agent(Failure::Unavailable))
     }
 
     async fn stop_and_verify(&self, _: &Lease, _: Uuid) -> Result<(), ()> {
@@ -67,6 +76,111 @@ impl RecoveryVerifier for Supervisor {
 struct FailAfterPrepare {
     inner: PostgresEngineStore,
     fired: std::sync::atomic::AtomicBool,
+    failure_point: FailurePoint,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FailurePoint {
+    AfterPrepare,
+    AfterComplete,
+}
+
+#[derive(Clone, Default)]
+struct RestoreRunner {
+    plan_calls: Arc<AtomicUsize>,
+    implement_calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Default)]
+struct WaitingRunner {
+    entered: Arc<AtomicUsize>,
+    active: Arc<AtomicBool>,
+    stop_calls: Arc<AtomicUsize>,
+}
+
+struct ActiveStageGuard(Arc<AtomicBool>);
+
+impl Drop for ActiveStageGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl StageRunner for WaitingRunner {
+    fn validate_configuration(&self) -> Result<(), mipsorcu_orchestrator::agent::ConfigError> {
+        Ok(())
+    }
+
+    fn agent_roles(&self) -> (Provider, Provider) {
+        (Provider::Codex, Provider::Claude)
+    }
+
+    async fn execute(
+        &self,
+        _: Stage,
+        _: &TaskRecord,
+        _: &TrustedPolicy,
+        _: ExecutionBudget,
+    ) -> Result<StageOutput, StageFailure> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.active.store(true, Ordering::SeqCst);
+        let _guard = ActiveStageGuard(self.active.clone());
+        std::future::pending().await
+    }
+
+    async fn stop_and_verify(&self, _: &Lease, _: Uuid) -> Result<(), ()> {
+        self.stop_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl StageRunner for RestoreRunner {
+    fn validate_configuration(&self) -> Result<(), mipsorcu_orchestrator::agent::ConfigError> {
+        Ok(())
+    }
+
+    fn agent_roles(&self) -> (Provider, Provider) {
+        (Provider::Codex, Provider::Claude)
+    }
+
+    async fn execute(
+        &self,
+        stage: Stage,
+        _: &TaskRecord,
+        _: &TrustedPolicy,
+        _: ExecutionBudget,
+    ) -> Result<StageOutput, StageFailure> {
+        match stage {
+            Stage::Plan => {
+                self.plan_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(StageOutput {
+                    assignee: Some("worker".into()),
+                    implementer: Some("codex".into()),
+                    reviewer: Some("claude".into()),
+                    session_id: Some("session-persisted-plan".into()),
+                    head_sha: None,
+                    pull_request: None,
+                    validation_passed: false,
+                    model_tokens: 5,
+                    mock_github_journal: None,
+                    plan: Some(mipsorcu_orchestrator::engine::MockPlan {
+                        requirements: vec!["persist operation output".into()],
+                        steps: vec!["execute".into(), "resume".into()],
+                    }),
+                    code_change: None,
+                })
+            }
+            Stage::Implement => {
+                self.implement_calls.fetch_add(1, Ordering::SeqCst);
+                Err(StageFailure::Agent(Failure::Unavailable))
+            }
+            _ => Err(StageFailure::InvalidConfiguration),
+        }
+    }
+
+    async fn stop_and_verify(&self, _: &Lease, _: Uuid) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 impl EngineStore for FailAfterPrepare {
@@ -144,7 +258,10 @@ impl EngineStore for FailAfterPrepare {
             .inner
             .prepare_operation(lease, key, operation, request_hash)
             .await?;
-        if prepared == OperationLookup::New && !self.fired.swap(true, Ordering::SeqCst) {
+        if self.failure_point == FailurePoint::AfterPrepare
+            && prepared == OperationLookup::New
+            && !self.fired.swap(true, Ordering::SeqCst)
+        {
             return Err(StoreError::LeaseLost);
         }
         Ok(prepared)
@@ -159,7 +276,13 @@ impl EngineStore for FailAfterPrepare {
     ) -> Result<(), StoreError> {
         self.inner
             .complete_operation(lease, key, result, model_tokens)
-            .await
+            .await?;
+        if self.failure_point == FailurePoint::AfterComplete
+            && !self.fired.swap(true, Ordering::SeqCst)
+        {
+            return Err(StoreError::LeaseLost);
+        }
+        Ok(())
     }
 
     async fn save(
@@ -210,6 +333,16 @@ async fn real_engine_rejects_stale_base_and_does_not_reexecute_ambiguous_stage_a
         .batch_execute(include_str!("../migrations/0001_orchestrator.sql"))
         .await
         .expect("apply migration to throwaway database");
+    bootstrap
+        .batch_execute(include_str!("../migrations/0002_execution_metadata.sql"))
+        .await
+        .expect("apply execution metadata migration to throwaway database");
+    bootstrap
+        .batch_execute(include_str!(
+            "../migrations/0003_mock_runtime_fingerprint.sql"
+        ))
+        .await
+        .expect("apply mock runtime fingerprint migration to throwaway database");
     drop(bootstrap);
 
     let id = Uuid::new_v4();
@@ -250,6 +383,7 @@ async fn real_engine_rejects_stale_base_and_does_not_reexecute_ambiguous_stage_a
         evidence: Evidence(evidence),
         runner: Runner(runner.clone()),
         recovery: Supervisor,
+        mock_github: None,
         lease_ttl: Duration::from_secs(30),
     };
 
@@ -318,11 +452,13 @@ async fn real_engine_rejects_stale_base_and_does_not_reexecute_ambiguous_stage_a
                     .expect("connect failure-injecting store"),
             ),
             fired: std::sync::atomic::AtomicBool::new(false),
+            failure_point: FailurePoint::AfterPrepare,
         },
         policies: Policy(engine.policies.0.clone()),
         evidence: Evidence(valid_facts.clone()),
         runner: Runner(runner.clone()),
         recovery: Supervisor,
+        mock_github: None,
         lease_ttl: Duration::from_secs(30),
     };
     assert!(matches!(
@@ -347,6 +483,7 @@ async fn real_engine_rejects_stale_base_and_does_not_reexecute_ambiguous_stage_a
         evidence: Evidence(valid_facts),
         runner: Runner(runner.clone()),
         recovery: Supervisor,
+        mock_github: None,
         lease_ttl: Duration::from_secs(30),
     };
     assert_eq!(
@@ -370,6 +507,304 @@ async fn real_engine_rejects_stale_base_and_does_not_reexecute_ambiguous_stage_a
             .state,
         State::Blocked
     );
+
+    let replay_facts = ObservedFacts {
+        policy_base_ref: "main".into(),
+        policy_base_sha: BASE_SHA.into(),
+        issue_open: true,
+        base_sha: BASE_SHA.into(),
+        approved_assignee: "worker".into(),
+        ..ObservedFacts::default()
+    };
+    let replay_id = Uuid::new_v4();
+    let replay_task = NewTask {
+        task_id: replay_id,
+        repository: "example/project".into(),
+        issue_number: 19,
+        base_sha: BASE_SHA.into(),
+        max_attempts: 3,
+        execution_timeout: Duration::from_secs(600),
+        model_budget: 100,
+        idempotency_key: Uuid::new_v4(),
+    };
+    let mut replay_store = TaskStore::connect(&database_url)
+        .await
+        .expect("connect completed-result restart store");
+    replay_store
+        .create(&replay_task)
+        .await
+        .expect("create completed-result restart task");
+    let replay_prior = replay_store
+        .claim(
+            replay_id,
+            "worker-before-restart",
+            Duration::from_secs(1),
+            &engine.policies.0,
+            &replay_facts,
+        )
+        .await
+        .expect("claim task before completed-result restart");
+    drop(replay_store);
+
+    let restore_runner = RestoreRunner::default();
+    let crash_after_result = Engine {
+        store: FailAfterPrepare {
+            inner: PostgresEngineStore::new(
+                TaskStore::connect(&database_url)
+                    .await
+                    .expect("connect completed-result failure injector"),
+            ),
+            fired: std::sync::atomic::AtomicBool::new(false),
+            failure_point: FailurePoint::AfterComplete,
+        },
+        policies: Policy(engine.policies.0.clone()),
+        evidence: Evidence(replay_facts.clone()),
+        runner: restore_runner.clone(),
+        recovery: Supervisor,
+        mock_github: None,
+        // The injected process loss must expire before recovery is attempted.
+        lease_ttl: Duration::from_secs(1),
+    };
+    assert!(matches!(
+        crash_after_result.run_claimed(&replay_prior).await,
+        Err(EngineError::Store(StoreError::LeaseLost))
+    ));
+    assert_eq!(restore_runner.plan_calls.load(Ordering::SeqCst), 1);
+    drop(crash_after_result);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let restarted = Engine {
+        store: PostgresEngineStore::new(
+            TaskStore::connect(&database_url)
+                .await
+                .expect("connect restarted completed-result store"),
+        ),
+        policies: Policy(engine.policies.0.clone()),
+        evidence: Evidence(replay_facts),
+        runner: restore_runner.clone(),
+        recovery: Supervisor,
+        mock_github: None,
+        lease_ttl: Duration::from_secs(30),
+    };
+    assert_eq!(
+        restarted
+            .recover_and_run(&replay_prior, "worker-after-restart")
+            .await
+            .expect("resume from completed stage result"),
+        mipsorcu_orchestrator::engine::StepResult::BlockedStageFailure(StageFailure::Agent(
+            Failure::Unavailable
+        ))
+    );
+    let restored_task = restarted
+        .store
+        .get(replay_id)
+        .await
+        .expect("read task after completed-result restore");
+    assert_eq!(restored_task.state, State::Blocked);
+    assert_eq!(restored_task.checkpoint, Some(State::Implementing));
+    assert_eq!(restored_task.assignee.as_deref(), Some("worker"));
+    assert_eq!(restored_task.implementer.as_deref(), Some("codex"));
+    assert_eq!(restored_task.reviewer.as_deref(), Some("claude"));
+    assert_eq!(
+        restored_task.session_id.as_deref(),
+        Some("session-persisted-plan")
+    );
+    assert_eq!(restored_task.model_tokens, 5);
+    assert_eq!(restore_runner.plan_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(restore_runner.implement_calls.load(Ordering::SeqCst), 1);
+
+    // Terminate the dedicated Engine connection while its Plan stage is active.
+    // The Engine must cancel the child and stop; a separate connection then
+    // confirms the durable intent before a verified, post-expiry recovery.
+    let connection_loss_id = Uuid::new_v4();
+    let connection_loss_task = NewTask {
+        task_id: connection_loss_id,
+        issue_number: 20,
+        repository: "example/project".into(),
+        base_sha: BASE_SHA.into(),
+        max_attempts: 3,
+        execution_timeout: Duration::from_secs(600),
+        model_budget: 100,
+        idempotency_key: Uuid::new_v4(),
+    };
+    let setup_store = TaskStore::connect(&database_url)
+        .await
+        .expect("connect task setup store");
+    setup_store
+        .create(&connection_loss_task)
+        .await
+        .expect("create connection-loss task");
+    drop(setup_store);
+
+    let connection_loss_policy = TrustedPolicy {
+        base_ref: "main".into(),
+        base_sha: BASE_SHA.into(),
+        allowed_assignee: "worker-connection-loss".into(),
+        required_checks: vec!["ci".into()],
+        max_attempts: 3,
+        max_runtime: Duration::from_secs(600),
+        max_model_tokens: 100,
+    };
+    let connection_loss_facts = ObservedFacts {
+        policy_base_ref: "main".into(),
+        policy_base_sha: BASE_SHA.into(),
+        issue_open: true,
+        base_sha: BASE_SHA.into(),
+        ..ObservedFacts::default()
+    };
+    let application_name = format!("orchestrator-test-{}", Uuid::new_v4());
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let isolated_url = format!("{database_url}{separator}application_name={application_name}");
+    let connection_loss_store = PostgresEngineStore::new(
+        TaskStore::connect(&isolated_url)
+            .await
+            .expect("connect dedicated active-engine store"),
+    );
+    let prior = connection_loss_store
+        .claim(
+            connection_loss_id,
+            "worker-connection-loss",
+            Duration::from_secs(1),
+            &connection_loss_policy,
+            &connection_loss_facts,
+        )
+        .await
+        .expect("claim task before active connection-loss test");
+    let waiting_runner = WaitingRunner::default();
+    let active_engine = Engine {
+        store: connection_loss_store,
+        policies: Policy(connection_loss_policy.clone()),
+        evidence: Evidence(connection_loss_facts.clone()),
+        runner: waiting_runner.clone(),
+        recovery: Supervisor,
+        mock_github: None,
+        lease_ttl: Duration::from_secs(1),
+    };
+    let active_run = tokio::spawn(async move { active_engine.run_claimed(&prior).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while waiting_runner.entered.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("Engine must enter the stage before terminating its connection");
+    assert!(waiting_runner.active.load(Ordering::SeqCst));
+
+    let (admin, connection) = tokio_postgres::connect(&database_url, NoTls)
+        .await
+        .expect("connect independent observer for connection-loss injection");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let terminated = admin
+        .query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND application_name = $1 AND pid <> pg_backend_pid()",
+            &[&application_name],
+        )
+        .await
+        .expect("terminate only the active Engine connection");
+    assert_eq!(terminated.len(), 1, "exactly one test backend is targeted");
+    assert!(terminated[0].get::<_, bool>(0));
+
+    let failed_run = tokio::time::timeout(Duration::from_secs(5), active_run)
+        .await
+        .expect("Engine must stop after the lease heartbeat loses its connection")
+        .expect("Engine task must not panic");
+    assert!(matches!(
+        failed_run,
+        Err(EngineError::Store(StoreError::Database(_)))
+    ));
+    assert!(!waiting_runner.active.load(Ordering::SeqCst));
+    assert_eq!(waiting_runner.entered.load(Ordering::SeqCst), 1);
+    assert_eq!(waiting_runner.stop_calls.load(Ordering::SeqCst), 1);
+
+    let durable_state = admin
+        .query_one(
+            "SELECT t.status::text, l.owner, COALESCE(l.expires_at <= clock_timestamp(), false), l.fencing_token FROM orchestrator.tasks AS t CROSS JOIN orchestrator.execution_lease AS l WHERE t.id = $1",
+            &[&connection_loss_id],
+        )
+        .await
+        .expect("independently inspect task state after connection loss");
+    assert_eq!(durable_state.get::<_, String>(0), "planning");
+    assert_eq!(
+        durable_state.get::<_, Option<String>>(1).as_deref(),
+        Some("worker-connection-loss")
+    );
+    assert!(!durable_state.get::<_, bool>(2));
+    let unresolved = admin
+        .query_one(
+            "SELECT result FROM orchestrator.task_operations WHERE task_id = $1",
+            &[&connection_loss_id],
+        )
+        .await
+        .expect("independently inspect prepared operation");
+    assert!(unresolved.get::<_, Option<serde_json::Value>>(0).is_none());
+
+    let mut fresh_store = TaskStore::connect(&database_url)
+        .await
+        .expect("connect fresh recovery store");
+    let early_recovery = fresh_store
+        .recover(
+            connection_loss_id,
+            "worker-too-early",
+            Duration::from_secs(30),
+            &Supervisor,
+            &connection_loss_policy,
+            &connection_loss_facts,
+        )
+        .await;
+    assert!(matches!(early_recovery, Err(StoreError::LeaseLost)));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let expired: bool = admin
+                .query_one(
+                    "SELECT expires_at <= clock_timestamp() FROM orchestrator.execution_lease WHERE singleton",
+                    &[],
+                )
+                .await
+                .expect("poll isolated lease expiry")
+                .get(0);
+            if expired {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("lease must expire before independent recovery");
+
+    let recovered_engine = Engine {
+        store: PostgresEngineStore::new(fresh_store),
+        policies: Policy(connection_loss_policy),
+        evidence: Evidence(connection_loss_facts),
+        runner: waiting_runner.clone(),
+        recovery: Supervisor,
+        mock_github: None,
+        lease_ttl: Duration::from_secs(30),
+    };
+    assert_eq!(
+        recovered_engine
+            .recover_and_run(
+                &Lease {
+                    task_id: connection_loss_id,
+                    owner: "worker-connection-loss".into(),
+                    fencing_token: durable_state.get(3),
+                },
+                "worker-after-connection-loss"
+            )
+            .await
+            .expect("recover ambiguous operation through a fresh connection"),
+        mipsorcu_orchestrator::engine::StepResult::BlockedAmbiguousOperation
+    );
+    let recovered = recovered_engine
+        .store
+        .get(connection_loss_id)
+        .await
+        .expect("independently read recovered task");
+    assert_eq!(recovered.state, State::Blocked);
+    assert_eq!(recovered.checkpoint, Some(State::Planning));
+    assert_eq!(waiting_runner.entered.load(Ordering::SeqCst), 1);
+    assert!(!waiting_runner.active.load(Ordering::SeqCst));
 }
 
 fn assert_isolated_loopback_database(database_url: &str) {

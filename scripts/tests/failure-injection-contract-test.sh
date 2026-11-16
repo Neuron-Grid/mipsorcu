@@ -34,7 +34,7 @@ for missing_env in MIPSORCU_JWT TEST_SECRET_ID; do
     fi
     [[ "${status}" != "0" ]]
     [[ ! -e "${calls}" ]]
-    rg -q "required environment variable is empty: ${missing_env}" "${output}"
+    grep -Fq "required environment variable is empty: ${missing_env}" "${output}"
 done
 
 cat >"${MOCK_BIN}/curl" <<'SH'
@@ -88,8 +88,8 @@ TEST_SECRET_ID=00000000-0000-0000-0000-000000000001 \
 bash "${REPO_ROOT}/scripts/failure-injection/05-supabase-down.sh" >"${TEMP_DIR}/network-restore.out" 2>&1 || status=$?
 [[ "${status}" != "0" ]]
 [[ "$(cat "${TEMP_DIR}/connect.calls")" == "2" ]]
-[[ "$(rg -c '^network connect ' "${TEMP_DIR}/network-docker.log")" == "2" ]]
-rg -q 'failed to restore compose network compose-network' "${TEMP_DIR}/network-restore.out"
+[[ "$(grep -c '^network connect ' "${TEMP_DIR}/network-docker.log")" == "2" ]]
+grep -Fq 'failed to restore compose network compose-network' "${TEMP_DIR}/network-restore.out"
 
 cat >"${MOCK_BIN}/docker" <<'SH'
 #!/usr/bin/env bash
@@ -149,7 +149,7 @@ MIPSORCU_BASE_URL=http://127.0.0.1:3000 \
 MIPSORCU_TEST_DB_URL=postgres://test@localhost:54322/test \
 bash "${REPO_ROOT}/scripts/failure-injection/09-ledger-tamper.sh" >"${TEMP_DIR}/precondition.out" 2>&1 || status=$?
 [[ "${status}" != "0" ]]
-rg -q 'precondition failed: auditor verify returned valid=false' "${TEMP_DIR}/precondition.out"
+grep -Fq 'precondition failed: auditor verify returned valid=false' "${TEMP_DIR}/precondition.out"
 [[ ! -e "${TEMP_DIR}/precondition-psql.calls" ]]
 
 status=0
@@ -162,6 +162,6 @@ MIPSORCU_TEST_DB_URL=postgres://test@localhost:54322/test \
 bash "${REPO_ROOT}/scripts/failure-injection/09-ledger-tamper.sh" >"${TEMP_DIR}/restore.out" 2>&1 || status=$?
 
 [[ "${status}" != "0" ]]
-rg -q 'ledger restore failed' "${TEMP_DIR}/restore.out"
-rg -q 'ENABLE TRIGGER ledger_entries_no_update_delete' "${TEMP_DIR}/psql.calls"
+grep -Fq 'ledger restore failed' "${TEMP_DIR}/restore.out"
+grep -Fq 'ENABLE TRIGGER ledger_entries_no_update_delete' "${TEMP_DIR}/psql.calls"
 printf 'failure injection contract checks passed\n'

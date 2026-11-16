@@ -341,15 +341,22 @@ mod tests {
             task_id: "task".into(),
             issue_number: 7,
             base_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            max_attempts: 3,
             head_sha: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             state: State::Merging,
             attempts: 1,
             assignee: Some("worker".into()),
+            implementer: None,
+            reviewer: None,
+            session_id: None,
+            mock_github_journal: None,
+            mock_runtime_fingerprint: None,
             validation_passed: true,
             pull_request: Some(9),
             checkpoint: None,
             elapsed: Duration::from_secs(1),
             model_tokens: 1,
+            model_budget: 100,
         }
     }
 

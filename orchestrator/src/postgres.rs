@@ -4,6 +4,7 @@ use tokio_postgres::{Client, Config, NoTls, Row, Transaction, config::Host};
 use uuid::Uuid;
 
 use crate::domain::{self, ObservedFacts, State, TaskRecord, TrustedPolicy};
+use crate::mock_github::MockGitHubJournalEntry;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -113,9 +114,70 @@ impl TaskStore {
         Ok(task.task_id)
     }
 
+    /// Binds an immutable mock-runtime configuration before execution starts.
+    pub async fn bind_mock_runtime_config(
+        &mut self,
+        task_id: Uuid,
+        fingerprint: &str,
+    ) -> Result<(), StoreError> {
+        if !is_fingerprint(fingerprint) {
+            return Err(StoreError::InvalidInput);
+        }
+        let tx = self.client.transaction().await?;
+        let row = tx
+            .query_opt(
+                "SELECT status::text, mock_runtime_fingerprint FROM orchestrator.tasks WHERE id=$1 FOR UPDATE",
+                &[&task_id],
+            )
+            .await?
+            .ok_or(StoreError::TaskMissing)?;
+        let state: String = row.get(0);
+        let current: Option<String> = row.get(1);
+        match current.as_deref() {
+            Some(existing) if existing == fingerprint => {}
+            Some(_) => return Err(StoreError::OperationConflict),
+            None if state == "queued" => {
+                let changed = tx
+                    .execute(
+                        "UPDATE orchestrator.tasks SET mock_runtime_fingerprint=$2, updated_at=clock_timestamp() WHERE id=$1 AND status='queued' AND mock_runtime_fingerprint IS NULL",
+                        &[&task_id, &fingerprint],
+                    )
+                    .await?;
+                if changed != 1 {
+                    return Err(StoreError::OperationConflict);
+                }
+            }
+            None => return Err(StoreError::OperationConflict),
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Refuses mock execution unless the active connection is bound to a disposable test database.
+    pub async fn assert_mock_isolated_database(&self) -> Result<(), StoreError> {
+        let row = self
+            .client
+            .query_opt(
+                "SELECT d.datname, r.rolname, r.rolsuper FROM pg_database AS d JOIN pg_roles AS r ON r.rolname = current_user WHERE d.datname = current_database()",
+                &[],
+            )
+            .await?
+            .ok_or(StoreError::InvalidInput)?;
+        let database: String = row.try_get(0).map_err(|_| StoreError::InvalidInput)?;
+        let role: String = row.try_get(1).map_err(|_| StoreError::InvalidInput)?;
+        let is_superuser: bool = row.try_get(2).map_err(|_| StoreError::InvalidInput)?;
+        if !database.starts_with("orchestrator_test_")
+            || role != "orchestrator_test"
+            || is_superuser
+        {
+            return Err(StoreError::InvalidInput);
+        }
+        Ok(())
+    }
+
     /// Reads a snapshot only. Callers must revalidate policy and GitHub facts before acting.
     pub async fn get(&self, task_id: Uuid) -> Result<TaskRecord, StoreError> {
-        let row = self.client.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, attempt_count, assigned_worker, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text FROM orchestrator.tasks WHERE id = $1", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
+        let row = self.client.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id = $1", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
         decode_task(&row)
     }
 
@@ -143,17 +205,16 @@ impl TaskStore {
         if active.is_some() {
             return Err(StoreError::LeaseOccupied);
         }
-        let task_row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, attempt_count, assigned_worker, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, max_attempts, execution_deadline IS NULL OR execution_deadline > clock_timestamp(), resume_state::text, execution_timeout_seconds FROM orchestrator.tasks WHERE id = $1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
+        let task_row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, max_attempts, execution_deadline IS NULL OR execution_deadline > clock_timestamp(), resume_state::text, execution_timeout_seconds, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id = $1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
         let mut task = decode_task(&task_row)?;
         let attempts = task_row.get::<_, i32>(5);
         let max_attempts: i32 = task_row.get(12);
         let in_time: bool = task_row.get(13);
         let timeout_seconds: i64 = task_row.get(15);
-        if task.state != State::Queued || !in_time || attempts >= max_attempts {
+        if task.state != State::Queued || !in_time || attempts > max_attempts {
             return Err(StoreError::InvalidRecord);
         }
-        task.attempts = u32::try_from(attempts + 1).map_err(|_| StoreError::InvalidRecord)?;
-        task.assignee = Some(owner.to_owned());
+        task.attempts = u32::try_from(attempts).map_err(|_| StoreError::InvalidRecord)?;
         domain::transition(&mut task, State::Planning, policy, facts)
             .map_err(|_| StoreError::InvalidRecord)?;
         let token: i64 = tx
@@ -161,7 +222,7 @@ impl TaskStore {
             .await?
             .get(0);
         tx.execute("UPDATE orchestrator.execution_lease SET task_id=$1, owner=$2, fencing_token=$3, expires_at=clock_timestamp() + make_interval(secs => $4::bigint::double precision) WHERE singleton", &[&task_id, &owner, &token, &seconds]).await?;
-        let changed = tx.execute("WITH start_time AS (SELECT COALESCE(execution_started_at,clock_timestamp()) AS started_at FROM orchestrator.tasks WHERE id=$1) UPDATE orchestrator.tasks SET status='planning', attempt_count=$2, assigned_worker=$3, execution_started_at=start_time.started_at, execution_deadline=COALESCE(execution_deadline,start_time.started_at + make_interval(secs => $4::bigint::double precision)), updated_at=clock_timestamp() FROM start_time WHERE id=$1 AND status='queued'", &[&task_id, &i32::try_from(task.attempts).map_err(|_| StoreError::InvalidRecord)?, &owner, &timeout_seconds]).await?;
+        let changed = tx.execute("WITH start_time AS (SELECT COALESCE(execution_started_at,clock_timestamp()) AS started_at FROM orchestrator.tasks WHERE id=$1) UPDATE orchestrator.tasks SET status='planning', attempt_count=GREATEST(attempt_count,1), assigned_worker=$2, execution_started_at=start_time.started_at, execution_deadline=COALESCE(execution_deadline,start_time.started_at + make_interval(secs => $3::bigint::double precision)), updated_at=clock_timestamp() FROM start_time WHERE id=$1 AND status='queued'", &[&task_id, &owner, &timeout_seconds]).await?;
         if changed != 1 {
             return Err(StoreError::InvalidRecord);
         }
@@ -200,7 +261,7 @@ impl TaskStore {
         if active.is_some() {
             return Err(StoreError::LeaseOccupied);
         }
-        let mut task = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, attempt_count, assigned_worker, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing).and_then(|row| decode_task(&row))?;
+        let mut task = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing).and_then(|row| decode_task(&row))?;
         if task.state != State::Merging {
             return Err(StoreError::InvalidRecord);
         }
@@ -211,7 +272,7 @@ impl TaskStore {
             .await?
             .get(0);
         tx.execute("UPDATE orchestrator.execution_lease SET task_id=$1, owner=$2, fencing_token=$3, expires_at=clock_timestamp() + make_interval(secs => $4::bigint::double precision) WHERE singleton", &[&task_id,&owner,&token,&seconds]).await?;
-        persist_recovered(&tx, &task).await?;
+        persist_recovered(&tx, &task, owner).await?;
         tx.commit().await?;
         Ok(Lease {
             task_id,
@@ -244,7 +305,7 @@ impl TaskStore {
         if active.is_some() {
             return Err(StoreError::LeaseOccupied);
         }
-        let mut task = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, attempt_count, assigned_worker, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing).and_then(|row| decode_task(&row))?;
+        let mut task = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing).and_then(|row| decode_task(&row))?;
         if !matches!(task.state, State::Paused | State::Blocked) {
             return Err(StoreError::InvalidRecord);
         }
@@ -264,7 +325,7 @@ impl TaskStore {
             .await?
             .get(0);
         tx.execute("UPDATE orchestrator.execution_lease SET task_id=$1, owner=$2, fencing_token=$3, expires_at=clock_timestamp() + make_interval(secs => $4::bigint::double precision) WHERE singleton", &[&task_id,&owner,&token,&seconds]).await?;
-        persist_recovered(&tx, &task).await?;
+        persist_recovered(&tx, &task, owner).await?;
         tx.commit().await?;
         Ok(Lease {
             task_id,
@@ -324,7 +385,7 @@ impl TaskStore {
         {
             return Err(StoreError::LeaseLost);
         }
-        let task_row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, attempt_count, assigned_worker, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
+        let task_row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
         let mut task = decode_task(&task_row)?;
         if matches!(
             task.state,
@@ -357,8 +418,7 @@ impl TaskStore {
         if changed != 1 {
             return Err(StoreError::LeaseLost);
         }
-        task.assignee = Some(owner.to_owned());
-        persist_recovered(&tx, &task).await?;
+        persist_recovered(&tx, &task, owner).await?;
         tx.commit().await?;
         Ok(Lease {
             task_id,
@@ -394,7 +454,7 @@ impl TaskStore {
         } else {
             require_live_work_lease(&tx, lease).await?;
         }
-        let old_row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, attempt_count, assigned_worker, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
+        let old_row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
         let old = decode_task(&old_row)?;
         if old.state != expected {
             return Err(StoreError::InvalidRecord);
@@ -408,7 +468,17 @@ impl TaskStore {
         if proposed != persisted {
             return Err(StoreError::InvalidRecord);
         }
-        let changed = tx.execute("UPDATE orchestrator.tasks SET status=$2::text::orchestrator.task_state, head_sha=$3, attempt_count=$4, assigned_worker=$5, validation_result=$6, pr_number=$7, checkpoint=$8, resume_state=CASE WHEN $2::text IN ('paused','blocked','failed') THEN ($9::text)::orchestrator.task_state ELSE NULL END, model_usage=$10, updated_at=clock_timestamp() WHERE id=$1 AND status=$11::text::orchestrator.task_state", &[&task_id, &status, &head, &(i32::try_from(task.attempts).map_err(|_| StoreError::InvalidRecord)?), &task.assignee, &validation, &task.pull_request.map(i64::try_from).transpose().map_err(|_| StoreError::InvalidRecord)?, &checkpoint, &task.checkpoint.map(state_name), &i64::try_from(task.model_tokens).map_err(|_| StoreError::InvalidRecord)?, &expected_name]).await?;
+        let journal = task
+            .mock_github_journal
+            .as_ref()
+            .map(serde_json::Value::to_owned);
+        if journal
+            .as_ref()
+            .is_some_and(|value| !valid_mock_journal(value))
+        {
+            return Err(StoreError::InvalidRecord);
+        }
+        let changed = tx.execute("UPDATE orchestrator.tasks SET status=$2::text::orchestrator.task_state, head_sha=$3, repair_count=$4, issue_assignee=$5, validation_result=$6, pr_number=$7, checkpoint=$8, resume_state=CASE WHEN $2::text IN ('paused','blocked','failed') THEN ($9::text)::orchestrator.task_state ELSE NULL END, model_usage=$10, implementer=$11, reviewer=$12, session_id=$13, mock_github_journal=$14, mock_runtime_fingerprint=$15, updated_at=clock_timestamp() WHERE id=$1 AND status=$16::text::orchestrator.task_state", &[&task_id, &status, &head, &(i32::try_from(task.attempts).map_err(|_| StoreError::InvalidRecord)?), &task.assignee, &validation, &task.pull_request.map(i64::try_from).transpose().map_err(|_| StoreError::InvalidRecord)?, &checkpoint, &task.checkpoint.map(state_name), &i64::try_from(task.model_tokens).map_err(|_| StoreError::InvalidRecord)?, &task.implementer, &task.reviewer, &task.session_id, &journal, &task.mock_runtime_fingerprint, &expected_name]).await?;
         if changed != 1 {
             return Err(StoreError::InvalidRecord);
         }
@@ -543,7 +613,11 @@ async fn require_live_work_lease(tx: &Transaction<'_>, lease: &Lease) -> Result<
     }
 }
 
-async fn persist_recovered(tx: &Transaction<'_>, task: &TaskRecord) -> Result<(), StoreError> {
+async fn persist_recovered(
+    tx: &Transaction<'_>,
+    task: &TaskRecord,
+    owner: &str,
+) -> Result<(), StoreError> {
     task.validate().map_err(|_| StoreError::InvalidRecord)?;
     let id = Uuid::parse_str(&task.task_id).map_err(|_| StoreError::InvalidRecord)?;
     let validation = serde_json::json!({"passed": task.validation_passed});
@@ -557,7 +631,14 @@ async fn persist_recovered(tx: &Transaction<'_>, task: &TaskRecord) -> Result<()
         .map_err(|_| StoreError::InvalidRecord)?;
     let attempts = i32::try_from(task.attempts).map_err(|_| StoreError::InvalidRecord)?;
     let model_tokens = i64::try_from(task.model_tokens).map_err(|_| StoreError::InvalidRecord)?;
-    let changed = tx.execute("UPDATE orchestrator.tasks SET status=$2::text::orchestrator.task_state, head_sha=$3, attempt_count=$4, assigned_worker=$5, validation_result=$6, pr_number=$7, checkpoint=$8, resume_state=NULL, model_usage=$9, updated_at=clock_timestamp() WHERE id=$1", &[&id,&state_name(task.state),&task.head_sha,&attempts,&task.assignee,&validation,&pr,&checkpoint,&model_tokens]).await?;
+    if task
+        .mock_github_journal
+        .as_ref()
+        .is_some_and(|value| !valid_mock_journal(value))
+    {
+        return Err(StoreError::InvalidRecord);
+    }
+    let changed = tx.execute("UPDATE orchestrator.tasks SET status=$2::text::orchestrator.task_state, head_sha=$3, repair_count=$4, assigned_worker=$5, issue_assignee=$6, validation_result=$7, pr_number=$8, checkpoint=$9, resume_state=NULL, model_usage=$10, implementer=$11, reviewer=$12, session_id=$13, mock_github_journal=$14, mock_runtime_fingerprint=$15, updated_at=clock_timestamp() WHERE id=$1", &[&id,&state_name(task.state),&task.head_sha,&attempts,&owner,&task.assignee,&validation,&pr,&checkpoint,&model_tokens,&task.implementer,&task.reviewer,&task.session_id,&task.mock_github_journal,&task.mock_runtime_fingerprint]).await?;
     if changed == 1 {
         Ok(())
     } else {
@@ -569,6 +650,15 @@ fn decode_task(row: &Row) -> Result<TaskRecord, StoreError> {
     let id: Uuid = row.get(0);
     let issue: i64 = row.get(1);
     let attempts: i32 = row.get(5);
+    let max_attempts: i32 = row
+        .try_get(row.len() - 2)
+        .map_err(|_| StoreError::InvalidRecord)?;
+    let model_budget: i64 = row
+        .try_get(row.len() - 1)
+        .map_err(|_| StoreError::InvalidRecord)?;
+    if max_attempts <= 0 || model_budget <= 0 {
+        return Err(StoreError::InvalidRecord);
+    }
     let pr: Option<i64> = row.get(8);
     let checkpoint: Option<serde_json::Value> = row.get(9);
     let checkpoint = checkpoint
@@ -580,10 +670,11 @@ fn decode_task(row: &Row) -> Result<TaskRecord, StoreError> {
                 .ok_or(StoreError::InvalidRecord)
         })
         .transpose()?;
-    let task = TaskRecord {
+    let mut task = TaskRecord {
         task_id: id.to_string(),
         issue_number: u64::try_from(issue).map_err(|_| StoreError::InvalidRecord)?,
         base_sha: row.get(2),
+        max_attempts: u32::try_from(max_attempts).map_err(|_| StoreError::InvalidRecord)?,
         head_sha: row.get(3),
         state: parse_state(&row.get::<_, String>(4)).ok_or(StoreError::InvalidRecord)?,
         attempts: u32::try_from(attempts).map_err(|_| StoreError::InvalidRecord)?,
@@ -599,20 +690,62 @@ fn decode_task(row: &Row) -> Result<TaskRecord, StoreError> {
         ),
         model_tokens: u64::try_from(row.get::<_, i64>(11))
             .map_err(|_| StoreError::InvalidRecord)?,
+        model_budget: u64::try_from(model_budget).map_err(|_| StoreError::InvalidRecord)?,
+        implementer: None,
+        reviewer: None,
+        session_id: None,
+        mock_github_journal: None,
+        mock_runtime_fingerprint: None,
     };
-    let resume_state_index = match row.len() {
-        13 => Some(12),
-        15 | 16 => Some(14),
-        _ => None,
+    let metadata_offset = match row.len() {
+        21 => (12, 13),
+        24 => (14, 16),
+        _ => return Err(StoreError::InvalidRecord),
     };
-    if let Some(index) = resume_state_index {
-        let resume_state: Option<String> = row.get(index);
-        if resume_state.as_deref() != checkpoint.map(state_name) {
-            return Err(StoreError::InvalidRecord);
-        }
+    let (resume_index, metadata_offset) = metadata_offset;
+    let resume_state: Option<String> = row.get(resume_index);
+    if resume_state.as_deref() != checkpoint.map(state_name) {
+        return Err(StoreError::InvalidRecord);
     }
+    let implementer: Option<String> = row.get(metadata_offset);
+    let reviewer: Option<String> = row.get(metadata_offset + 1);
+    let session_id: Option<String> = row.get(metadata_offset + 2);
+    let journal: Option<serde_json::Value> = row.get(metadata_offset + 3);
+    let repair_count: i32 = row.get(metadata_offset + 4);
+    let fingerprint: Option<String> = row
+        .try_get(row.len() - 3)
+        .map_err(|_| StoreError::InvalidRecord)?;
+    if repair_count != attempts
+        || fingerprint
+            .as_deref()
+            .is_some_and(|value| !is_fingerprint(value))
+        || journal
+            .as_ref()
+            .is_some_and(|value| !valid_mock_journal(value))
+        || [
+            implementer.as_deref(),
+            reviewer.as_deref(),
+            session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value.trim().is_empty() || value.len() > 255)
+    {
+        return Err(StoreError::InvalidRecord);
+    }
+    task.implementer = implementer;
+    task.reviewer = reviewer;
+    task.session_id = session_id;
+    task.mock_github_journal = journal;
+    task.mock_runtime_fingerprint = fingerprint;
     task.validate().map_err(|_| StoreError::InvalidRecord)?;
     Ok(task)
+}
+
+fn valid_mock_journal(value: &serde_json::Value) -> bool {
+    value.is_array()
+        && serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= 65_536)
+        && serde_json::from_value::<Vec<MockGitHubJournalEntry>>(value.clone()).is_ok()
 }
 
 fn ttl_seconds(ttl: Duration) -> Result<i64, StoreError> {
@@ -659,6 +792,13 @@ fn parse_state(value: &str) -> Option<State> {
 
 fn is_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]

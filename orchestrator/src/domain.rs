@@ -20,15 +20,22 @@ pub struct TaskRecord {
     pub task_id: String,
     pub issue_number: u64,
     pub base_sha: String,
+    pub max_attempts: u32,
     pub head_sha: Option<String>,
     pub state: State,
     pub attempts: u32,
     pub assignee: Option<String>,
+    pub implementer: Option<String>,
+    pub reviewer: Option<String>,
+    pub session_id: Option<String>,
+    pub mock_github_journal: Option<serde_json::Value>,
+    pub mock_runtime_fingerprint: Option<String>,
     pub validation_passed: bool,
     pub pull_request: Option<u64>,
     pub checkpoint: Option<State>,
     pub elapsed: Duration,
     pub model_tokens: u64,
+    pub model_budget: u64,
 }
 
 impl TaskRecord {
@@ -36,10 +43,31 @@ impl TaskRecord {
         if self.task_id.is_empty() || self.issue_number == 0 || !is_sha(&self.base_sha) {
             return Err(Error::CorruptRecord);
         }
+        if self.max_attempts == 0 || self.attempts > self.max_attempts || self.model_budget == 0 {
+            return Err(Error::CorruptRecord);
+        }
         if self.head_sha.as_deref().is_some_and(|sha| !is_sha(sha)) {
             return Err(Error::CorruptRecord);
         }
-        if self.assignee.as_deref().is_some_and(str::is_empty) || self.pull_request == Some(0) {
+        if self.assignee.as_deref().is_some_and(str::is_empty)
+            || self.implementer.as_deref().is_some_and(str::is_empty)
+            || self.reviewer.as_deref().is_some_and(str::is_empty)
+            || self.session_id.as_deref().is_some_and(str::is_empty)
+            || self.pull_request == Some(0)
+            || self.mock_github_journal.as_ref().is_some_and(|journal| {
+                !journal.is_array()
+                    || serde_json::to_vec(journal).map_or(true, |bytes| bytes.len() > 64 * 1024)
+            })
+            || self
+                .mock_runtime_fingerprint
+                .as_deref()
+                .is_some_and(|fingerprint| {
+                    fingerprint.len() != 64
+                        || !fingerprint
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+        {
             return Err(Error::CorruptRecord);
         }
         let valid = match self.state {
@@ -163,6 +191,23 @@ pub fn transition_from(
     if proposed.task_id != current.task_id
         || proposed.issue_number != current.issue_number
         || proposed.base_sha != current.base_sha
+        || proposed.max_attempts != current.max_attempts
+        || proposed.model_budget != current.model_budget
+        || proposed.mock_runtime_fingerprint != current.mock_runtime_fingerprint
+        || (!(current.state == State::Planning && to == State::Implementing)
+            && (proposed.implementer != current.implementer
+                || proposed.reviewer != current.reviewer
+                || proposed.session_id != current.session_id))
+        || (proposed.implementer != current.implementer
+            && (current.implementer.is_some() || proposed.implementer.is_none()))
+        || (proposed.reviewer != current.reviewer
+            && (current.reviewer.is_some() || proposed.reviewer.is_none()))
+        || (proposed.session_id != current.session_id
+            && (current.session_id.is_some() || proposed.session_id.is_none()))
+        || !journal_extends(
+            current.mock_github_journal.as_ref(),
+            proposed.mock_github_journal.as_ref(),
+        )
         || !allowed_attempts
         || proposed.model_tokens < current.model_tokens
         || !matches!(proposed.state, s if s == current.state || s == to)
@@ -231,6 +276,20 @@ pub fn transition_from(
     candidate.validate()?;
     *proposed = candidate;
     Ok(())
+}
+
+fn journal_extends(
+    current: Option<&serde_json::Value>,
+    proposed: Option<&serde_json::Value>,
+) -> bool {
+    let current = current.and_then(serde_json::Value::as_array);
+    let proposed = proposed.and_then(serde_json::Value::as_array);
+    match (current, proposed) {
+        (None, None) => true,
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
+        (Some(current), Some(proposed)) => proposed.starts_with(current),
+    }
 }
 
 /// Revalidates a stored completion against current policy and GitHub merge evidence.
@@ -413,7 +472,7 @@ fn allowed(from: State, to: State) -> bool {
     )
 }
 
-fn validate_policy(policy: &TrustedPolicy) -> Result<(), Error> {
+pub(crate) fn validate_policy(policy: &TrustedPolicy) -> Result<(), Error> {
     if policy.base_ref.is_empty()
         || !is_sha(&policy.base_sha)
         || policy.allowed_assignee.is_empty()
@@ -507,15 +566,22 @@ mod tests {
             task_id: "task-1".into(),
             issue_number: 9,
             base_sha: sha.clone(),
+            max_attempts: 3,
             head_sha: Some(head.clone()),
             state,
             attempts: 1,
             assignee: Some("bot".into()),
+            implementer: None,
+            reviewer: None,
+            session_id: None,
+            mock_github_journal: None,
+            mock_runtime_fingerprint: None,
             validation_passed: true,
             pull_request: Some(4),
             checkpoint: None,
             elapsed: Duration::from_secs(1),
             model_tokens: 1,
+            model_budget: 100,
         };
         let policy = TrustedPolicy {
             base_ref: "develop".into(),
@@ -555,6 +621,28 @@ mod tests {
             transition(&mut task, State::Merging, &policy, &facts),
             Err(Error::CorruptRecord)
         );
+    }
+
+    #[test]
+    fn records_can_preserve_usage_that_crossed_the_budget_before_stopping() {
+        let (mut task, _, _) = setup(State::Reviewing);
+        task.model_tokens = task.model_budget + 1;
+        assert_eq!(task.validate(), Ok(()));
+    }
+
+    #[test]
+    fn mock_journal_must_be_an_array_and_transitions_cannot_rewrite_its_prefix() {
+        let (mut current, policy, facts) = setup(State::Reviewing);
+        current.mock_github_journal = Some(serde_json::json!([{"operation":"set_check"}]));
+        let mut proposed = current.clone();
+        proposed.mock_github_journal = Some(serde_json::json!([{"operation":"set_review"}]));
+        assert_eq!(
+            transition_from(&current, &mut proposed, State::Merging, &policy, &facts),
+            Err(Error::InvalidTransition)
+        );
+
+        current.mock_github_journal = Some(serde_json::json!({"operation":"set_check"}));
+        assert_eq!(current.validate(), Err(Error::CorruptRecord));
     }
 
     #[test]
@@ -717,12 +805,35 @@ mod tests {
             transition_from(&current, &mut proposed, State::Reviewing, &policy, &facts),
             Err(Error::PullRequestMismatch)
         );
+
+        proposed = current.clone();
+        proposed.max_attempts += 1;
+        assert_eq!(
+            transition_from(&current, &mut proposed, State::Reviewing, &policy, &facts),
+            Err(Error::InvalidTransition)
+        );
+
+        proposed = current.clone();
+        proposed.model_budget += 1;
+        assert_eq!(
+            transition_from(&current, &mut proposed, State::Reviewing, &policy, &facts),
+            Err(Error::InvalidTransition)
+        );
+
+        current.mock_runtime_fingerprint = Some("a".repeat(64));
+        proposed = current.clone();
+        proposed.mock_runtime_fingerprint = Some("b".repeat(64));
+        assert_eq!(
+            transition_from(&current, &mut proposed, State::Reviewing, &policy, &facts),
+            Err(Error::InvalidTransition)
+        );
     }
 
     #[test]
     fn limit_exhaustion_pauses_with_a_checkpoint() {
         let (mut task, mut policy, facts) = setup(State::Implementing);
         task.attempts = 4;
+        task.max_attempts = 4;
         task.pull_request = None;
         task.validation_passed = false;
         policy.max_attempts = 3;

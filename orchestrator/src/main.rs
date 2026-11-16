@@ -35,7 +35,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "mipsorcu-orchestrator\n\nUsage:\n  mipsorcu-orchestrator --help\n  mipsorcu-orchestrator demo\n  mipsorcu-orchestrator status <task-uuid>\n\nCommands:\n  demo          Run a mock-only state, crash/replay, and resume demonstration.\n  status <id>   Show an explicitly unverified PostgreSQL task snapshot.\n  enqueue/run/resume are unavailable until trusted policy, fresh GitHub reads, workspace isolation, and a production worker are connected.\n\nstatus reads ORCHESTRATOR_DATABASE_URL from the environment. No merge or model command is implemented."
+        "mipsorcu-orchestrator\n\nUsage:\n  mipsorcu-orchestrator --help\n  mipsorcu-orchestrator demo\n  mipsorcu-orchestrator status <task-uuid>\n\nCommands:\n  demo          Run the mock-only crash/replay/resume flow through simulated merge to COMPLETED.\n  status <id>   Show an explicitly unverified PostgreSQL task snapshot.\n  enqueue/run/resume are unavailable until trusted policy, fresh GitHub reads, workspace isolation, and a production worker are connected.\n\nThe demo uses in-memory state and does not call PostgreSQL, GitHub, Git, the filesystem, or a model. Its merge is simulated and does not change a repository. status reads ORCHESTRATOR_DATABASE_URL from the environment."
     );
 }
 

@@ -4,7 +4,7 @@ require 'yaml'
 
 class SecurityWorkflowTest < Minitest::Test
   WORKFLOW = File.expand_path('../../.github/workflows/ci.yml', __dir__)
-  REQUIRED_JOBS = %w[rust supabase cargo_deny cargo_vet e2e failure_injection validation_tests].freeze
+  REQUIRED_JOBS = %w[rust supabase orchestrator orchestrator_postgres cargo_deny cargo_vet e2e failure_injection validation_tests].freeze
 
   def workflow
     YAML.safe_load_file(WORKFLOW).fetch('jobs')
@@ -25,11 +25,17 @@ class SecurityWorkflowTest < Minitest::Test
                     'bash scripts/check-core.sh rust'
     assert_includes jobs.fetch('supabase').fetch('steps').map { |step| step['run'] }.compact,
                     'bash scripts/check-core.sh db'
+    assert_includes jobs.fetch('orchestrator').fetch('steps').map { |step| step['run'] }.compact,
+                    'cargo test --locked --manifest-path orchestrator/Cargo.toml'
     assert_includes jobs.fetch('cargo_deny').fetch('steps').map { |step| step['run'] }.compact,
                     'cargo deny --locked check'
     vet_commands = jobs.fetch('cargo_vet').fetch('steps').map { |step| step['run'] }.compact
     assert_includes vet_commands, 'cargo vet --locked --no-minimize-exemptions'
     assert_includes vet_commands, 'python3 scripts/check-cargo-vet-exemptions.py'
+    exemption_step = jobs.fetch('cargo_vet').fetch('steps').find do |step|
+      step['run'] == 'python3 scripts/check-cargo-vet-exemptions.py'
+    end
+    assert_equal '${{ always() }}', exemption_step.fetch('if')
     validation_commands = jobs.fetch('validation_tests').fetch('steps').map { |step| step['run'] }.compact
     assert_includes validation_commands, 'python3 scripts/tests/test-cargo-vet-exemptions.py'
     assert_includes validation_commands, 'python3 scripts/tests/test_ci_policy.py'
@@ -41,6 +47,7 @@ class SecurityWorkflowTest < Minitest::Test
     jobs = workflow
     assert_match(/exit 1/, jobs.fetch('e2e').fetch('steps').first.fetch('run'))
     assert_match(/exit 1/, jobs.fetch('failure_injection').fetch('steps').first.fetch('run'))
+    assert_match(/exit 1/, jobs.fetch('orchestrator_postgres').fetch('steps').first.fetch('run'))
   end
 
   def test_aggregate_requires_every_job_and_runs_after_failures
