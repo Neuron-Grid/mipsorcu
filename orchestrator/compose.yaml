@@ -1,0 +1,41 @@
+services:
+  database:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: orchestrator
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: ${ORCHESTRATOR_DB_PASSWORD:?Set ORCHESTRATOR_DB_PASSWORD in the environment}
+    volumes:
+      - orchestrator-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator -d orchestrator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - database
+
+  cli:
+    build:
+      context: ..
+      dockerfile: orchestrator/Dockerfile
+    image: mipsorcu-orchestrator:local
+    command: ["--help"]
+    profiles: ["cli"]
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - database
+
+volumes:
+  orchestrator-db:
+    name: mipsorcu-orchestrator-db
+
+networks:
+  database:
+    internal: true
