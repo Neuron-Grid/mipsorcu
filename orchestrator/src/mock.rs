@@ -14,8 +14,11 @@ use uuid::Uuid;
 use crate::engine::request_hash;
 
 use crate::{
-    agent::{AgentAdapter, AgentSettings, Cancellation, Failure, MockAdapter, Outcome, Provider},
-    domain::{self, ObservedFacts, State, TaskRecord, TrustedPolicy},
+    agent::{
+        AgentRequest, AgentRole, AgentSettings, AgentStage, Cancellation, Failure, MockAdapter,
+        Outcome, Provider, TypedAgentAdapter,
+    },
+    domain::{self, CiObservation, CiStatus, ObservedFacts, State, TaskRecord, TrustedPolicy},
     engine::{
         Engine, EngineError, EngineStore, EvidenceSource, ExecutionBudget, MockCodeChange,
         MockPlan, OperationLookup, PostgresEngineStore, Stage, StageFailure, StageOutput,
@@ -120,13 +123,29 @@ impl EngineStore for MemoryStore {
 
     async fn claim_handoff(
         &self,
-        _: Uuid,
-        _: &str,
+        task_id: Uuid,
+        owner: &str,
         _: Duration,
-        _: &TrustedPolicy,
-        _: &ObservedFacts,
+        policy: &TrustedPolicy,
+        facts: &ObservedFacts,
     ) -> Result<Lease, StoreError> {
-        Err(StoreError::HumanActionPending)
+        let db = self.lock()?;
+        if db.task.task_id != task_id.to_string() {
+            return Err(StoreError::TaskMissing);
+        }
+        match db.task.state {
+            State::Merging if facts.pr_merged => {
+                let mut candidate = db.task.clone();
+                domain::transition_from(&db.task, &mut candidate, State::Completed, policy, facts)
+                    .map_err(|_| StoreError::InvalidRecord)?;
+            }
+            State::Merging => {}
+            State::Completed => domain::validate_completed(&db.task, policy, facts)
+                .map_err(|_| StoreError::InvalidRecord)?,
+            _ => return Err(StoreError::InvalidRecord),
+        }
+        drop(db);
+        self.lease(task_id, owner)
     }
 
     async fn claim_resume(
@@ -157,6 +176,43 @@ impl EngineStore for MemoryStore {
         Ok(())
     }
 
+    async fn renew_handoff_verification(
+        &self,
+        lease: &Lease,
+        _: Duration,
+        _: &TaskRecord,
+        policy: &TrustedPolicy,
+        facts: &ObservedFacts,
+    ) -> Result<(), StoreError> {
+        let db = self.lock()?;
+        if db.task.task_id != lease.task_id.to_string() {
+            return Err(StoreError::TaskMissing);
+        }
+        match db.task.state {
+            State::Merging => {
+                let mut completed = db.task.clone();
+                domain::transition_from(&db.task, &mut completed, State::Completed, policy, facts)
+                    .map_err(|_| StoreError::InvalidRecord)?;
+            }
+            State::Completed => domain::validate_completed(&db.task, policy, facts)
+                .map_err(|_| StoreError::InvalidRecord)?,
+            _ => return Err(StoreError::InvalidRecord),
+        }
+        Ok(())
+    }
+
+    async fn work_deadline_expired(
+        &self,
+        lease: &Lease,
+        task: &TaskRecord,
+        policy: &TrustedPolicy,
+    ) -> Result<bool, StoreError> {
+        if task.task_id != lease.task_id.to_string() {
+            return Err(StoreError::LeaseLost);
+        }
+        Ok(task.elapsed >= policy.max_runtime)
+    }
+
     async fn load(&self, lease: &Lease) -> Result<TaskRecord, StoreError> {
         let db = self.lock()?;
         if db.task.task_id != lease.task_id.to_string() {
@@ -174,9 +230,7 @@ impl EngineStore for MemoryStore {
     ) -> Result<OperationLookup, StoreError> {
         let mut db = self.lock()?;
         match db.operations.get(&key) {
-            Some(OperationLookup::Completed(value)) => {
-                Ok(OperationLookup::Completed(value.clone()))
-            }
+            Some(result @ OperationLookup::Completed { .. }) => Ok(result.clone()),
             Some(_) => Ok(OperationLookup::Ambiguous),
             None => {
                 db.operations.insert(key, OperationLookup::New);
@@ -187,7 +241,7 @@ impl EngineStore for MemoryStore {
 
     async fn complete_operation(
         &self,
-        _: &Lease,
+        lease: &Lease,
         key: Uuid,
         result: &Value,
         model_tokens: u64,
@@ -201,8 +255,13 @@ impl EngineStore for MemoryStore {
             .model_tokens
             .checked_add(model_tokens)
             .ok_or(StoreError::InvalidRecord)?;
-        db.operations
-            .insert(key, OperationLookup::Completed(result.clone()));
+        db.operations.insert(
+            key,
+            OperationLookup::Completed {
+                result: result.clone(),
+                fencing_token: lease.fencing_token,
+            },
+        );
         Ok(())
     }
 
@@ -224,6 +283,37 @@ impl EngineStore for MemoryStore {
         }
         task.validate().map_err(|_| StoreError::InvalidRecord)?;
         db.task = task.clone();
+        Ok(())
+    }
+
+    async fn save_handoff_completed(
+        &self,
+        lease: &Lease,
+        task: &TaskRecord,
+        policy: &TrustedPolicy,
+        facts: &ObservedFacts,
+    ) -> Result<(), StoreError> {
+        if task.state != State::Completed || !facts.pr_merged || facts.issue_open {
+            return Err(StoreError::InvalidRecord);
+        }
+        let mut db = self.lock()?;
+        if db.task.task_id != lease.task_id.to_string() || db.task.state != State::Merging {
+            return Err(StoreError::LeaseLost);
+        }
+        let mut proposed = task.clone();
+        proposed.elapsed = db.task.elapsed;
+        domain::transition_from(&db.task, &mut proposed, State::Completed, policy, facts)
+            .map_err(|_| StoreError::InvalidRecord)?;
+        let mut persisted = task.clone();
+        persisted.elapsed = db.task.elapsed;
+        if proposed != persisted {
+            return Err(StoreError::InvalidRecord);
+        }
+        if db.fail_next_save {
+            db.fail_next_save = false;
+            return Err(StoreError::InvalidRecord);
+        }
+        db.task = persisted;
         Ok(())
     }
 
@@ -270,7 +360,7 @@ impl EvidenceSource for MemoryEvidence {
                 serde_json::from_value(value.clone()).map_err(|_| ())?;
             let adapter = MockGitHubAdapter::restore(mock_policy, &journal).map_err(|_| ())?;
             facts.head_sha = task.head_sha.clone().unwrap_or_default();
-            facts.validated_head_sha = task.validation_passed.then(|| facts.head_sha.clone());
+            facts.validated_head_sha = None;
             facts.pr_number = task.pull_request;
             facts.pr_head_sha = None;
             facts.pr_base_ref = None;
@@ -280,6 +370,7 @@ impl EvidenceSource for MemoryEvidence {
             facts.base_contains_merge_commit = false;
             facts.checks_passed.clear();
             facts.reviewer_approved = false;
+            facts.ci = None;
             if let Some(number) = task.pull_request {
                 let head = task.head_sha.as_deref().ok_or(())?;
                 let pull = adapter.pull_request(number).ok_or(())?;
@@ -291,6 +382,38 @@ impl EvidenceSource for MemoryEvidence {
                 facts.base_contains_merge_commit = pull.merged;
                 facts.checks_passed = adapter.checks_passed(head);
                 facts.reviewer_approved = adapter.review_approved(head);
+                let mut check_results = HashMap::new();
+                for entry in &journal {
+                    if let Ok(MockGitHubOutput::CheckUpdated {
+                        head_sha,
+                        name,
+                        passed,
+                    }) = &entry.result
+                        && head_sha == &pull.head_sha
+                        && policy.required_checks.contains(name)
+                    {
+                        check_results.insert(name.as_str(), *passed);
+                    }
+                }
+                let status = if check_results.values().any(|passed| !passed) {
+                    CiStatus::Failed
+                } else if policy
+                    .required_checks
+                    .iter()
+                    .all(|name| check_results.get(name.as_str()) == Some(&true))
+                {
+                    CiStatus::Passed
+                } else {
+                    CiStatus::Unknown
+                };
+                if task.validation_passed && status == CiStatus::Passed && pull.head_sha == head {
+                    facts.validated_head_sha = Some(head.to_owned());
+                }
+                facts.ci = Some(CiObservation {
+                    head_sha: pull.head_sha.clone(),
+                    pull_request: number,
+                    status,
+                });
             }
         }
         Ok(facts)
@@ -540,6 +663,10 @@ impl<V: RecoveryVerifier + Sync> PostgresMockRuntime<V> {
     ) -> Result<StepResult, EngineError> {
         self.engine.recover_and_run(prior, owner).await
     }
+
+    pub async fn release_expired_blocked_lease(&self, prior: &Lease) -> Result<(), EngineError> {
+        self.engine.release_expired_blocked_lease(prior).await
+    }
 }
 
 impl StageRunner for MemoryRunner {
@@ -551,15 +678,62 @@ impl StageRunner for MemoryRunner {
         (self.settings.implementer, self.settings.reviewer)
     }
 
+    fn supports_cancellation(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
+        lease: &Lease,
+        operation_id: Uuid,
         stage: Stage,
         task: &TaskRecord,
         policy: &TrustedPolicy,
         budget: ExecutionBudget,
     ) -> Result<StageOutput, StageFailure> {
+        self.execute_with_cancellation(
+            lease,
+            operation_id,
+            stage,
+            task,
+            policy,
+            budget,
+            Cancellation::default(),
+        )
+        .await
+    }
+
+    async fn execute_with_cancellation(
+        &self,
+        lease: &Lease,
+        operation_id: Uuid,
+        stage: Stage,
+        task: &TaskRecord,
+        policy: &TrustedPolicy,
+        budget: ExecutionBudget,
+        cancellation: Cancellation,
+    ) -> Result<StageOutput, StageFailure> {
         self.validate_configuration()
             .map_err(|_| StageFailure::InvalidConfiguration)?;
+        if cancellation.cancelled() {
+            return Err(StageFailure::Cancelled);
+        }
+        let task_id = Uuid::parse_str(&task.task_id).map_err(|_| StageFailure::InvalidInput)?;
+        if lease.task_id != task_id || lease.fencing_token <= 0 {
+            return Err(StageFailure::InvalidInput);
+        }
+        let state = match stage {
+            Stage::Implement if task.attempts == 0 => State::Implementing,
+            Stage::Implement => State::Repairing,
+            Stage::Validate => State::Validating,
+            Stage::Review => State::Reviewing,
+            Stage::Plan => State::Planning,
+            Stage::Merge => return Err(StageFailure::InvalidConfiguration),
+        };
+        let stage_operation = operation_key(task_id, task.attempts, state, stage);
+        if operation_id != stage_operation {
+            return Err(StageFailure::InvalidInput);
+        }
         let ci_failure =
             stage == Stage::Validate && task.attempts < self.scenario.ci_failure_attempts;
         let review_changes =
@@ -578,18 +752,32 @@ impl StageRunner for MemoryRunner {
             Stage::Validate | Stage::Merge => None,
         };
         if let Some((provider, expected)) = agent {
+            let (agent_stage, role) = match stage {
+                Stage::Plan => (AgentStage::Plan, AgentRole::Implementer),
+                Stage::Implement => (AgentStage::Implement, AgentRole::Implementer),
+                Stage::Review => (AgentStage::Review, AgentRole::Reviewer),
+                Stage::Validate | Stage::Merge => {
+                    return Err(StageFailure::InvalidConfiguration);
+                }
+            };
+            let request = AgentRequest {
+                task_id,
+                operation_id: stage_operation,
+                stage: agent_stage,
+                role,
+                attempt: task.attempts,
+            };
             let agent_result = self
                 .scenario
                 .agent_failure
                 .filter(|(failure_stage, _)| *failure_stage == stage)
                 .map_or(Ok(expected), |(_, failure)| Err(failure));
             let mut adapter = MockAdapter::new(provider, Duration::ZERO, agent_result);
-            let cancellation = Cancellation::default();
             if cancel {
                 cancellation.cancel();
             }
             match adapter
-                .execute(cancellation, budget.remaining_runtime)
+                .execute_request(request, cancellation, budget.remaining_runtime)
                 .await
             {
                 Ok(actual) if actual == expected => {}
@@ -633,16 +821,6 @@ impl StageRunner for MemoryRunner {
         github
             .restore_journal(&journal)
             .map_err(|_| StageFailure::InvalidOperationResult)?;
-        let task_id = Uuid::parse_str(&task.task_id).map_err(|_| StageFailure::InvalidInput)?;
-        let state = match stage {
-            Stage::Implement if task.attempts == 0 => State::Implementing,
-            Stage::Implement => State::Repairing,
-            Stage::Validate => State::Validating,
-            Stage::Review => State::Reviewing,
-            Stage::Plan => State::Planning,
-            Stage::Merge => return Err(StageFailure::InvalidConfiguration),
-        };
-        let stage_operation = operation_key(task_id, task.attempts, state, stage);
         let operation = |suffix: &str| format!("{stage_operation}:{suffix}");
         let branch = format!("orchestrator/{}", task.task_id);
         let new_head = head_for_attempt(task.attempts)
@@ -771,6 +949,7 @@ impl StageRunner for MemoryRunner {
             head_sha,
             pull_request,
             validation_passed,
+            local_validation_passed: None,
             model_tokens: if stage == Stage::Validate { 0 } else { 1 },
             mock_github_journal,
             plan,
@@ -833,6 +1012,8 @@ fn pg_mock_config_with_scenario(scenario: MockScenario) -> PostgresMockConfig {
 }
 
 #[cfg(test)]
+// Test supervisor observes only the spawned test worker's exit; it is not a
+// production process-tree verifier.
 struct ObservedChildExit {
     owner: String,
     fencing_token: i64,
@@ -840,15 +1021,9 @@ struct ObservedChildExit {
 
 #[cfg(test)]
 impl RecoveryVerifier for ObservedChildExit {
-    fn verify_stopped(&self, task_id: Uuid, owner: &str, fencing_token: i64) -> Option<Value> {
-        (owner == self.owner && fencing_token == self.fencing_token).then(|| {
-            serde_json::json!({
-                "test_supervisor": "child_exit_observed",
-                "task_id": task_id.to_string(),
-                "owner": owner,
-                "fencing_token": fencing_token,
-            })
-        })
+    fn verify_stopped(&self, _: Uuid, owner: &str, fencing_token: i64) -> Option<Value> {
+        (owner == self.owner && fencing_token == self.fencing_token)
+            .then(|| serde_json::json!({"test_child_exit_observed": true}))
     }
 }
 
@@ -862,6 +1037,7 @@ fn pg_plan_output(task_id: Uuid) -> StageOutput {
         head_sha: None,
         pull_request: None,
         validation_passed: false,
+        local_validation_passed: None,
         model_tokens: 1,
         mock_github_journal: None,
         plan: Some(MockPlan {
@@ -904,6 +1080,7 @@ fn fixture() -> Result<DemoFixture, String> {
         approved_assignee: policy.allowed_assignee.clone(),
         merge_commit_sha: None,
         base_contains_merge_commit: false,
+        ci: None,
     };
     let task = TaskRecord {
         task_id: task_id.to_string(),
@@ -1225,6 +1402,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_engine_token_prevents_mock_stage_side_effects() {
+        let (engine, task_id, db, policy) = fixture().unwrap();
+        let task = db.lock().unwrap().task.clone();
+        let policy = policy.lock().unwrap().clone();
+        let lease = Lease {
+            task_id,
+            owner: "worker".into(),
+            fencing_token: 1,
+        };
+        let cancellation = Cancellation::default();
+        cancellation.cancel();
+        let result = engine
+            .runner
+            .execute_with_cancellation(
+                &lease,
+                operation_key(task_id, 0, State::Planning, Stage::Plan),
+                Stage::Plan,
+                &task,
+                &policy,
+                ExecutionBudget {
+                    remaining_runtime: Duration::from_secs(1),
+                    remaining_model_tokens: 100,
+                },
+                cancellation,
+            )
+            .await;
+        assert!(matches!(result, Err(StageFailure::Cancelled)));
+        assert_eq!(db.lock().unwrap().stage_executions, 0);
+    }
+
+    #[tokio::test]
     async fn mock_agent_failure_is_returned_as_a_structured_block_reason() {
         let (result, task, _) =
             run_scenario(MockScenario::new().with_agent_failure(Stage::Plan, Failure::Unavailable))
@@ -1529,6 +1737,18 @@ mod tests {
             .expect("read supervisor recovery confirmation")
             .get(0);
         assert_eq!(verified_recoveries, 1);
+        let recovery_evidence: Value = bootstrap
+            .query_one(
+                "SELECT evidence FROM orchestrator.recovery_confirmations WHERE task_id = $1 AND expired_fencing_token = $2 AND confirmed_by = $3",
+                &[&task_id, &fencing_token, &owner],
+            )
+            .await
+            .expect("read redacted supervisor recovery evidence")
+            .get(0);
+        assert_eq!(
+            recovery_evidence,
+            serde_json::json!({"supervisor_verified_worker_tree_stopped": true})
+        );
         let journal: Vec<MockGitHubJournalEntry> = serde_json::from_value(
             completed
                 .mock_github_journal

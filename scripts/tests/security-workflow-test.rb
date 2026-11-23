@@ -27,6 +27,16 @@ class SecurityWorkflowTest < Minitest::Test
                     'bash scripts/check-core.sh db'
     assert_includes jobs.fetch('orchestrator').fetch('steps').map { |step| step['run'] }.compact,
                     'cargo test --locked --manifest-path orchestrator/Cargo.toml'
+    postgres_commands = jobs.fetch('orchestrator_postgres').fetch('steps').map { |step| step['run'] }.compact
+    postgres_pull = 'docker pull postgres@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7'
+    rust_pull = 'docker pull rust@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082'
+    cargo_fetch = 'cargo fetch --locked --manifest-path orchestrator/Cargo.toml'
+    isolated_test = 'bash scripts/test-orchestrator-offline-container.sh postgres-tests'
+    [postgres_pull, rust_pull, cargo_fetch, isolated_test].each { |command| assert_includes postgres_commands, command }
+    refute_includes postgres_commands, 'bash scripts/test-orchestrator-postgres.sh'
+    [postgres_pull, rust_pull, cargo_fetch].each do |command|
+      assert_operator postgres_commands.index(command), :<, postgres_commands.index(isolated_test)
+    end
     assert_includes jobs.fetch('cargo_deny').fetch('steps').map { |step| step['run'] }.compact,
                     'cargo deny --locked check'
     vet_commands = jobs.fetch('cargo_vet').fetch('steps').map { |step| step['run'] }.compact
@@ -41,13 +51,14 @@ class SecurityWorkflowTest < Minitest::Test
     assert_includes validation_commands, 'python3 scripts/tests/test_ci_policy.py'
     assert_includes validation_commands, 'bash scripts/tests/failure-injection-contract-test.sh'
     assert_includes validation_commands, 'ruby scripts/tests/security-workflow-test.rb'
+    assert_includes validation_commands, 'ruby scripts/tests/offline_container_policy_test.rb'
+    assert_includes validation_commands, 'python3 -B scripts/tests/test_receive_orchestrator_artifacts.py'
   end
 
   def test_e2e_and_failure_injection_fail_closed_until_isolated_runners_exist
     jobs = workflow
     assert_match(/exit 1/, jobs.fetch('e2e').fetch('steps').first.fetch('run'))
     assert_match(/exit 1/, jobs.fetch('failure_injection').fetch('steps').first.fetch('run'))
-    assert_match(/exit 1/, jobs.fetch('orchestrator_postgres').fetch('steps').first.fetch('run'))
   end
 
   def test_aggregate_requires_every_job_and_runs_after_failures

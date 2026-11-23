@@ -250,11 +250,8 @@ const MAX_GIT_READERS: usize = 16;
 static ACTIVE_GIT_READERS: AtomicUsize = AtomicUsize::new(0);
 
 fn run_git<const N: usize>(repo: &Path, args: [&OsStr; N]) -> Result<Output, WorkspaceError> {
-    reserve_git_readers()?;
     let mut command = Command::new("git");
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = match command
+    command
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -272,9 +269,19 @@ fn run_git<const N: usize>(repo: &Path, args: [&OsStr; N]) -> Result<Output, Wor
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    run_git_command(command)
+}
+
+fn run_git_command(mut command: Command) -> Result<Output, WorkspaceError> {
+    // shortcut: other platforms may leak pipe descriptors, use an isolated helper before enabling them.
+    if !cfg!(target_os = "linux") {
+        return Err(WorkspaceError::GitUnavailable);
+    }
+    reserve_git_readers()?;
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
             ACTIVE_GIT_READERS.fetch_sub(2, Ordering::AcqRel);
@@ -319,7 +326,6 @@ fn run_git<const N: usize>(repo: &Path, args: [&OsStr; N]) -> Result<Output, Wor
     };
 
     let deadline = Instant::now() + GIT_TIMEOUT;
-    let process_group = child.id();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -338,8 +344,7 @@ fn run_git<const N: usize>(repo: &Path, args: [&OsStr; N]) -> Result<Output, Wor
 
     while !stdout_reader.is_finished() || !stderr_reader.is_finished() {
         if Instant::now() >= deadline {
-            stop_process_group(process_group);
-            let _ = child.wait();
+            // The reaped process-group ID can already refer to an unrelated process.
             return Err(WorkspaceError::GitTimeout);
         }
         thread::sleep(Duration::from_millis(10));
@@ -439,10 +444,16 @@ fn valid_sha(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::WorkspaceRequest;
     use super::{
-        MAX_GIT_OUTPUT, WorkspaceError, WorkspaceRequest, is_clean_status, read_bounded, valid_sha,
-        valid_task_id,
+        MAX_GIT_OUTPUT, WorkspaceError, is_clean_status, read_bounded, valid_sha, valid_task_id,
     };
+    #[cfg(not(target_os = "linux"))]
+    use std::ffi::OsStr;
+    #[cfg(not(target_os = "linux"))]
+    use std::path::Path;
+    #[cfg(target_os = "linux")]
     use std::path::PathBuf;
 
     #[test]
@@ -470,6 +481,7 @@ mod tests {
         assert!(exceeded);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn refuses_a_base_sha_that_does_not_match_repository_head() {
         let request = WorkspaceRequest {
@@ -479,5 +491,38 @@ mod tests {
             workspace_root: std::env::temp_dir(),
         };
         assert_eq!(request.plan(), Err(WorkspaceError::StaleBase));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captures_subprocess_output_on_linux() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "printf 'synthetic output'"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = super::run_git_command(command).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"synthetic output");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn refuses_git_before_spawning_on_unsupported_platform() {
+        assert!(matches!(
+            super::run_git(Path::new("/missing"), [OsStr::new("--version")]),
+            Err(WorkspaceError::GitUnavailable)
+        ));
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--list")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        assert!(matches!(
+            super::run_git_command(command),
+            Err(WorkspaceError::GitUnavailable)
+        ));
     }
 }

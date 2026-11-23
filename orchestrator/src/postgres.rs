@@ -1,10 +1,15 @@
-use std::{net::IpAddr, str::FromStr, time::Duration};
+use std::{fmt, net::IpAddr, str::FromStr, time::Duration};
 
+use crate::domain::{
+    self, CiObservation, CiStatus, ObservedFacts, State, TaskRecord, TrustedPolicy,
+};
+use crate::mock_github::MockGitHubJournalEntry;
+use sha3::{Digest, Sha3_256};
 use tokio_postgres::{Client, Config, NoTls, Row, Transaction, config::Host};
 use uuid::Uuid;
 
-use crate::domain::{self, ObservedFacts, State, TaskRecord, TrustedPolicy};
-use crate::mock_github::MockGitHubJournalEntry;
+const MAX_OPERATION_RESULT_BYTES: i32 = 8 * 1024 * 1024;
+const ISSUE_CLOSE_OPERATION: &str = "github_issue_close";
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -32,11 +37,28 @@ pub struct Lease {
     pub fencing_token: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum OperationStatus {
     NewlyPrepared,
     Ambiguous,
-    Completed(serde_json::Value),
+    Completed {
+        result: serde_json::Value,
+        fencing_token: i64,
+    },
+}
+
+impl fmt::Debug for OperationStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NewlyPrepared => f.write_str("NewlyPrepared"),
+            Self::Ambiguous => f.write_str("Ambiguous"),
+            Self::Completed { fencing_token, .. } => f
+                .debug_struct("Completed")
+                .field("result", &"[REDACTED]")
+                .field("fencing_token", fencing_token)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -51,7 +73,9 @@ pub struct NewTask {
     pub idempotency_key: Uuid,
 }
 
-/// Implemented by the trusted process supervisor, never by the task database.
+/// Implemented by the trusted supervisor, never by the task database.
+/// The supervisor must independently prove that the prior worker and every
+/// process it started have stopped. Returned object contents are not persisted.
 pub trait RecoveryVerifier: Send + Sync {
     fn verify_stopped(
         &self,
@@ -63,6 +87,82 @@ pub trait RecoveryVerifier: Send + Sync {
 
 pub struct TaskStore {
     client: Client,
+}
+
+/// Deterministic task-scoped key for the one post-merge Issue-close attempt.
+/// Possession of this key or its database row does not authorize a GitHub write.
+pub fn issue_close_operation_key(task_id: Uuid) -> Uuid {
+    let mut digest = Sha3_256::new();
+    digest.update(b"mipsorcu:github-issue-close:v1:");
+    digest.update(task_id.as_bytes());
+    let hash = digest.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn validate_issue_close_evidence(
+    task: &TaskRecord,
+    policy: &TrustedPolicy,
+    facts: &ObservedFacts,
+) -> Result<(), StoreError> {
+    if policy.base_ref != "develop" || !facts.pr_merged {
+        return Err(StoreError::InvalidRecord);
+    }
+    let mut completed = task.clone();
+    domain::transition_from(task, &mut completed, State::Completed, policy, facts)
+        .map_err(|_| StoreError::InvalidRecord)
+}
+
+fn issue_close_request_hash(
+    task: &TaskRecord,
+    repository: &str,
+    policy: &TrustedPolicy,
+    facts: &ObservedFacts,
+) -> Result<[u8; 32], StoreError> {
+    let issue_number = i64::try_from(task.issue_number).map_err(|_| StoreError::InvalidRecord)?;
+    let pull_number = i64::try_from(facts.pr_number.ok_or(StoreError::InvalidRecord)?)
+        .map_err(|_| StoreError::InvalidRecord)?;
+    let issue_number_bytes = issue_number.to_be_bytes();
+    let pull_number_bytes = pull_number.to_be_bytes();
+    let merge_sha = facts
+        .merge_commit_sha
+        .as_deref()
+        .ok_or(StoreError::InvalidRecord)?;
+    let head_sha = task.head_sha.as_deref().ok_or(StoreError::InvalidRecord)?;
+    let mut digest = Sha3_256::new();
+    for field in [
+        b"mipsorcu:github-issue-close-request:v1".as_slice(),
+        task.task_id.as_bytes(),
+        repository.as_bytes(),
+        &issue_number_bytes,
+        &pull_number_bytes,
+        policy.base_ref.as_bytes(),
+        policy.base_sha.as_bytes(),
+        head_sha.as_bytes(),
+        facts.head_sha.as_bytes(),
+        facts.policy_base_ref.as_bytes(),
+        facts.policy_base_sha.as_bytes(),
+        facts
+            .pr_head_sha
+            .as_deref()
+            .ok_or(StoreError::InvalidRecord)?
+            .as_bytes(),
+        facts
+            .pr_base_ref
+            .as_deref()
+            .ok_or(StoreError::InvalidRecord)?
+            .as_bytes(),
+        merge_sha.as_bytes(),
+        &[u8::from(facts.base_contains_merge_commit)],
+    ] {
+        let length = u64::try_from(field.len()).map_err(|_| StoreError::InvalidRecord)?;
+        digest.update(length.to_be_bytes());
+        digest.update(field);
+    }
+    Ok(digest.finalize().into())
 }
 
 impl TaskStore {
@@ -181,6 +281,30 @@ impl TaskStore {
         decode_task(&row)
     }
 
+    /// Returns the persisted CI snapshot for inspection only; callers must obtain fresh evidence before acting.
+    pub async fn get_ci_observation(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<CiObservation>, StoreError> {
+        let row = self
+            .client
+            .query_opt(
+                "SELECT COALESCE(octet_length(validation_result::text),0) > 16384, CASE WHEN COALESCE(octet_length(validation_result::text),0) <= 16384 THEN validation_result END FROM orchestrator.tasks WHERE id=$1",
+                &[&task_id],
+            )
+            .await?
+            .ok_or(StoreError::TaskMissing)?;
+        let oversized: bool = row.get(0);
+        if oversized {
+            return Err(StoreError::InvalidRecord);
+        }
+        let validation: Option<serde_json::Value> = row.get(1);
+        match validation.as_ref() {
+            Some(validation) => parse_ci_observation(validation),
+            None => Ok(None),
+        }
+    }
+
     /// Claims only an unleased queued task. Expired leases remain occupied pending verified recovery.
     pub async fn claim(
         &mut self,
@@ -234,7 +358,7 @@ impl TaskStore {
         })
     }
 
-    /// Finalizes a released human handoff only after fresh evidence confirms GitHub merged the PR.
+    /// Claims a handoff for verification; acquiring this lease does not complete the task.
     pub async fn claim_handoff(
         &mut self,
         task_id: Uuid,
@@ -245,9 +369,6 @@ impl TaskStore {
     ) -> Result<Lease, StoreError> {
         if owner.is_empty() {
             return Err(StoreError::InvalidInput);
-        }
-        if !facts.pr_merged {
-            return Err(StoreError::HumanActionPending);
         }
         let seconds = ttl_seconds(ttl)?;
         let tx = self.client.transaction().await?;
@@ -261,18 +382,24 @@ impl TaskStore {
         if active.is_some() {
             return Err(StoreError::LeaseOccupied);
         }
-        let mut task = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing).and_then(|row| decode_task(&row))?;
-        if task.state != State::Merging {
-            return Err(StoreError::InvalidRecord);
+        let task = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing).and_then(|row| decode_task(&row))?;
+        match task.state {
+            State::Merging if facts.pr_merged => {
+                let mut completed = task.clone();
+                domain::transition(&mut completed, State::Completed, policy, facts)
+                    .map_err(|_| StoreError::InvalidRecord)?;
+            }
+            State::Merging => {}
+            State::Completed => domain::validate_completed(&task, policy, facts)
+                .map_err(|_| StoreError::InvalidRecord)?,
+            _ => return Err(StoreError::InvalidRecord),
         }
-        domain::transition(&mut task, State::Completed, policy, facts)
-            .map_err(|_| StoreError::InvalidRecord)?;
         let token: i64 = tx
             .query_one("SELECT nextval('orchestrator.fencing_token_seq')", &[])
             .await?
             .get(0);
         tx.execute("UPDATE orchestrator.execution_lease SET task_id=$1, owner=$2, fencing_token=$3, expires_at=clock_timestamp() + make_interval(secs => $4::bigint::double precision) WHERE singleton", &[&task_id,&owner,&token,&seconds]).await?;
-        persist_recovered(&tx, &task, owner).await?;
+        persist_recovered(&tx, &task, owner, facts).await?;
         tx.commit().await?;
         Ok(Lease {
             task_id,
@@ -314,7 +441,8 @@ impl TaskStore {
             task.state = State::Merging;
             task.checkpoint = None;
             task.validate().map_err(|_| StoreError::InvalidRecord)?;
-            domain::transition(&mut task, State::Completed, policy, facts)
+            let mut completed = task.clone();
+            domain::transition(&mut completed, State::Completed, policy, facts)
                 .map_err(|_| StoreError::InvalidRecord)?;
         } else {
             domain::transition(&mut task, resume, policy, facts)
@@ -325,7 +453,7 @@ impl TaskStore {
             .await?
             .get(0);
         tx.execute("UPDATE orchestrator.execution_lease SET task_id=$1, owner=$2, fencing_token=$3, expires_at=clock_timestamp() + make_interval(secs => $4::bigint::double precision) WHERE singleton", &[&task_id,&owner,&token,&seconds]).await?;
-        persist_recovered(&tx, &task, owner).await?;
+        persist_recovered(&tx, &task, owner, facts).await?;
         tx.commit().await?;
         Ok(Lease {
             task_id,
@@ -342,6 +470,116 @@ impl TaskStore {
         } else {
             Err(StoreError::LeaseLost)
         }
+    }
+
+    /// Keeps the fenced lease alive only while checking validated merged evidence
+    /// for a terminal handoff. Work leases remain deadline-bound.
+    pub async fn renew_handoff_verification(
+        &mut self,
+        lease: &Lease,
+        ttl: Duration,
+        policy: &TrustedPolicy,
+        facts: &ObservedFacts,
+    ) -> Result<(), StoreError> {
+        let seconds = ttl_seconds(ttl)?;
+        let tx = self.client.transaction().await?;
+        require_live_lease(&tx, lease).await?;
+        let row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&lease.task_id]).await?.ok_or(StoreError::TaskMissing)?;
+        let task = decode_task(&row)?;
+        match task.state {
+            State::Merging => {
+                let mut completed = task.clone();
+                domain::transition_from(&task, &mut completed, State::Completed, policy, facts)
+                    .map_err(|_| StoreError::InvalidRecord)?;
+            }
+            State::Completed => domain::validate_completed(&task, policy, facts)
+                .map_err(|_| StoreError::InvalidRecord)?,
+            _ => return Err(StoreError::InvalidRecord),
+        }
+        let changed = tx.execute("UPDATE orchestrator.execution_lease SET expires_at=clock_timestamp() + make_interval(secs => $4::bigint::double precision) WHERE singleton AND task_id=$1 AND owner=$2 AND fencing_token=$3 AND expires_at > clock_timestamp()", &[&lease.task_id, &lease.owner, &lease.fencing_token, &seconds]).await?;
+        if changed == 1 {
+            tx.commit().await?;
+            Ok(())
+        } else {
+            Err(StoreError::LeaseLost)
+        }
+    }
+
+    pub async fn work_deadline_expired(&self, lease: &Lease) -> Result<bool, StoreError> {
+        let row = self.client.query_opt("SELECT t.execution_deadline <= clock_timestamp() FROM orchestrator.tasks AS t JOIN orchestrator.execution_lease AS l ON l.task_id=t.id WHERE t.id=$1 AND l.owner=$2 AND l.fencing_token=$3 AND l.expires_at > clock_timestamp()", &[&lease.task_id, &lease.owner, &lease.fencing_token]).await?.ok_or(StoreError::LeaseLost)?;
+        row.try_get::<_, Option<bool>>(0)?
+            .ok_or(StoreError::InvalidRecord)
+    }
+
+    /// Releases an expired BLOCKED task's global lease after independently verifying that its
+    /// prior worker tree stopped. The task checkpoint and operation rows remain untouched.
+    pub async fn release_expired_blocked_lease(
+        &mut self,
+        prior_lease: &Lease,
+        verifier: &dyn RecoveryVerifier,
+    ) -> Result<(), StoreError> {
+        let observed = self.client.query_one(
+            "SELECT task_id,owner,fencing_token,COALESCE(expires_at <= clock_timestamp(), false) FROM orchestrator.execution_lease WHERE singleton",
+            &[],
+        ).await?;
+        let observed_task: Option<Uuid> = observed.get(0);
+        let old_owner: Option<String> = observed.get(1);
+        let observed_generation: i64 = observed.get(2);
+        let expired: bool = observed.get(3);
+        if observed_task != Some(prior_lease.task_id)
+            || old_owner.as_deref() != Some(prior_lease.owner.as_str())
+            || observed_generation != prior_lease.fencing_token
+            || !expired
+        {
+            return Err(StoreError::LeaseLost);
+        }
+        let old_owner = old_owner.ok_or(StoreError::InvalidRecord)?;
+        verifier
+            .verify_stopped(prior_lease.task_id, &old_owner, observed_generation)
+            .filter(serde_json::Value::is_object)
+            .ok_or(StoreError::RecoveryRejected)?;
+
+        let evidence = serde_json::json!({"supervisor_verified_worker_tree_stopped": true});
+        let tx = self.client.transaction().await?;
+        let lease_row = tx.query_one(
+            "SELECT task_id,owner,fencing_token,COALESCE(expires_at <= clock_timestamp(), false) FROM orchestrator.execution_lease WHERE singleton FOR UPDATE",
+            &[],
+        ).await?;
+        let locked_task: Option<Uuid> = lease_row.get(0);
+        let locked_owner: Option<String> = lease_row.get(1);
+        let locked_generation: i64 = lease_row.get(2);
+        let locked_expired: bool = lease_row.get(3);
+        if locked_task != Some(prior_lease.task_id)
+            || locked_owner.as_deref() != Some(old_owner.as_str())
+            || locked_generation != observed_generation
+            || !locked_expired
+        {
+            return Err(StoreError::LeaseLost);
+        }
+
+        let task_row = tx.query_opt(
+            "SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE",
+            &[&prior_lease.task_id],
+        ).await?.ok_or(StoreError::TaskMissing)?;
+        let task = decode_task(&task_row)?;
+        if task.state != State::Blocked || task.checkpoint.is_none() {
+            return Err(StoreError::InvalidRecord);
+        }
+
+        let confirmation_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO orchestrator.recovery_confirmations(confirmation_id,task_id,expired_fencing_token,confirmed_by,evidence) VALUES($1,$2,$3,$4,$5)",
+            &[&confirmation_id, &prior_lease.task_id, &observed_generation, &old_owner, &evidence],
+        ).await?;
+        let changed = tx.execute(
+            "UPDATE orchestrator.execution_lease SET task_id=NULL, owner=NULL, expires_at=NULL WHERE singleton AND task_id=$1 AND owner=$2 AND fencing_token=$3 AND expires_at <= clock_timestamp()",
+            &[&prior_lease.task_id, &old_owner, &observed_generation],
+        ).await?;
+        if changed != 1 {
+            return Err(StoreError::LeaseLost);
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Reacquires the same expired task only after an independently verified supervisor proof.
@@ -368,10 +606,11 @@ impl TaskStore {
             return Err(StoreError::LeaseLost);
         }
         let old_owner = old_owner.ok_or(StoreError::InvalidRecord)?;
-        let evidence = verifier
+        verifier
             .verify_stopped(task_id, &old_owner, expired_generation)
             .filter(serde_json::Value::is_object)
             .ok_or(StoreError::RecoveryRejected)?;
+        let evidence = serde_json::json!({"supervisor_verified_worker_tree_stopped": true});
         let tx = self.client.transaction().await?;
         let lease_row = tx.query_one("SELECT task_id,owner,fencing_token,COALESCE(expires_at <= clock_timestamp(), false) FROM orchestrator.execution_lease WHERE singleton FOR UPDATE", &[]).await?;
         let active: Option<Uuid> = lease_row.get(0);
@@ -395,7 +634,8 @@ impl TaskStore {
         }
         if task.state == State::Merging && facts.pr_merged {
             // A human may merge after the worker stopped; completion evidence permits a closed issue.
-            domain::transition(&mut task, State::Completed, policy, facts)
+            let mut completed = task.clone();
+            domain::transition(&mut completed, State::Completed, policy, facts)
                 .map_err(|_| StoreError::InvalidRecord)?;
         } else {
             let checkpoint_state = task.state;
@@ -418,7 +658,7 @@ impl TaskStore {
         if changed != 1 {
             return Err(StoreError::LeaseLost);
         }
-        persist_recovered(&tx, &task, owner).await?;
+        persist_recovered(&tx, &task, owner, facts).await?;
         tx.commit().await?;
         Ok(Lease {
             task_id,
@@ -443,7 +683,7 @@ impl TaskStore {
         }
         let status = state_name(task.state);
         let head = task.head_sha.as_ref();
-        let validation = serde_json::json!({"passed": task.validation_passed});
+        let validation = validation_patch(task, facts)?;
         let checkpoint = task
             .checkpoint
             .map(|state| serde_json::json!({"state": state_name(state)}));
@@ -459,6 +699,7 @@ impl TaskStore {
         if old.state != expected {
             return Err(StoreError::InvalidRecord);
         }
+        validate_existing_validation(&tx, task_id).await?;
         let mut proposed = task.clone();
         proposed.elapsed = old.elapsed;
         domain::transition_from(&old, &mut proposed, task.state, policy, facts)
@@ -478,7 +719,50 @@ impl TaskStore {
         {
             return Err(StoreError::InvalidRecord);
         }
-        let changed = tx.execute("UPDATE orchestrator.tasks SET status=$2::text::orchestrator.task_state, head_sha=$3, repair_count=$4, issue_assignee=$5, validation_result=$6, pr_number=$7, checkpoint=$8, resume_state=CASE WHEN $2::text IN ('paused','blocked','failed') THEN ($9::text)::orchestrator.task_state ELSE NULL END, model_usage=$10, implementer=$11, reviewer=$12, session_id=$13, mock_github_journal=$14, mock_runtime_fingerprint=$15, updated_at=clock_timestamp() WHERE id=$1 AND status=$16::text::orchestrator.task_state", &[&task_id, &status, &head, &(i32::try_from(task.attempts).map_err(|_| StoreError::InvalidRecord)?), &task.assignee, &validation, &task.pull_request.map(i64::try_from).transpose().map_err(|_| StoreError::InvalidRecord)?, &checkpoint, &task.checkpoint.map(state_name), &i64::try_from(task.model_tokens).map_err(|_| StoreError::InvalidRecord)?, &task.implementer, &task.reviewer, &task.session_id, &journal, &task.mock_runtime_fingerprint, &expected_name]).await?;
+        let changed = tx.execute("UPDATE orchestrator.tasks SET status=$2::text::orchestrator.task_state, head_sha=$3, repair_count=$4, issue_assignee=$5, validation_result=COALESCE(validation_result, '{}'::jsonb) || $6::jsonb, pr_number=$7, checkpoint=$8, resume_state=CASE WHEN $2::text IN ('paused','blocked','failed') THEN ($9::text)::orchestrator.task_state ELSE NULL END, model_usage=$10, implementer=$11, reviewer=$12, session_id=$13, mock_github_journal=$14, mock_runtime_fingerprint=$15, updated_at=clock_timestamp() WHERE id=$1 AND status=$16::text::orchestrator.task_state", &[&task_id, &status, &head, &(i32::try_from(task.attempts).map_err(|_| StoreError::InvalidRecord)?), &task.assignee, &validation, &task.pull_request.map(i64::try_from).transpose().map_err(|_| StoreError::InvalidRecord)?, &checkpoint, &task.checkpoint.map(state_name), &i64::try_from(task.model_tokens).map_err(|_| StoreError::InvalidRecord)?, &task.implementer, &task.reviewer, &task.session_id, &journal, &task.mock_runtime_fingerprint, &expected_name]).await?;
+        if changed != 1 {
+            return Err(StoreError::InvalidRecord);
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Persists only a verified human-merge handoff. This deliberately bypasses
+    /// the execution deadline for this terminal transition alone.
+    pub async fn save_handoff_completed(
+        &mut self,
+        lease: &Lease,
+        task: &TaskRecord,
+        policy: &TrustedPolicy,
+        facts: &ObservedFacts,
+    ) -> Result<(), StoreError> {
+        if task.state != State::Completed || !facts.pr_merged || facts.issue_open {
+            return Err(StoreError::InvalidRecord);
+        }
+        task.validate().map_err(|_| StoreError::InvalidRecord)?;
+        let task_id = Uuid::parse_str(&task.task_id).map_err(|_| StoreError::InvalidRecord)?;
+        if task_id != lease.task_id {
+            return Err(StoreError::InvalidRecord);
+        }
+        let tx = self.client.transaction().await?;
+        require_live_lease(&tx, lease).await?;
+        let old_row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&task_id]).await?.ok_or(StoreError::TaskMissing)?;
+        let old = decode_task(&old_row)?;
+        if old.state != State::Merging {
+            return Err(StoreError::InvalidRecord);
+        }
+        validate_existing_validation(&tx, task_id).await?;
+        let mut proposed = task.clone();
+        proposed.elapsed = old.elapsed;
+        domain::transition_from(&old, &mut proposed, State::Completed, policy, facts)
+            .map_err(|_| StoreError::InvalidRecord)?;
+        let mut persisted = task.clone();
+        persisted.elapsed = old.elapsed;
+        if proposed != persisted {
+            return Err(StoreError::InvalidRecord);
+        }
+        let validation = validation_patch(task, facts)?;
+        let changed = tx.execute("UPDATE orchestrator.tasks SET status='completed', validation_result=COALESCE(validation_result, '{}'::jsonb) || $2::jsonb, updated_at=clock_timestamp() WHERE id=$1 AND status='merging'", &[&task_id, &validation]).await?;
         if changed != 1 {
             return Err(StoreError::InvalidRecord);
         }
@@ -495,7 +779,7 @@ impl TaskStore {
         operation: &str,
         request_hash: &[u8; 32],
     ) -> Result<OperationStatus, StoreError> {
-        if operation.is_empty() {
+        if operation.is_empty() || operation == ISSUE_CLOSE_OPERATION {
             return Err(StoreError::InvalidInput);
         }
         let tx = self.client.transaction().await?;
@@ -505,7 +789,7 @@ impl TaskStore {
             tx.commit().await?;
             return Ok(OperationStatus::NewlyPrepared);
         }
-        let row = tx.query_opt("SELECT task_id,fencing_token,operation,request_hash,result FROM orchestrator.task_operations WHERE operation_key=$1 FOR UPDATE", &[&key]).await?.ok_or(StoreError::OperationConflict)?;
+        let row = tx.query_opt("SELECT task_id,fencing_token,operation,request_hash,result IS NOT NULL,COALESCE(octet_length(result::text),0) > $2,CASE WHEN result IS NULL OR octet_length(result::text) <= $2 THEN result END FROM orchestrator.task_operations WHERE operation_key=$1 FOR UPDATE", &[&key,&MAX_OPERATION_RESULT_BYTES]).await?.ok_or(StoreError::OperationConflict)?;
         let stored_hash: Vec<u8> = row.get(3);
         if row.get::<_, Uuid>(0) != lease.task_id
             || row.get::<_, String>(2) != operation
@@ -513,9 +797,24 @@ impl TaskStore {
         {
             return Err(StoreError::OperationConflict);
         }
-        let result: Option<serde_json::Value> = row.get(4);
+        let fencing_token: i64 = row.get(1);
+        if fencing_token <= 0 {
+            return Err(StoreError::InvalidRecord);
+        }
+        if row.get::<_, bool>(5) {
+            return Err(StoreError::InvalidRecord);
+        }
+        let has_result: bool = row.get(4);
+        let result: Option<serde_json::Value> = row.get(6);
         tx.commit().await?;
-        Ok(result.map_or(OperationStatus::Ambiguous, OperationStatus::Completed))
+        match (has_result, result) {
+            (false, None) => Ok(OperationStatus::Ambiguous),
+            (true, Some(result)) => Ok(OperationStatus::Completed {
+                result,
+                fencing_token,
+            }),
+            _ => Err(StoreError::InvalidRecord),
+        }
     }
 
     pub async fn complete_operation(
@@ -530,11 +829,21 @@ impl TaskStore {
         }
         let tx = self.client.transaction().await?;
         require_live_work_lease(&tx, lease).await?;
-        let row = tx.query_opt("SELECT task_id,fencing_token,result FROM orchestrator.task_operations WHERE operation_key=$1 FOR UPDATE", &[&key]).await?.ok_or(StoreError::OperationConflict)?;
-        let stored_result: Option<serde_json::Value> = row.get(2);
+        let within_result_limit: bool = tx
+            .query_one(
+                "SELECT octet_length($1::jsonb::text) <= $2",
+                &[result, &MAX_OPERATION_RESULT_BYTES],
+            )
+            .await?
+            .get(0);
+        if !within_result_limit {
+            return Err(StoreError::InvalidInput);
+        }
+        let row = tx.query_opt("SELECT task_id,fencing_token,operation,result IS NOT NULL FROM orchestrator.task_operations WHERE operation_key=$1 FOR UPDATE", &[&key]).await?.ok_or(StoreError::OperationConflict)?;
         if row.get::<_, Uuid>(0) != lease.task_id
             || row.get::<_, i64>(1) != lease.fencing_token
-            || stored_result.is_some()
+            || row.get::<_, String>(2) == ISSUE_CLOSE_OPERATION
+            || row.get::<_, bool>(3)
         {
             return Err(StoreError::OperationConflict);
         }
@@ -549,6 +858,159 @@ impl TaskStore {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Creates a durable one-shot marker for a post-merge Issue close. This
+    /// row prevents replay; it is not authority to perform the GitHub write.
+    pub async fn prepare_issue_close(
+        &mut self,
+        lease: &Lease,
+        policy: &TrustedPolicy,
+        facts: &ObservedFacts,
+    ) -> Result<Option<OperationStatus>, StoreError> {
+        if !facts.pr_merged {
+            return Err(StoreError::InvalidRecord);
+        }
+        let key = issue_close_operation_key(lease.task_id);
+        let tx = self.client.transaction().await?;
+        require_live_lease(&tx, lease).await?;
+        let row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&lease.task_id]).await?.ok_or(StoreError::TaskMissing)?;
+        let task = decode_task(&row)?;
+        if task.state != State::Merging {
+            return Err(StoreError::InvalidRecord);
+        }
+        validate_issue_close_evidence(&task, policy, facts)?;
+        let repository: String = tx
+            .query_one(
+                "SELECT repository FROM orchestrator.tasks WHERE id=$1",
+                &[&lease.task_id],
+            )
+            .await?
+            .get(0);
+        let request_hash = issue_close_request_hash(&task, &repository, policy, facts)?;
+        let inserted = if facts.issue_open {
+            tx.execute("INSERT INTO orchestrator.task_operations(operation_key,task_id,fencing_token,operation,request_hash,result) VALUES($1,$2,$3,$4,$5,NULL) ON CONFLICT(operation_key) DO NOTHING", &[&key,&lease.task_id,&lease.fencing_token,&ISSUE_CLOSE_OPERATION,&&request_hash[..]]).await? == 1
+        } else {
+            false
+        };
+        if inserted {
+            tx.commit().await?;
+            return Ok(Some(OperationStatus::NewlyPrepared));
+        }
+        let Some(operation) = tx.query_opt("SELECT task_id, fencing_token, operation, request_hash, result IS NOT NULL, CASE WHEN result IS NULL OR octet_length(result::text) <= $2 THEN result END FROM orchestrator.task_operations WHERE operation_key=$1 FOR UPDATE", &[&key,&MAX_OPERATION_RESULT_BYTES]).await? else {
+            if facts.issue_open {
+                return Err(StoreError::OperationConflict);
+            }
+            tx.commit().await?;
+            return Ok(None);
+        };
+        if operation.get::<_, Uuid>(0) != lease.task_id
+            || operation.get::<_, String>(2) != ISSUE_CLOSE_OPERATION
+            || operation.get::<_, Vec<u8>>(3).as_slice() != request_hash
+        {
+            return Err(StoreError::OperationConflict);
+        }
+        let original_fence: i64 = operation.get(1);
+        if original_fence <= 0 {
+            return Err(StoreError::InvalidRecord);
+        }
+        let settled: bool = operation.get(4);
+        let result: Option<serde_json::Value> = operation.get(5);
+        if settled && result.is_none() {
+            return Err(StoreError::InvalidRecord);
+        }
+        if settled {
+            if result.as_ref() != Some(&serde_json::json!({"issue_closed_observed": true})) {
+                return Err(StoreError::InvalidRecord);
+            }
+            if facts.issue_open {
+                tx.commit().await?;
+                return Ok(Some(OperationStatus::Ambiguous));
+            }
+            let result = result.ok_or(StoreError::InvalidRecord)?;
+            tx.commit().await?;
+            Ok(Some(OperationStatus::Completed {
+                result,
+                fencing_token: original_fence,
+            }))
+        } else {
+            tx.commit().await?;
+            Ok(Some(OperationStatus::Ambiguous))
+        }
+    }
+
+    /// Records fresh evidence that the Issue is closed against a prepared close
+    /// marker. The observation does not prove who closed it or authorize a write.
+    pub async fn reconcile_issue_close(
+        &mut self,
+        lease: &Lease,
+        policy: &TrustedPolicy,
+        facts: &ObservedFacts,
+    ) -> Result<OperationStatus, StoreError> {
+        let key = issue_close_operation_key(lease.task_id);
+        let tx = self.client.transaction().await?;
+        require_live_lease(&tx, lease).await?;
+        let row = tx.query_opt("SELECT id, issue_number, base_sha, head_sha, status::text, repair_count, issue_assignee, COALESCE((validation_result->>'passed')::boolean, false), pr_number, checkpoint, COALESCE(extract(epoch from clock_timestamp() - execution_started_at)::bigint, 0), model_usage, resume_state::text, implementer, reviewer, session_id, mock_github_journal, repair_count, mock_runtime_fingerprint, max_attempts, model_budget FROM orchestrator.tasks WHERE id=$1 FOR UPDATE", &[&lease.task_id]).await?.ok_or(StoreError::TaskMissing)?;
+        let task = decode_task(&row)?;
+        if task.state != State::Merging {
+            return Err(StoreError::InvalidRecord);
+        }
+        if !facts.pr_merged {
+            return Err(StoreError::InvalidRecord);
+        }
+        validate_issue_close_evidence(&task, policy, facts)?;
+        let repository: String = tx
+            .query_one(
+                "SELECT repository FROM orchestrator.tasks WHERE id=$1",
+                &[&lease.task_id],
+            )
+            .await?
+            .get(0);
+        let request_hash = issue_close_request_hash(&task, &repository, policy, facts)?;
+        let operation = tx.query_opt("SELECT task_id, fencing_token, operation, request_hash, result IS NOT NULL, CASE WHEN result IS NULL OR octet_length(result::text) <= $2 THEN result END FROM orchestrator.task_operations WHERE operation_key=$1 FOR UPDATE", &[&key,&MAX_OPERATION_RESULT_BYTES]).await?.ok_or(StoreError::OperationConflict)?;
+        if operation.get::<_, Uuid>(0) != lease.task_id
+            || operation.get::<_, String>(2) != ISSUE_CLOSE_OPERATION
+            || operation.get::<_, Vec<u8>>(3).as_slice() != request_hash
+        {
+            return Err(StoreError::OperationConflict);
+        }
+        let original_fence: i64 = operation.get(1);
+        if original_fence <= 0 {
+            return Err(StoreError::InvalidRecord);
+        }
+        let settled = operation.get::<_, bool>(4);
+        let stored_result: Option<serde_json::Value> = operation.get(5);
+        if settled {
+            if stored_result.as_ref() != Some(&serde_json::json!({"issue_closed_observed": true})) {
+                return Err(StoreError::InvalidRecord);
+            }
+            if facts.issue_open {
+                tx.commit().await?;
+                return Ok(OperationStatus::Ambiguous);
+            }
+            tx.commit().await?;
+            return Ok(OperationStatus::Completed {
+                result: stored_result.ok_or(StoreError::InvalidRecord)?,
+                fencing_token: original_fence,
+            });
+        }
+        if stored_result.is_some() {
+            return Err(StoreError::InvalidRecord);
+        }
+        if facts.issue_open {
+            tx.commit().await?;
+            return Ok(OperationStatus::Ambiguous);
+        }
+        let result = serde_json::json!({"issue_closed_observed": true});
+        let changed = tx.execute("UPDATE orchestrator.task_operations SET result=$2 WHERE operation_key=$1 AND task_id=$3 AND operation=$4 AND result IS NULL", &[&key,&result,&lease.task_id,&ISSUE_CLOSE_OPERATION]).await?;
+        if changed != 1 {
+            return Err(StoreError::OperationConflict);
+        }
+        tx.commit().await?;
+        Ok(OperationStatus::Completed {
+            result,
+            fencing_token: original_fence,
+        })
     }
 
     /// Releases only after a task reaches a state where execution has stopped.
@@ -617,10 +1079,12 @@ async fn persist_recovered(
     tx: &Transaction<'_>,
     task: &TaskRecord,
     owner: &str,
+    facts: &ObservedFacts,
 ) -> Result<(), StoreError> {
     task.validate().map_err(|_| StoreError::InvalidRecord)?;
     let id = Uuid::parse_str(&task.task_id).map_err(|_| StoreError::InvalidRecord)?;
-    let validation = serde_json::json!({"passed": task.validation_passed});
+    validate_existing_validation(tx, id).await?;
+    let validation = validation_patch(task, facts)?;
     let checkpoint = task
         .checkpoint
         .map(|state| serde_json::json!({"state": state_name(state)}));
@@ -638,12 +1102,32 @@ async fn persist_recovered(
     {
         return Err(StoreError::InvalidRecord);
     }
-    let changed = tx.execute("UPDATE orchestrator.tasks SET status=$2::text::orchestrator.task_state, head_sha=$3, repair_count=$4, assigned_worker=$5, issue_assignee=$6, validation_result=$7, pr_number=$8, checkpoint=$9, resume_state=NULL, model_usage=$10, implementer=$11, reviewer=$12, session_id=$13, mock_github_journal=$14, mock_runtime_fingerprint=$15, updated_at=clock_timestamp() WHERE id=$1", &[&id,&state_name(task.state),&task.head_sha,&attempts,&owner,&task.assignee,&validation,&pr,&checkpoint,&model_tokens,&task.implementer,&task.reviewer,&task.session_id,&task.mock_github_journal,&task.mock_runtime_fingerprint]).await?;
+    let changed = tx.execute("UPDATE orchestrator.tasks SET status=$2::text::orchestrator.task_state, head_sha=$3, repair_count=$4, assigned_worker=$5, issue_assignee=$6, validation_result=COALESCE(validation_result, '{}'::jsonb) || $7::jsonb, pr_number=$8, checkpoint=$9, resume_state=NULL, model_usage=$10, implementer=$11, reviewer=$12, session_id=$13, mock_github_journal=$14, mock_runtime_fingerprint=$15, updated_at=clock_timestamp() WHERE id=$1", &[&id,&state_name(task.state),&task.head_sha,&attempts,&owner,&task.assignee,&validation,&pr,&checkpoint,&model_tokens,&task.implementer,&task.reviewer,&task.session_id,&task.mock_github_journal,&task.mock_runtime_fingerprint]).await?;
     if changed == 1 {
         Ok(())
     } else {
         Err(StoreError::TaskMissing)
     }
+}
+
+async fn validate_existing_validation(
+    tx: &Transaction<'_>,
+    task_id: Uuid,
+) -> Result<(), StoreError> {
+    let row = tx
+        .query_opt(
+            "SELECT COALESCE(octet_length(validation_result::text),0) > 16384, CASE WHEN COALESCE(octet_length(validation_result::text),0) <= 16384 THEN validation_result END FROM orchestrator.tasks WHERE id=$1 FOR UPDATE",
+            &[&task_id],
+        )
+        .await?
+        .ok_or(StoreError::TaskMissing)?;
+    if row.get::<_, bool>(0) {
+        return Err(StoreError::InvalidRecord);
+    }
+    if let Some(validation) = row.get::<_, Option<serde_json::Value>>(1) {
+        parse_ci_observation(&validation)?;
+    }
+    Ok(())
 }
 
 fn decode_task(row: &Row) -> Result<TaskRecord, StoreError> {
@@ -742,7 +1226,90 @@ fn decode_task(row: &Row) -> Result<TaskRecord, StoreError> {
     Ok(task)
 }
 
-fn valid_mock_journal(value: &serde_json::Value) -> bool {
+fn validation_patch(
+    task: &TaskRecord,
+    facts: &ObservedFacts,
+) -> Result<serde_json::Value, StoreError> {
+    let mut patch = serde_json::json!({"passed": task.validation_passed});
+    if let Some(ci) = facts.ci.as_ref() {
+        if task.head_sha.as_deref() != Some(ci.head_sha.as_str())
+            || task.pull_request != Some(ci.pull_request)
+            || !is_sha(&ci.head_sha)
+            || ci.pull_request == 0
+        {
+            return Err(StoreError::InvalidRecord);
+        }
+        let status = match ci.status {
+            CiStatus::Passed => "passed",
+            CiStatus::Pending => "pending",
+            CiStatus::Failed => "failed",
+            CiStatus::Unknown => "unknown",
+        };
+        patch["ci_observation"] = serde_json::json!({
+            "head_sha": ci.head_sha,
+            "pull_request": ci.pull_request,
+            "status": status,
+        });
+    }
+    Ok(patch)
+}
+
+fn parse_ci_observation(
+    validation: &serde_json::Value,
+) -> Result<Option<CiObservation>, StoreError> {
+    let object = validation.as_object().ok_or(StoreError::InvalidRecord)?;
+    if serde_json::to_vec(validation).map_or(true, |encoded| encoded.len() > 16 * 1024)
+        || object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "passed" | "ci_observation"))
+    {
+        return Err(StoreError::InvalidRecord);
+    }
+    if object
+        .get("passed")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(StoreError::InvalidRecord);
+    }
+    let Some(observation) = object.get("ci_observation") else {
+        return Ok(None);
+    };
+    let observation = observation.as_object().ok_or(StoreError::InvalidRecord)?;
+    if observation.len() != 3
+        || !observation.contains_key("head_sha")
+        || !observation.contains_key("pull_request")
+        || !observation.contains_key("status")
+    {
+        return Err(StoreError::InvalidRecord);
+    }
+    let head_sha = observation
+        .get("head_sha")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| is_sha(value) && value.bytes().all(|byte| !byte.is_ascii_uppercase()))
+        .ok_or(StoreError::InvalidRecord)?;
+    let pull_request = observation
+        .get("pull_request")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value > 0 && i64::try_from(*value).is_ok())
+        .ok_or(StoreError::InvalidRecord)?;
+    let status = match observation
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("passed") => CiStatus::Passed,
+        Some("pending") => CiStatus::Pending,
+        Some("failed") => CiStatus::Failed,
+        Some("unknown") => CiStatus::Unknown,
+        _ => return Err(StoreError::InvalidRecord),
+    };
+    Ok(Some(CiObservation {
+        head_sha: head_sha.to_owned(),
+        pull_request,
+        status,
+    }))
+}
+
+pub(crate) fn valid_mock_journal(value: &serde_json::Value) -> bool {
     value.is_array()
         && serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= 65_536)
         && serde_json::from_value::<Vec<MockGitHubJournalEntry>>(value.clone()).is_ok()

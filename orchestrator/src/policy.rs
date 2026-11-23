@@ -2,13 +2,14 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::{fs, io::Read, path::Path, time::Duration};
+use std::{fs, io::Read, net::IpAddr, path::Path, time::Duration};
 
 use serde::Deserialize;
 
 use crate::{
+    agent::AutonomyConfig,
     domain::TrustedPolicy,
-    github::{GitHubError, GitHubPolicy, RequiredCheck},
+    github::{GitHubError, GitHubPolicy, RequiredCheck, TrustedLogDestination},
 };
 
 const MAX_POLICY_BYTES: u64 = 64 * 1024;
@@ -18,6 +19,7 @@ pub struct PolicyBundle {
     task: TrustedPolicy,
     github: GitHubPolicy,
     validation_check: String,
+    log_destination: Option<TrustedLogDestination>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,7 +45,15 @@ struct PolicyFile {
     required_checks: Vec<CheckFile>,
     minimum_approvals: usize,
     validation_check: String,
+    log_destination: Option<LogDestinationFile>,
     limits: LimitsFile,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogDestinationFile {
+    hostname: String,
+    addresses: Vec<IpAddr>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +102,11 @@ impl PolicyBundle {
         &self.validation_check
     }
 
+    /// Only use a bundle loaded from an operator-controlled path, not a task or database.
+    pub fn log_destination(&self) -> Option<&TrustedLogDestination> {
+        self.log_destination.as_ref()
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, PolicyError> {
         if bytes.len() as u64 > MAX_POLICY_BYTES {
             return Err(PolicyError::TooLarge);
@@ -99,12 +114,13 @@ impl PolicyBundle {
         let file: PolicyFile =
             serde_json::from_slice(bytes).map_err(|_| PolicyError::InvalidFormat)?;
         if file.version != 1
+            || file.base_branch != "develop"
             || !valid_sha(&file.base_sha)
             || file.allowed_assignee.trim().is_empty()
             || file.required_checks.is_empty()
             || file.validation_check.trim().is_empty()
-            || file.limits.max_attempts == 0
-            || file.limits.max_attempts > i32::MAX as u32
+            || file.limits.max_attempts
+                != u32::from(AutonomyConfig::approved_mock_defaults().max_repair_attempts)
             || file.limits.max_runtime_seconds == 0
             || file.limits.max_runtime_seconds > i64::MAX as u64
             || file.limits.max_model_tokens == 0
@@ -154,10 +170,18 @@ impl PolicyBundle {
             max_runtime: Duration::from_secs(file.limits.max_runtime_seconds),
             max_model_tokens: file.limits.max_model_tokens,
         };
+        let log_destination = file
+            .log_destination
+            .map(|destination| {
+                TrustedLogDestination::new(&destination.hostname, &destination.addresses)
+                    .map_err(|_| PolicyError::InvalidValue)
+            })
+            .transpose()?;
         Ok(Self {
             task,
             github,
             validation_check: file.validation_check,
+            log_destination,
         })
     }
 }
@@ -232,6 +256,32 @@ mod tests {
         assert_eq!(policy.max_runtime.as_secs(), 600);
         assert_eq!(policy.max_model_tokens, 10_000);
         let _github_policy = bundle.github_policy();
+        assert!(bundle.log_destination().is_none());
+    }
+
+    #[test]
+    fn log_destination_is_optional_and_rejects_untrusted_addresses() {
+        let with_destination = |value: &str| {
+            VALID.replace(
+                "\"version\": 1,",
+                &format!("\"version\": 1, \"log_destination\": {value},"),
+            )
+        };
+        let policy = with_destination(r#"{"hostname":"logs.example","addresses":["1.1.1.1"]}"#);
+        assert!(
+            PolicyBundle::parse(policy.as_bytes())
+                .unwrap()
+                .log_destination()
+                .is_some()
+        );
+        for value in [
+            r#"{"hostname":"logs.example","addresses":["127.0.0.1"]}"#,
+            r#"{"hostname":"logs.example","addresses":[]}"#,
+            r#"{"hostname":"logs.example","addresses":["1.1.1.1"],"extra":true}"#,
+            r#"{"hostname":"logs.example","addresses":["not-an-ip"]}"#,
+        ] {
+            assert!(PolicyBundle::parse(with_destination(value).as_bytes()).is_err());
+        }
     }
 
     #[test]
@@ -261,6 +311,24 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn rejects_other_base_branches_and_repair_limits() {
+        for invalid in [
+            VALID.replace("\"base_branch\": \"develop\"", "\"base_branch\": \"main\""),
+            VALID.replace(
+                "\"base_branch\": \"develop\"",
+                "\"base_branch\": \"release\"",
+            ),
+            VALID.replace("\"max_attempts\": 3", "\"max_attempts\": 2"),
+            VALID.replace("\"max_attempts\": 3", "\"max_attempts\": 4"),
+        ] {
+            assert!(matches!(
+                PolicyBundle::parse(invalid.as_bytes()),
+                Err(PolicyError::InvalidValue)
+            ));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn loads_only_the_regular_file_opened_at_the_policy_path() {
@@ -270,10 +338,19 @@ mod tests {
         fs::create_dir(&root).expect("temporary directory is created");
         let policy_path = root.join("policy.json");
         let link_path = root.join("policy-link.json");
-        fs::write(&policy_path, VALID).expect("policy fixture is written");
+        let configured = VALID.replace(
+            "\"version\": 1,",
+            "\"version\": 1, \"log_destination\": {\"hostname\":\"logs.example\",\"addresses\":[\"1.1.1.1\"]},",
+        );
+        fs::write(&policy_path, configured).expect("policy fixture is written");
         symlink(&policy_path, &link_path).expect("symlink fixture is created");
 
-        assert!(PolicyBundle::load(&policy_path).is_ok());
+        assert!(
+            PolicyBundle::load(&policy_path)
+                .unwrap()
+                .log_destination()
+                .is_some()
+        );
         assert_eq!(
             PolicyBundle::load(&link_path).err(),
             Some(PolicyError::InvalidValue)

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
@@ -15,7 +15,7 @@ pub enum State {
     Failed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct TaskRecord {
     pub task_id: String,
     pub issue_number: u64,
@@ -38,6 +38,31 @@ pub struct TaskRecord {
     pub model_budget: u64,
 }
 
+impl fmt::Debug for TaskRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskRecord")
+            .field("state", &self.state)
+            .field("attempts", &self.attempts)
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CiStatus {
+    Passed,
+    Pending,
+    Failed,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CiObservation {
+    pub head_sha: String,
+    pub pull_request: u64,
+    pub status: CiStatus,
+}
+
 impl TaskRecord {
     pub fn validate(&self) -> Result<(), Error> {
         if self.task_id.is_empty() || self.issue_number == 0 || !is_sha(&self.base_sha) {
@@ -49,10 +74,18 @@ impl TaskRecord {
         if self.head_sha.as_deref().is_some_and(|sha| !is_sha(sha)) {
             return Err(Error::CorruptRecord);
         }
-        if self.assignee.as_deref().is_some_and(str::is_empty)
-            || self.implementer.as_deref().is_some_and(str::is_empty)
-            || self.reviewer.as_deref().is_some_and(str::is_empty)
-            || self.session_id.as_deref().is_some_and(str::is_empty)
+        if self
+            .assignee
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.chars().count() > 255)
+            || [
+                self.implementer.as_deref(),
+                self.reviewer.as_deref(),
+                self.session_id.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| value.trim().is_empty() || value.len() > 255)
             || self.pull_request == Some(0)
             || self.mock_github_journal.as_ref().is_some_and(|journal| {
                 !journal.is_array()
@@ -78,11 +111,10 @@ impl TaskRecord {
                 self.head_sha.is_none() && self.pull_request.is_none() && self.checkpoint.is_none()
             }
             State::Implementing | State::Repairing => {
-                self.pull_request.is_none() && self.checkpoint.is_none()
+                self.checkpoint.is_none()
+                    && self.pull_request.is_none_or(|_| self.head_sha.is_some())
             }
-            State::Validating => {
-                self.head_sha.is_some() && self.pull_request.is_none() && self.checkpoint.is_none()
-            }
+            State::Validating => self.head_sha.is_some() && self.checkpoint.is_none(),
             State::Reviewing | State::Merging => {
                 self.head_sha.is_some()
                     && self.pull_request.is_some()
@@ -162,6 +194,7 @@ pub struct ObservedFacts {
     pub approved_assignee: String,
     pub merge_commit_sha: Option<String>,
     pub base_contains_merge_commit: bool,
+    pub ci: Option<CiObservation>,
 }
 
 pub fn transition(
@@ -308,6 +341,7 @@ pub fn validate_completed(
     }
     require_head(task, facts)?;
     require_validation(task, facts)?;
+    require_ci_passed(task, facts)?;
     require_merged_pr(task, facts, policy)?;
     if !facts.reviewer_approved {
         return Err(Error::NotApproved);
@@ -338,7 +372,6 @@ fn fields_are_valid(
             }
             if proposed.head_sha != current.head_sha
                 || proposed.pull_request != current.pull_request
-                || proposed.pull_request.is_some()
                 || proposed.validation_passed
             {
                 return Ok(false);
@@ -346,8 +379,8 @@ fn fields_are_valid(
         }
         State::Validating => {
             if proposed.assignee != current.assignee
-                || proposed.pull_request != current.pull_request
-                || proposed.pull_request.is_some()
+                || (current.pull_request.is_some() && proposed.pull_request != current.pull_request)
+                || (current.state == State::Validating && proposed.head_sha != current.head_sha)
                 || proposed.validation_passed
             {
                 return Ok(false);
@@ -355,6 +388,12 @@ fn fields_are_valid(
             let head = proposed.head_sha.as_deref().ok_or(Error::StaleHead)?;
             if !is_sha(head) || head != facts.head_sha {
                 return Err(Error::StaleHead);
+            }
+            if proposed.pull_request.is_some() {
+                require_tracked_pull(proposed, facts)?;
+            }
+            if proposed.pull_request.is_some() && facts.ci.is_some() {
+                require_ci_matches(proposed, facts)?;
             }
         }
         State::Reviewing => {
@@ -365,8 +404,20 @@ fn fields_are_valid(
                 return Ok(false);
             }
             require_head(proposed, facts)?;
-            require_validation(proposed, facts)?;
             require_pr(proposed, facts, policy)?;
+            if current.state == State::Paused && current.checkpoint == Some(State::Reviewing) {
+                require_ci_matches(proposed, facts)?;
+                if facts
+                    .ci
+                    .as_ref()
+                    .is_some_and(|ci| ci.status == CiStatus::Passed)
+                {
+                    require_validation(proposed, facts)?;
+                }
+            } else {
+                require_validation(proposed, facts)?;
+                require_ci_passed(proposed, facts)?;
+            }
         }
         State::Merging => {
             if proposed.assignee != current.assignee
@@ -379,6 +430,7 @@ fn fields_are_valid(
             require_head(proposed, facts)?;
             require_validation(proposed, facts)?;
             require_pr(proposed, facts, policy)?;
+            require_ci_passed(proposed, facts)?;
             if !facts.reviewer_approved {
                 return Err(Error::NotApproved);
             }
@@ -398,6 +450,7 @@ fn fields_are_valid(
             require_head(proposed, facts)?;
             require_validation(proposed, facts)?;
             require_merged_pr(proposed, facts, policy)?;
+            require_ci_passed(proposed, facts)?;
             if !facts.reviewer_approved {
                 return Err(Error::NotApproved);
             }
@@ -406,19 +459,31 @@ fn fields_are_valid(
         State::Repairing => {
             if proposed.assignee != current.assignee
                 || proposed.head_sha != current.head_sha
-                || proposed.pull_request.is_some()
+                || (current.pull_request.is_some() && proposed.pull_request != current.pull_request)
                 || proposed.validation_passed
             {
                 return Ok(false);
+            }
+            if proposed.pull_request.is_some() {
+                require_tracked_pull(proposed, facts)?;
+            }
+            if proposed.pull_request.is_some() && facts.ci.is_some() {
+                require_ci_matches(proposed, facts)?;
             }
         }
         State::Paused | State::Blocked | State::Failed => {
             if proposed.assignee != current.assignee
                 || proposed.head_sha != current.head_sha
-                || proposed.pull_request != current.pull_request
+                || (proposed.pull_request != current.pull_request
+                    && !(current.state == State::Validating
+                        && current.pull_request.is_none()
+                        && proposed.pull_request.is_some()))
                 || proposed.validation_passed != current.validation_passed
             {
                 return Ok(false);
+            }
+            if proposed.pull_request.is_some() {
+                require_tracked_pull(proposed, facts)?;
             }
         }
         State::Queued | State::Planning => {
@@ -434,6 +499,50 @@ fn fields_are_valid(
     Ok(true)
 }
 
+fn require_tracked_pull(task: &TaskRecord, facts: &ObservedFacts) -> Result<(), Error> {
+    if task.pull_request != facts.pr_number
+        || task.head_sha.as_deref() != Some(facts.head_sha.as_str())
+        || task.head_sha.as_deref() != facts.pr_head_sha.as_deref()
+    {
+        return Err(Error::StaleHead);
+    }
+    Ok(())
+}
+
+fn require_ci_matches(task: &TaskRecord, facts: &ObservedFacts) -> Result<(), Error> {
+    let ci = facts.ci.as_ref().ok_or(Error::StaleHead)?;
+    if task.pull_request != Some(ci.pull_request)
+        || task.head_sha.as_deref() != Some(ci.head_sha.as_str())
+        || facts.head_sha != ci.head_sha
+        || facts.pr_number != Some(ci.pull_request)
+        || facts.pr_head_sha.as_deref() != Some(ci.head_sha.as_str())
+    {
+        return Err(Error::StaleHead);
+    }
+    Ok(())
+}
+
+fn require_ci_passed(task: &TaskRecord, facts: &ObservedFacts) -> Result<(), Error> {
+    let ci = facts.ci.as_ref().ok_or(Error::ChecksIncomplete)?;
+    if ci.status != CiStatus::Passed {
+        return Err(Error::ChecksIncomplete);
+    }
+    require_ci_matches(task, facts)?;
+    Ok(())
+}
+
+pub(crate) fn require_review_evidence(
+    task: &TaskRecord,
+    policy: &TrustedPolicy,
+    facts: &ObservedFacts,
+) -> Result<(), Error> {
+    require_head(task, facts)?;
+    require_validation(task, facts)?;
+    require_pr(task, facts, policy)?;
+    require_ci_passed(task, facts)?;
+    require_checks(policy, facts)
+}
+
 fn allowed(from: State, to: State) -> bool {
     matches!(
         (from, to),
@@ -441,6 +550,7 @@ fn allowed(from: State, to: State) -> bool {
             | (State::Planning, State::Implementing)
             | (State::Implementing, State::Validating)
             | (State::Implementing, State::Repairing)
+            | (State::Validating, State::Validating)
             | (State::Validating, State::Reviewing)
             | (State::Validating, State::Repairing)
             | (State::Reviewing, State::Merging)
@@ -600,7 +710,7 @@ mod tests {
             head_sha: head.clone(),
             validated_head_sha: Some(head.clone()),
             pr_number: Some(4),
-            pr_head_sha: Some(head),
+            pr_head_sha: Some(head.clone()),
             pr_base_ref: Some("develop".into()),
             pr_base_sha: Some(policy.base_sha.clone()),
             pr_merged: false,
@@ -609,6 +719,11 @@ mod tests {
             approved_assignee: "bot".into(),
             merge_commit_sha: None,
             base_contains_merge_commit: false,
+            ci: Some(CiObservation {
+                head_sha: head.clone(),
+                pull_request: 4,
+                status: CiStatus::Passed,
+            }),
         };
         (task, policy, facts)
     }
@@ -621,6 +736,38 @@ mod tests {
             transition(&mut task, State::Merging, &policy, &facts),
             Err(Error::CorruptRecord)
         );
+    }
+
+    #[test]
+    fn provider_and_session_values_match_database_read_limits() {
+        let (task, _, _) = setup(State::Reviewing);
+        for invalid in [" ".to_owned(), "x".repeat(256)] {
+            let mut candidate = task.clone();
+            candidate.implementer = Some(invalid.clone());
+            assert_eq!(candidate.validate(), Err(Error::CorruptRecord));
+            candidate = task.clone();
+            candidate.reviewer = Some(invalid.clone());
+            assert_eq!(candidate.validate(), Err(Error::CorruptRecord));
+            candidate = task.clone();
+            candidate.session_id = Some(invalid);
+            assert_eq!(candidate.validate(), Err(Error::CorruptRecord));
+        }
+        let mut valid = task;
+        valid.session_id = Some("x".repeat(255));
+        assert_eq!(valid.validate(), Ok(()));
+    }
+
+    #[test]
+    fn assignee_matches_database_character_limit() {
+        let (task, _, _) = setup(State::Reviewing);
+        for invalid in [" ".to_owned(), "a".repeat(256)] {
+            let mut candidate = task.clone();
+            candidate.assignee = Some(invalid);
+            assert_eq!(candidate.validate(), Err(Error::CorruptRecord));
+        }
+        let mut valid = task;
+        valid.assignee = Some("例".repeat(255));
+        assert_eq!(valid.validate(), Ok(()));
     }
 
     #[test]
@@ -662,6 +809,23 @@ mod tests {
         assert_eq!(
             transition(&mut task, State::Merging, &policy, &facts),
             Err(Error::AlreadyMerged)
+        );
+    }
+
+    #[test]
+    fn merge_requires_explicit_passed_ci_for_the_current_pull_head() {
+        let (mut task, policy, mut facts) = setup(State::Reviewing);
+        for status in [CiStatus::Pending, CiStatus::Unknown] {
+            facts.ci.as_mut().unwrap().status = status;
+            assert_eq!(
+                transition(&mut task, State::Merging, &policy, &facts),
+                Err(Error::ChecksIncomplete)
+            );
+        }
+        facts.ci = None;
+        assert_eq!(
+            transition(&mut task, State::Merging, &policy, &facts),
+            Err(Error::ChecksIncomplete)
         );
     }
 
@@ -747,6 +911,57 @@ mod tests {
         assert_eq!(
             transition_from(&current, &mut proposed, State::Repairing, &policy, &facts),
             Err(Error::InvalidTransition)
+        );
+    }
+
+    #[test]
+    fn repair_keeps_pr_identity_but_requires_validation_for_the_new_head() {
+        let (mut current, policy, mut facts) = setup(State::Validating);
+        current.validation_passed = false;
+        facts.ci = Some(CiObservation {
+            head_sha: facts.head_sha.clone(),
+            pull_request: 4,
+            status: CiStatus::Failed,
+        });
+
+        let mut repairing = current.clone();
+        repairing.attempts += 1;
+        transition_from(&current, &mut repairing, State::Repairing, &policy, &facts).unwrap();
+        assert_eq!(repairing.pull_request, Some(4));
+
+        let new_head = "dddddddddddddddddddddddddddddddddddddddd";
+        let mut validating = repairing.clone();
+        validating.head_sha = Some(new_head.into());
+        facts.head_sha = new_head.into();
+        facts.pr_head_sha = Some(new_head.into());
+        facts.validated_head_sha = Some(current.head_sha.clone().unwrap());
+        facts.ci = Some(CiObservation {
+            head_sha: new_head.into(),
+            pull_request: 4,
+            status: CiStatus::Pending,
+        });
+        transition_from(
+            &repairing,
+            &mut validating,
+            State::Validating,
+            &policy,
+            &facts,
+        )
+        .unwrap();
+        assert_eq!(validating.pull_request, Some(4));
+        assert!(!validating.validation_passed);
+
+        validating.validation_passed = true;
+        facts.checks_passed = vec!["test".into()];
+        assert_eq!(
+            transition_from(
+                &validating,
+                &mut validating.clone(),
+                State::Reviewing,
+                &policy,
+                &facts
+            ),
+            Err(Error::StaleHead)
         );
     }
 

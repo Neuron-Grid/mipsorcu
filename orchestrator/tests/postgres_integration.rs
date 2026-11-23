@@ -3,13 +3,246 @@ use std::{env, time::Duration};
 use mipsorcu_orchestrator::{
     domain::{self, ObservedFacts, State, TaskRecord, TrustedPolicy},
     mock_github::{MockGitHubAdapter, MockGitHubPolicy, MockGitHubRequest},
-    postgres::{Lease, NewTask, OperationStatus, RecoveryVerifier, StoreError, TaskStore},
+    postgres::{
+        Lease, NewTask, OperationStatus, RecoveryVerifier, StoreError, TaskStore,
+        issue_close_operation_key,
+    },
 };
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
 const TEST_DATABASE_URL: &str = "MIPSORCU_ORCHESTRATOR_TEST_DATABASE_URL";
 const BASE_SHA: &str = "0123456789012345678901234567890123456789";
+const MAX_OPERATION_RESULT_BYTES: usize = 8 * 1024 * 1024;
+const CRASH_FIXTURE_TASK_ID: Uuid = Uuid::from_u128(0x20261121000100000000000000000001);
+const CRASH_FIXTURE_IDEMPOTENCY_KEY: Uuid = Uuid::from_u128(0x20261121000100000000000000000002);
+const CRASH_FIXTURE_OPERATION_KEY: Uuid = Uuid::from_u128(0x20261121000100000000000000000003);
+const CRASH_FIXTURE_WORKER: &str = "postgres-crash-seed-worker";
+const CRASH_FIXTURE_OPERATION: &str = "create_pull_request";
+const CRASH_FIXTURE_REQUEST_HASH: [u8; 32] = [0x42; 32];
+
+#[tokio::test]
+#[ignore = "requires a fresh disposable PostgreSQL database; run before postgres_server_crash_recover"]
+async fn postgres_server_crash_seed() {
+    let database_url = env::var(TEST_DATABASE_URL).unwrap_or_else(|_| {
+        panic!("set {TEST_DATABASE_URL} to a fresh local orchestrator_test_* database")
+    });
+    assert_isolated_loopback_database(&database_url);
+
+    let (bootstrap, connection) = tokio_postgres::connect(&database_url, NoTls)
+        .await
+        .expect("connect to isolated disposable database");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let dedicated_role: bool = bootstrap
+        .query_one(
+            "SELECT rolname = 'orchestrator_test' AND NOT rolsuper FROM pg_roles WHERE rolname = current_user",
+            &[],
+        )
+        .await
+        .expect("inspect dedicated test role")
+        .get(0);
+    assert!(
+        dedicated_role,
+        "test role must be dedicated and non-superuser"
+    );
+    let orchestrator_schema: i64 = bootstrap
+        .query_one(
+            "SELECT count(*) FROM pg_namespace WHERE nspname = 'orchestrator'",
+            &[],
+        )
+        .await
+        .expect("inspect test database schemas")
+        .get(0);
+    let public_objects: i64 = bootstrap
+        .query_one("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','v','m','S','f','p')", &[])
+        .await
+        .expect("inspect public schema")
+        .get(0);
+    assert_eq!(
+        (orchestrator_schema, public_objects),
+        (0, 0),
+        "refusing to mutate a database with an existing orchestrator schema or public objects"
+    );
+    bootstrap
+        .batch_execute(include_str!("../migrations/0001_orchestrator.sql"))
+        .await
+        .expect("apply orchestrator migration to throwaway database");
+    bootstrap
+        .batch_execute(include_str!("../migrations/0002_execution_metadata.sql"))
+        .await
+        .expect("apply execution metadata migration to throwaway database");
+    bootstrap
+        .batch_execute(include_str!(
+            "../migrations/0003_mock_runtime_fingerprint.sql"
+        ))
+        .await
+        .expect("apply mock runtime fingerprint migration to throwaway database");
+
+    let (policy, facts) = crash_fixture_policy_and_facts();
+    let mut task = new_task(9091, CRASH_FIXTURE_IDEMPOTENCY_KEY);
+    task.task_id = CRASH_FIXTURE_TASK_ID;
+    let mut store = TaskStore::connect(&database_url)
+        .await
+        .expect("connect disposable test store");
+    assert_eq!(
+        store
+            .create(&task)
+            .await
+            .expect("create fixed crash fixture"),
+        CRASH_FIXTURE_TASK_ID
+    );
+    let lease = store
+        .claim(
+            CRASH_FIXTURE_TASK_ID,
+            CRASH_FIXTURE_WORKER,
+            Duration::from_secs(3),
+            &policy,
+            &facts,
+        )
+        .await
+        .expect("claim task before simulated PostgreSQL crash");
+    assert_eq!(
+        store
+            .prepare_operation(
+                &lease,
+                CRASH_FIXTURE_OPERATION_KEY,
+                CRASH_FIXTURE_OPERATION,
+                &CRASH_FIXTURE_REQUEST_HASH,
+            )
+            .await
+            .expect("commit operation intent before simulated crash"),
+        OperationStatus::NewlyPrepared
+    );
+    let persisted = bootstrap
+        .query_one(
+            "SELECT t.status::text, o.result, l.fencing_token FROM orchestrator.tasks t JOIN orchestrator.task_operations o ON o.task_id=t.id JOIN orchestrator.execution_lease l ON l.task_id=t.id WHERE t.id=$1 AND o.operation_key=$2",
+            &[&CRASH_FIXTURE_TASK_ID, &CRASH_FIXTURE_OPERATION_KEY],
+        )
+        .await
+        .expect("inspect durable seed rows");
+    assert_eq!(persisted.get::<_, String>(0), "planning");
+    assert_eq!(
+        persisted.get::<_, Option<serde_json::Value>>(1),
+        None,
+        "external operation remains unresolved"
+    );
+    assert_eq!(persisted.get::<_, i64>(2), lease.fencing_token);
+    drop(store);
+}
+
+#[tokio::test]
+#[ignore = "requires the same disposable PostgreSQL volume after postgres_server_crash_seed and server restart"]
+async fn postgres_server_crash_recover() {
+    let database_url = env::var(TEST_DATABASE_URL).unwrap_or_else(|_| {
+        panic!("set {TEST_DATABASE_URL} to the restarted local orchestrator_test_* database")
+    });
+    assert_isolated_loopback_database(&database_url);
+
+    let (bootstrap, connection) = tokio_postgres::connect(&database_url, NoTls)
+        .await
+        .expect("connect to the same disposable database after restart");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let (policy, facts) = crash_fixture_policy_and_facts();
+    let mut store = TaskStore::connect(&database_url)
+        .await
+        .expect("connect fresh worker after PostgreSQL restart");
+    let snapshot = store
+        .get(CRASH_FIXTURE_TASK_ID)
+        .await
+        .expect("read task committed before PostgreSQL crash");
+    assert_eq!(snapshot.state, State::Planning);
+    let persisted = bootstrap
+        .query_one(
+            "SELECT o.operation, o.result, octet_length(o.request_hash) FROM orchestrator.task_operations o WHERE o.task_id=$1 AND o.operation_key=$2",
+            &[&CRASH_FIXTURE_TASK_ID, &CRASH_FIXTURE_OPERATION_KEY],
+        )
+        .await
+        .expect("read unresolved operation committed before PostgreSQL crash");
+    assert_eq!(persisted.get::<_, String>(0), CRASH_FIXTURE_OPERATION);
+    assert_eq!(
+        persisted.get::<_, Option<serde_json::Value>>(1),
+        None,
+        "restarted server preserves ambiguity"
+    );
+    assert_eq!(persisted.get::<_, i32>(2), 32);
+
+    let old_lease = bootstrap
+        .query_one(
+            "SELECT owner, fencing_token, expires_at <= clock_timestamp() FROM orchestrator.execution_lease WHERE singleton AND task_id=$1",
+            &[&CRASH_FIXTURE_TASK_ID],
+        )
+        .await
+        .expect("read expired lease committed before PostgreSQL crash");
+    let old_owner: String = old_lease.get(0);
+    let old_fencing_token: i64 = old_lease.get(1);
+    assert_eq!(old_owner, CRASH_FIXTURE_WORKER);
+    let mut expired = old_lease.get::<_, bool>(2);
+    for _ in 0..40 {
+        if expired {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        expired = bootstrap
+            .query_one(
+                "SELECT expires_at <= clock_timestamp() FROM orchestrator.execution_lease WHERE singleton AND task_id=$1",
+                &[&CRASH_FIXTURE_TASK_ID],
+            )
+            .await
+            .expect("wait for seeded lease expiry")
+            .get(0);
+    }
+    assert!(expired, "seeded lease must expire before recovery");
+    let verifier = MockRecoveryVerifier {
+        task_id: CRASH_FIXTURE_TASK_ID,
+        owner: old_owner,
+        fencing_token: old_fencing_token,
+    };
+    let recovered = store
+        .recover(
+            CRASH_FIXTURE_TASK_ID,
+            "postgres-crash-recovery-worker",
+            Duration::from_secs(30),
+            &verifier,
+            &policy,
+            &facts,
+        )
+        .await
+        .expect("recover expired lease after independent test stop confirmation");
+    assert!(recovered.fencing_token > old_fencing_token);
+    assert!(
+        matches!(
+            store
+                .renew(
+                    &Lease {
+                        task_id: CRASH_FIXTURE_TASK_ID,
+                        owner: CRASH_FIXTURE_WORKER.to_owned(),
+                        fencing_token: old_fencing_token,
+                    },
+                    Duration::from_secs(5),
+                )
+                .await,
+            Err(StoreError::LeaseLost)
+        ),
+        "the pre-crash fencing generation must stay rejected"
+    );
+    assert_eq!(
+        store
+            .prepare_operation(
+                &recovered,
+                CRASH_FIXTURE_OPERATION_KEY,
+                CRASH_FIXTURE_OPERATION,
+                &CRASH_FIXTURE_REQUEST_HASH,
+            )
+            .await
+            .expect("inspect the operation after PostgreSQL crash recovery"),
+        OperationStatus::Ambiguous,
+        "a prepared external operation must never be repeated after restart"
+    );
+}
 
 #[tokio::test]
 #[ignore = "requires a fresh local orchestrator_test_* PostgreSQL database"]
@@ -25,6 +258,18 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
     tokio::spawn(async move {
         let _ = connection.await;
     });
+    let dedicated_role: bool = bootstrap
+        .query_one(
+            "SELECT rolname = 'orchestrator_test' AND NOT rolsuper FROM pg_roles WHERE rolname = current_user",
+            &[],
+        )
+        .await
+        .expect("inspect dedicated test role")
+        .get(0);
+    assert!(
+        dedicated_role,
+        "test role must be dedicated and non-superuser"
+    );
     let orchestrator_schema: i64 = bootstrap
         .query_one(
             "SELECT count(*) FROM pg_namespace WHERE nspname = 'orchestrator'",
@@ -74,10 +319,12 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
     };
     let idem = Uuid::new_v4();
     let task_a = new_task(101, idem);
-    let mut left = TaskStore::connect(&database_url)
+    let worker_label = format!("mipsorcu-test-{}", Uuid::new_v4().simple());
+    let worker_url = format!("{database_url}?application_name={worker_label}");
+    let mut left = TaskStore::connect(&worker_url)
         .await
         .expect("connect first worker");
-    let mut right = TaskStore::connect(&database_url)
+    let mut right = TaskStore::connect(&worker_url)
         .await
         .expect("connect competing worker");
 
@@ -212,6 +459,18 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         | (Err(StoreError::LeaseOccupied), Ok(lease)) => lease,
         outcomes => panic!("expected exactly one successful competing claim: {outcomes:?}"),
     };
+    assert!(matches!(
+        right
+            .claim(
+                task_b.task_id,
+                "worker-process-b",
+                Duration::from_secs(1),
+                &policy,
+                &facts
+            )
+            .await,
+        Err(StoreError::LeaseOccupied)
+    ));
     left.bind_mock_runtime_config(task_a.task_id, &task_a_fingerprint)
         .await
         .expect("accept matching fingerprint after task claim");
@@ -274,11 +533,114 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             .model_tokens,
         17
     );
+
+    // Results near the storage limit remain replayable. The SQL-side JSONB
+    // text length check is authoritative because its formatting differs from serde_json.
+    left.renew(&lease, Duration::from_secs(30))
+        .await
+        .expect("keep the lease live while testing large results");
+    let boundary_key = Uuid::new_v4();
+    let boundary_hash = [9u8; 32];
+    left.prepare_operation(&lease, boundary_key, "boundary", &boundary_hash)
+        .await
+        .expect("prepare result below storage limit");
+    let boundary_result = serde_json::json!({
+        "padding": "x".repeat(MAX_OPERATION_RESULT_BYTES - 32)
+    });
+    left.complete_operation(&lease, boundary_key, &boundary_result, 1)
+        .await
+        .expect("persist result below storage limit");
+    assert_eq!(
+        left.prepare_operation(&lease, boundary_key, "boundary", &boundary_hash)
+            .await
+            .expect("replay result below storage limit"),
+        OperationStatus::Completed {
+            result: boundary_result,
+            fencing_token: lease.fencing_token,
+        },
+    );
+
+    let oversized_input_key = Uuid::new_v4();
+    let oversized_input_hash = [10u8; 32];
+    left.prepare_operation(
+        &lease,
+        oversized_input_key,
+        "oversized_input",
+        &oversized_input_hash,
+    )
+    .await
+    .expect("prepare operation for oversized input check");
+    let oversized_input = serde_json::json!({
+        "padding": "x".repeat(MAX_OPERATION_RESULT_BYTES + 128)
+    });
+    assert!(matches!(
+        left.complete_operation(&lease, oversized_input_key, &oversized_input, 23)
+            .await,
+        Err(StoreError::InvalidInput)
+    ));
+    assert_eq!(
+        left.get(task_a.task_id)
+            .await
+            .expect("read usage after rejecting oversized result")
+            .model_tokens,
+        18,
+        "rejected results must not add model usage"
+    );
+    assert_eq!(
+        left.prepare_operation(
+            &lease,
+            oversized_input_key,
+            "oversized_input",
+            &oversized_input_hash,
+        )
+        .await
+        .expect("inspect operation after rejecting oversized result"),
+        OperationStatus::Ambiguous,
+        "rejected result leaves the operation uncompleted"
+    );
+
+    let oversized_stored_key = Uuid::new_v4();
+    let oversized_stored_hash = [11u8; 32];
+    let oversized_stored_fingerprint: String = bootstrap
+        .query_one(
+            "INSERT INTO orchestrator.task_operations(operation_key,task_id,fencing_token,operation,request_hash,result) VALUES($1,$2,$3,$4,$5,jsonb_build_object('padding', repeat('x',$6))) RETURNING md5(result::text)",
+            &[&oversized_stored_key, &task_a.task_id, &lease.fencing_token, &"legacy_oversized", &&oversized_stored_hash[..], &i32::try_from(MAX_OPERATION_RESULT_BYTES + 128).expect("test result size fits PostgreSQL integer")],
+        )
+        .await
+        .expect("seed oversized legacy result in isolated test database")
+        .get(0);
+    assert!(matches!(
+        left.prepare_operation(
+            &lease,
+            oversized_stored_key,
+            "legacy_oversized",
+            &oversized_stored_hash,
+        )
+        .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    let stored_size_row = bootstrap
+        .query_one(
+            "SELECT octet_length(o.result::text), t.model_usage, md5(o.result::text) FROM orchestrator.task_operations o JOIN orchestrator.tasks t ON t.id=o.task_id WHERE o.operation_key=$1",
+            &[&oversized_stored_key],
+        )
+        .await
+        .expect("inspect oversized legacy result without returning its JSON");
+    assert!(stored_size_row.get::<_, i32>(0) as usize > MAX_OPERATION_RESULT_BYTES);
+    assert_eq!(stored_size_row.get::<_, i64>(1), 18);
+    assert_eq!(
+        stored_size_row.get::<_, String>(2),
+        oversized_stored_fingerprint,
+        "rejecting a large legacy result must preserve its stored row"
+    );
     assert_eq!(
         left.prepare_operation(&lease, usage_operation_key, "plan", &request_hash)
             .await
             .expect("read completed operation replay"),
-        OperationStatus::Completed(usage_result.clone()),
+        OperationStatus::Completed {
+            result: usage_result.clone(),
+            fencing_token: lease.fencing_token,
+        },
     );
     assert!(matches!(
         left.complete_operation(&lease, usage_operation_key, &usage_result, 17)
@@ -290,8 +652,45 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             .await
             .expect("usage remains exact once")
             .model_tokens,
-        17
+        18
     );
+
+    left.renew(&lease, Duration::from_secs(1))
+        .await
+        .expect("restore the short lease for the expiry test");
+    let bystander = TaskStore::connect(&database_url)
+        .await
+        .expect("connect an unrelated observer");
+    let terminated = bootstrap
+        .query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND usename = current_user AND application_name = $1 AND pid <> pg_backend_pid()",
+            &[&worker_label],
+        )
+        .await
+        .expect("disconnect workers from the isolated test database");
+    assert_eq!(
+        terminated.len(),
+        2,
+        "both worker connections must be tested"
+    );
+    assert!(terminated.iter().all(|row| row.get::<_, bool>(0)));
+    assert!(matches!(
+        left.get(task_a.task_id).await,
+        Err(StoreError::Database(_))
+    ));
+    assert!(matches!(
+        right.get(task_a.task_id).await,
+        Err(StoreError::Database(_))
+    ));
+    assert_eq!(
+        bystander
+            .get(task_a.task_id)
+            .await
+            .expect("unrelated connection remains active")
+            .state,
+        State::Planning
+    );
+    drop(bystander);
 
     drop(left);
     drop(right);
@@ -335,6 +734,15 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         owner: lease.owner.clone(),
         fencing_token: lease.fencing_token,
     };
+    assert!(
+        matches!(
+            restarted
+                .release_expired_blocked_lease(&lease, &verifier)
+                .await,
+            Err(StoreError::InvalidRecord)
+        ),
+        "an expired non-BLOCKED task must remain on the normal recovery path"
+    );
     let recovered = restarted
         .recover(
             task_a.task_id,
@@ -347,6 +755,30 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         .await
         .expect("recover expired execution after supervisor confirmation");
     assert!(recovered.fencing_token > lease.fencing_token);
+    assert_eq!(
+        restarted
+            .prepare_operation(&recovered, usage_operation_key, "plan", &request_hash)
+            .await
+            .expect("replay completed operation under a new lease"),
+        OperationStatus::Completed {
+            result: usage_result.clone(),
+            fencing_token: lease.fencing_token,
+        },
+        "completed operation replay must retain the original fence"
+    );
+    let recovery_evidence: serde_json::Value = bootstrap
+        .query_one(
+            "SELECT evidence FROM orchestrator.recovery_confirmations WHERE task_id = $1 AND expired_fencing_token = $2 AND confirmed_by = $3",
+            &[&task_a.task_id, &lease.fencing_token, &lease.owner],
+        )
+        .await
+        .expect("read sanitized recovery evidence")
+        .get(0);
+    assert_eq!(
+        recovery_evidence,
+        serde_json::json!({"supervisor_verified_worker_tree_stopped": true}),
+        "verifier details are discarded before writing the recovery row"
+    );
     assert!(matches!(
         restarted.renew(&lease, Duration::from_secs(5)).await,
         Err(StoreError::LeaseLost)
@@ -422,6 +854,209 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         .await
         .expect("release stopped failed task");
 
+    let task_c = new_task(103, Uuid::new_v4());
+    restarted
+        .create(&task_c)
+        .await
+        .expect("create blocked lease test task");
+    let blocked_lease = restarted
+        .claim(
+            task_c.task_id,
+            "blocked-worker",
+            Duration::from_secs(1),
+            &policy,
+            &facts,
+        )
+        .await
+        .expect("claim task for blocked lease test");
+    let unresolved_key = Uuid::new_v4();
+    let unresolved_hash = [7_u8; 32];
+    assert_eq!(
+        restarted
+            .prepare_operation(
+                &blocked_lease,
+                unresolved_key,
+                "external_write",
+                &unresolved_hash
+            )
+            .await
+            .expect("prepare ambiguous operation before stop"),
+        OperationStatus::NewlyPrepared
+    );
+    let blocked = transition_task(
+        &mut restarted,
+        &blocked_lease,
+        &policy,
+        &facts,
+        State::Blocked,
+        |_| {},
+    )
+    .await;
+    assert_eq!(blocked.checkpoint, Some(State::Planning));
+    let live_verifier = MockRecoveryVerifier {
+        task_id: task_c.task_id,
+        owner: blocked_lease.owner.clone(),
+        fencing_token: blocked_lease.fencing_token,
+    };
+    assert!(
+        matches!(
+            restarted
+                .release_expired_blocked_lease(&blocked_lease, &live_verifier)
+                .await,
+            Err(StoreError::LeaseLost)
+        ),
+        "a live lease cannot be released even with a stop proof"
+    );
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+    let mut wrong_owner_lease = blocked_lease.clone();
+    wrong_owner_lease.owner.push_str("-stale");
+    assert!(
+        matches!(
+            restarted
+                .release_expired_blocked_lease(&wrong_owner_lease, &live_verifier)
+                .await,
+            Err(StoreError::LeaseLost)
+        ),
+        "the caller must present the exact prior owner"
+    );
+    let mut wrong_fence_lease = blocked_lease.clone();
+    wrong_fence_lease.fencing_token += 1;
+    assert!(
+        matches!(
+            restarted
+                .release_expired_blocked_lease(&wrong_fence_lease, &live_verifier)
+                .await,
+            Err(StoreError::LeaseLost)
+        ),
+        "the caller must present the exact prior fencing generation"
+    );
+
+    let rejecting_verifier = MockRecoveryVerifier {
+        task_id: task_c.task_id,
+        owner: blocked_lease.owner.clone(),
+        fencing_token: blocked_lease.fencing_token + 1,
+    };
+    assert!(matches!(
+        restarted
+            .release_expired_blocked_lease(&blocked_lease, &rejecting_verifier)
+            .await,
+        Err(StoreError::RecoveryRejected)
+    ));
+    let rejected_confirmation_count: i64 = bootstrap
+        .query_one(
+            "SELECT count(*) FROM orchestrator.recovery_confirmations WHERE task_id=$1 AND expired_fencing_token=$2",
+            &[&task_c.task_id, &blocked_lease.fencing_token],
+        )
+        .await
+        .expect("inspect rejected recovery attempt")
+        .get(0);
+    assert_eq!(
+        rejected_confirmation_count, 0,
+        "failed verification must not write confirmation evidence"
+    );
+    assert!(matches!(
+        restarted
+            .claim(
+                task_b.task_id,
+                "must-remain-blocked",
+                Duration::from_secs(5),
+                &policy,
+                &facts
+            )
+            .await,
+        Err(StoreError::LeaseOccupied)
+    ));
+
+    let stopped_verifier = MockRecoveryVerifier {
+        task_id: task_c.task_id,
+        owner: blocked_lease.owner.clone(),
+        fencing_token: blocked_lease.fencing_token,
+    };
+    restarted
+        .release_expired_blocked_lease(&blocked_lease, &stopped_verifier)
+        .await
+        .expect("release only the expired lease after independent stop proof");
+    let blocked_after_release = restarted
+        .get(task_c.task_id)
+        .await
+        .expect("read unchanged blocked task");
+    assert_eq!(blocked_after_release.state, State::Blocked);
+    assert_eq!(blocked_after_release.checkpoint, Some(State::Planning));
+    let sanitized_confirmation: serde_json::Value = bootstrap
+        .query_one(
+            "SELECT evidence FROM orchestrator.recovery_confirmations WHERE task_id=$1 AND expired_fencing_token=$2 AND confirmed_by=$3",
+            &[&task_c.task_id, &blocked_lease.fencing_token, &blocked_lease.owner],
+        )
+        .await
+        .expect("inspect successful stop confirmation")
+        .get(0);
+    assert_eq!(
+        sanitized_confirmation,
+        serde_json::json!({"supervisor_verified_worker_tree_stopped": true}),
+        "only the fixed stop-proof marker is persisted"
+    );
+    let operation_after_release = bootstrap
+        .query_one(
+            "SELECT result FROM orchestrator.task_operations WHERE operation_key=$1 AND task_id=$2",
+            &[&unresolved_key, &task_c.task_id],
+        )
+        .await
+        .expect("inspect unresolved operation after lease release");
+    let operation_result: Option<serde_json::Value> = operation_after_release.get(0);
+    assert_eq!(
+        operation_result, None,
+        "release must not resolve or replay an ambiguous operation"
+    );
+    let resumed_blocked_lease = restarted
+        .claim_resume(
+            task_c.task_id,
+            "recovery-worker",
+            Duration::from_secs(1),
+            &policy,
+            &facts,
+        )
+        .await
+        .expect("resume the blocked task only through the normal evidence-checked path");
+    assert_eq!(
+        restarted
+            .prepare_operation(
+                &resumed_blocked_lease,
+                unresolved_key,
+                "external_write",
+                &unresolved_hash,
+            )
+            .await
+            .expect("inspect unresolved operation after resume"),
+        OperationStatus::Ambiguous,
+        "resuming the checkpoint must not replay an operation with an unknown outcome"
+    );
+    let reblocked = transition_task(
+        &mut restarted,
+        &resumed_blocked_lease,
+        &policy,
+        &facts,
+        State::Blocked,
+        |_| {},
+    )
+    .await;
+    assert_eq!(reblocked.checkpoint, Some(State::Planning));
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let resumed_stopped_verifier = MockRecoveryVerifier {
+        task_id: task_c.task_id,
+        owner: resumed_blocked_lease.owner.clone(),
+        fencing_token: resumed_blocked_lease.fencing_token,
+    };
+    restarted
+        .release_expired_blocked_lease(&resumed_blocked_lease, &resumed_stopped_verifier)
+        .await
+        .expect("release the second expired BLOCKED lease after stop proof");
+    let still_blocked = restarted
+        .get(task_c.task_id)
+        .await
+        .expect("read BLOCKED task after the second lease release");
+    assert_eq!(still_blocked.state, State::Blocked);
+    assert_eq!(still_blocked.checkpoint, Some(State::Planning));
     let task_b_lease = restarted
         .claim(
             task_b.task_id,
@@ -431,7 +1066,11 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             &facts,
         )
         .await
-        .expect("claim task for checkpoint resume");
+        .expect("claim task after blocked lease release");
+    assert!(
+        task_b_lease.fencing_token > blocked_lease.fencing_token,
+        "the next claim must advance beyond the released fencing generation"
+    );
     assert!(matches!(
         restarted
             .bind_mock_runtime_config(task_b.task_id, &"d".repeat(64))
@@ -497,6 +1136,23 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         .release(&task_b_lease)
         .await
         .expect("release paused task");
+    bootstrap
+        .execute(
+            "UPDATE orchestrator.tasks SET validation_result=$2 WHERE id=$1",
+            &[
+                &task_b.task_id,
+                &serde_json::json!({
+                    "passed": false,
+                    "ci_observation": {
+                        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "pull_request": 99,
+                        "status": "passed"
+                    }
+                }),
+            ],
+        )
+        .await
+        .expect("seed a historical CI snapshot in the isolated database");
     let resumed_lease = restarted
         .claim_resume(
             task_b.task_id,
@@ -522,6 +1178,18 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
     assert_eq!(resumed.session_id.as_deref(), Some("session-51"));
     assert_eq!(resumed.mock_github_journal, Some(persisted_journal));
     assert_eq!(
+        restarted
+            .get_ci_observation(task_b.task_id)
+            .await
+            .expect("read CI snapshot after resume with no CI evidence"),
+        Some(domain::CiObservation {
+            head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            pull_request: 99,
+            status: domain::CiStatus::Passed,
+        }),
+        "resume preserves historical CI metadata when fresh facts contain no CI observation"
+    );
+    assert_eq!(
         resumed.mock_runtime_fingerprint.as_deref(),
         Some(task_b_fingerprint.as_str())
     );
@@ -544,6 +1212,17 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
 
     let handoff_facts =
         advance_to_merging(&mut restarted, &resumed_lease, &policy, facts.clone(), 51).await;
+    assert_eq!(
+        restarted
+            .get_ci_observation(task_b.task_id)
+            .await
+            .expect("read CI snapshot persisted by TaskStore::save"),
+        Some(domain::CiObservation {
+            head_sha: "abcdefabcdefabcdefabcdefabcdefabcdefabcd".into(),
+            pull_request: 51,
+            status: domain::CiStatus::Passed,
+        })
+    );
     let task_identities = bootstrap
         .query_one(
             "SELECT assigned_worker, issue_assignee FROM orchestrator.tasks WHERE id=$1",
@@ -566,21 +1245,16 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         .release(&resumed_lease)
         .await
         .expect("release merge handoff");
-    assert!(
-        matches!(
-            restarted
-                .claim_handoff(
-                    task_b.task_id,
-                    "worker-c",
-                    Duration::from_secs(5),
-                    &policy,
-                    &handoff_facts
-                )
-                .await,
-            Err(StoreError::HumanActionPending)
-        ),
-        "an unmerged PR must remain a human handoff"
-    );
+    let pending_lease = restarted
+        .claim_handoff(
+            task_b.task_id,
+            "worker-c",
+            Duration::from_secs(5),
+            &policy,
+            &handoff_facts,
+        )
+        .await
+        .expect("claim the unmerged handoff only for verification");
     assert_eq!(
         restarted
             .get(task_b.task_id)
@@ -589,7 +1263,30 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             .state,
         State::Merging
     );
+    let mut premature = merging.clone();
+    assert!(domain::transition(&mut premature, State::Completed, &policy, &handoff_facts).is_err());
+    restarted
+        .release(&pending_lease)
+        .await
+        .expect("release the unmerged handoff");
     let merged_facts = merged_closed_issue_facts(handoff_facts);
+    let mut no_fresh_ci = merged_facts.clone();
+    no_fresh_ci.ci = None;
+    assert!(
+        matches!(
+            restarted
+                .claim_handoff(
+                    task_b.task_id,
+                    "worker-c",
+                    Duration::from_secs(5),
+                    &policy,
+                    &no_fresh_ci
+                )
+                .await,
+            Err(StoreError::InvalidRecord)
+        ),
+        "a persisted passed snapshot cannot substitute for fresh CI evidence"
+    );
     let mut missing_ancestry = merged_facts.clone();
     missing_ancestry.base_contains_merge_commit = false;
     assert!(
@@ -616,11 +1313,34 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             &merged_facts,
         )
         .await
-        .expect("complete only after fresh merge and ancestry evidence");
+        .expect("claim after fresh merge and ancestry evidence");
+    let handoff = restarted
+        .get(task_b.task_id)
+        .await
+        .expect("read claimed handoff");
+    assert_eq!(handoff.state, State::Merging);
+    let mut completed_handoff = handoff.clone();
+    domain::transition(
+        &mut completed_handoff,
+        State::Completed,
+        &policy,
+        &merged_facts,
+    )
+    .expect("verify merge evidence before completion");
+    restarted
+        .save(
+            &completion_lease,
+            State::Merging,
+            &completed_handoff,
+            &policy,
+            &merged_facts,
+        )
+        .await
+        .expect("persist verified completion under the lease");
     let completed_handoff = restarted
         .get(task_b.task_id)
         .await
-        .expect("read completed handoff");
+        .expect("read persisted completion");
     assert_eq!(completed_handoff.state, State::Completed);
     assert_eq!(
         completed_handoff.base_sha, BASE_SHA,
@@ -636,13 +1356,18 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         .create(&task_c)
         .await
         .expect("create expired merge task");
+    let mut close_policy = policy.clone();
+    close_policy.base_ref = "develop".to_owned();
+    let mut close_facts = facts.clone();
+    close_facts.policy_base_ref = close_policy.base_ref.clone();
+    close_facts.policy_base_sha = close_policy.base_sha.clone();
     let merge_lease = restarted
         .claim(
             task_c.task_id,
             "worker-a",
-            Duration::from_secs(1),
-            &policy,
-            &facts,
+            Duration::from_secs(10),
+            &close_policy,
+            &close_facts,
         )
         .await
         .expect("claim task for expired merge recovery");
@@ -653,9 +1378,56 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         Err(StoreError::OperationConflict)
     ));
     let merge_facts =
-        advance_to_merging(&mut restarted, &merge_lease, &policy, facts.clone(), 52).await;
-    tokio::time::sleep(Duration::from_millis(1_200)).await;
-    let closed_merged_facts = merged_closed_issue_facts(merge_facts);
+        advance_to_merging(&mut restarted, &merge_lease, &close_policy, close_facts, 52).await;
+    let closed_merged_facts = merged_closed_issue_facts(merge_facts.clone());
+    assert_eq!(
+        restarted
+            .prepare_issue_close(&merge_lease, &close_policy, &closed_merged_facts)
+            .await
+            .expect("closed Issue without an intent needs no close write"),
+        None
+    );
+    let mut merged_open_facts = closed_merged_facts.clone();
+    merged_open_facts.issue_open = true;
+    assert_eq!(
+        restarted
+            .prepare_issue_close(&merge_lease, &close_policy, &merged_open_facts)
+            .await
+            .expect("prepare the one close attempt under the original active fence"),
+        Some(OperationStatus::NewlyPrepared)
+    );
+    let close_key = issue_close_operation_key(task_c.task_id);
+    assert!(matches!(
+        restarted
+            .prepare_operation(&merge_lease, close_key, "github_issue_close", &[9; 32])
+            .await,
+        Err(StoreError::InvalidInput)
+    ));
+    assert!(matches!(
+        restarted
+            .complete_operation(
+                &merge_lease,
+                close_key,
+                &serde_json::json!({"issue_closed_observed": true}),
+                0,
+            )
+            .await,
+        Err(StoreError::OperationConflict)
+    ));
+    bootstrap
+        .execute(
+            "UPDATE orchestrator.execution_lease SET expires_at=clock_timestamp() - interval '1 second' WHERE singleton AND task_id=$1 AND owner=$2 AND fencing_token=$3",
+            &[&task_c.task_id, &merge_lease.owner, &merge_lease.fencing_token],
+        )
+        .await
+        .expect("expire the original fenced lease after preparing the close intent");
+    bootstrap
+        .execute(
+            "UPDATE orchestrator.tasks SET execution_deadline=clock_timestamp() - interval '1 second' WHERE id=$1",
+            &[&task_c.task_id],
+        )
+        .await
+        .expect("expire task work after preparing the close intent");
     let merge_verifier = MockRecoveryVerifier {
         task_id: task_c.task_id,
         owner: "worker-a".to_owned(),
@@ -671,7 +1443,7 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
                     "worker-b",
                     Duration::from_secs(5),
                     &merge_verifier,
-                    &policy,
+                    &close_policy,
                     &missing_merge_ancestry,
                 )
                 .await,
@@ -685,17 +1457,240 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             "worker-b",
             Duration::from_secs(5),
             &merge_verifier,
-            &policy,
+            &close_policy,
             &closed_merged_facts,
         )
         .await
-        .expect("expired merged handoff completes despite the closed issue");
+        .expect("reacquire expired merged handoff despite the closed issue");
     assert!(finalized.fencing_token > merge_lease.fencing_token);
     assert_eq!(
         restarted
             .get(task_c.task_id)
             .await
             .expect("read recovered merge")
+            .state,
+        State::Merging
+    );
+    let current = restarted
+        .get(task_c.task_id)
+        .await
+        .expect("read recovered handoff");
+    let mut completed = current.clone();
+    domain::transition(
+        &mut completed,
+        State::Completed,
+        &close_policy,
+        &closed_merged_facts,
+    )
+    .expect("verify recovered merge evidence");
+    bootstrap.execute(
+        "UPDATE orchestrator.tasks SET execution_started_at=NULL, execution_deadline=NULL WHERE id=$1",
+        &[&task_c.task_id],
+    ).await.expect("simulate a missing work deadline");
+    assert!(matches!(
+        restarted.work_deadline_expired(&finalized).await,
+        Err(StoreError::InvalidRecord)
+    ));
+    bootstrap.execute(
+        "UPDATE orchestrator.tasks SET execution_started_at=clock_timestamp() - interval '2 seconds', execution_deadline=clock_timestamp() - interval '1 second' WHERE id=$1",
+        &[&task_c.task_id],
+    ).await.expect("expire work deadline before handoff verification");
+    assert!(matches!(
+        restarted
+            .prepare_issue_close(&merge_lease, &close_policy, &merged_open_facts)
+            .await,
+        Err(StoreError::LeaseLost)
+    ));
+    assert_eq!(
+        restarted
+            .prepare_issue_close(&finalized, &close_policy, &merged_open_facts)
+            .await
+            .expect("prepared close remains ambiguous after restart"),
+        Some(OperationStatus::Ambiguous)
+    );
+    let mut advanced_base_facts = merged_open_facts.clone();
+    advanced_base_facts.base_sha = "e".repeat(40);
+    advanced_base_facts.pr_base_sha = Some("e".repeat(40));
+    assert_eq!(
+        restarted
+            .prepare_issue_close(&finalized, &close_policy, &advanced_base_facts)
+            .await
+            .expect("a later base tip does not change the original merge identity"),
+        Some(OperationStatus::Ambiguous)
+    );
+    let mut changed_merge_identity = merged_open_facts.clone();
+    changed_merge_identity.merge_commit_sha = Some("f".repeat(40));
+    assert!(matches!(
+        restarted
+            .prepare_issue_close(&finalized, &close_policy, &changed_merge_identity)
+            .await,
+        Err(StoreError::OperationConflict)
+    ));
+    assert_eq!(
+        restarted
+            .reconcile_issue_close(&finalized, &close_policy, &merged_open_facts)
+            .await
+            .expect("open Issue evidence cannot settle the ambiguous close"),
+        OperationStatus::Ambiguous
+    );
+    assert!(matches!(
+        restarted
+            .reconcile_issue_close(&merge_lease, &close_policy, &closed_merged_facts)
+            .await,
+        Err(StoreError::LeaseLost)
+    ));
+    assert_eq!(
+        restarted
+            .reconcile_issue_close(&finalized, &close_policy, &closed_merged_facts)
+            .await
+            .expect("fresh closed Issue evidence settles the ambiguous close"),
+        OperationStatus::Completed {
+            result: serde_json::json!({"issue_closed_observed": true}),
+            fencing_token: merge_lease.fencing_token,
+        }
+    );
+    assert!(matches!(
+        restarted
+            .prepare_issue_close(&finalized, &close_policy, &changed_merge_identity)
+            .await,
+        Err(StoreError::OperationConflict)
+    ));
+    assert_eq!(
+        restarted
+            .prepare_issue_close(&finalized, &close_policy, &merged_open_facts)
+            .await
+            .expect("reopened Issue cannot be reported as closed"),
+        Some(OperationStatus::Ambiguous)
+    );
+    assert_eq!(
+        restarted
+            .reconcile_issue_close(&finalized, &close_policy, &merged_open_facts)
+            .await
+            .expect("fresh open evidence does not replay a prior close observation as success"),
+        OperationStatus::Ambiguous
+    );
+    assert_eq!(
+        restarted
+            .prepare_issue_close(&finalized, &close_policy, &closed_merged_facts)
+            .await
+            .expect("closed observation replays without authorizing a second write"),
+        Some(OperationStatus::Completed {
+            result: serde_json::json!({"issue_closed_observed": true}),
+            fencing_token: merge_lease.fencing_token,
+        })
+    );
+    assert_eq!(
+        restarted
+            .reconcile_issue_close(&finalized, &close_policy, &closed_merged_facts)
+            .await
+            .expect("reconciliation replays its stored closed observation after a crash"),
+        OperationStatus::Completed {
+            result: serde_json::json!({"issue_closed_observed": true}),
+            fencing_token: merge_lease.fencing_token,
+        }
+    );
+    bootstrap
+        .execute(
+            "UPDATE orchestrator.task_operations SET result=$2 WHERE operation_key=$1",
+            &[&close_key, &serde_json::json!({"issue_closed": true})],
+        )
+        .await
+        .expect("corrupt only the disposable close result fixture");
+    assert!(matches!(
+        restarted
+            .reconcile_issue_close(&finalized, &close_policy, &closed_merged_facts)
+            .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    let mut stale_head = closed_merged_facts.clone();
+    stale_head.head_sha = "f".repeat(40);
+    assert!(matches!(
+        restarted
+            .reconcile_issue_close(&finalized, &close_policy, &stale_head)
+            .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    assert!(matches!(
+        restarted
+            .renew_handoff_verification(
+                &merge_lease,
+                Duration::from_secs(5),
+                &close_policy,
+                &closed_merged_facts,
+            )
+            .await,
+        Err(StoreError::LeaseLost)
+    ));
+    assert!(matches!(
+        restarted
+            .save_handoff_completed(
+                &merge_lease,
+                &completed,
+                &close_policy,
+                &closed_merged_facts
+            )
+            .await,
+        Err(StoreError::LeaseLost)
+    ));
+    let mut open_merged_facts = closed_merged_facts.clone();
+    open_merged_facts.issue_open = true;
+    assert!(matches!(
+        restarted
+            .save_handoff_completed(&finalized, &completed, &close_policy, &open_merged_facts)
+            .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    assert!(matches!(
+        restarted.renew(&finalized, Duration::from_secs(5)).await,
+        Err(StoreError::LeaseLost)
+    ));
+    assert!(matches!(
+        restarted
+            .renew_handoff_verification(
+                &finalized,
+                Duration::from_secs(5),
+                &close_policy,
+                &missing_merge_ancestry,
+            )
+            .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    restarted
+        .renew_handoff_verification(
+            &finalized,
+            Duration::from_secs(5),
+            &close_policy,
+            &closed_merged_facts,
+        )
+        .await
+        .expect("renew only for independently validated merged handoff evidence");
+    assert!(matches!(
+        restarted
+            .prepare_operation(&finalized, Uuid::new_v4(), "plan", &[7; 32],)
+            .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    assert!(matches!(
+        restarted
+            .save(
+                &finalized,
+                State::Merging,
+                &completed,
+                &close_policy,
+                &closed_merged_facts,
+            )
+            .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    restarted
+        .save_handoff_completed(&finalized, &completed, &close_policy, &closed_merged_facts)
+        .await
+        .expect("persist only the verified terminal handoff after the work deadline");
+    assert_eq!(
+        restarted
+            .get(task_c.task_id)
+            .await
+            .expect("read completion")
             .state,
         State::Completed
     );
@@ -782,7 +1777,10 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             .prepare_operation(&budget_lease, overage_key, "plan", &request_hash)
             .await
             .expect("read over-budget completed operation"),
-        OperationStatus::Completed(overage_result),
+        OperationStatus::Completed {
+            result: overage_result,
+            fencing_token: budget_lease.fencing_token,
+        },
     );
     assert_eq!(
         restarted
@@ -791,6 +1789,117 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
             .expect("verify overage was not counted twice")
             .model_tokens,
         100_001
+    );
+    let current = restarted
+        .get(task_d.task_id)
+        .await
+        .expect("read repair task");
+    let mut pause_candidate = current.clone();
+    domain::transition_from(
+        &current,
+        &mut pause_candidate,
+        State::Paused,
+        &policy,
+        &repair_facts,
+    )
+    .expect("construct a valid pause before corrupting the record");
+    bootstrap
+        .execute(
+            "UPDATE orchestrator.tasks SET validation_result=$2 WHERE id=$1",
+            &[
+                &task_d.task_id,
+                &serde_json::json!({
+                    "passed": false,
+                    "ci_observation": {
+                        "head_sha": "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+                        "pull_request": 105,
+                        "status": "passed",
+                        "raw_log": "must not be exposed"
+                    }
+                }),
+            ],
+        )
+        .await
+        .expect("seed malformed CI metadata in the isolated database");
+    assert!(
+        matches!(
+            restarted.get_ci_observation(task_d.task_id).await,
+            Err(StoreError::InvalidRecord)
+        ),
+        "unknown fields are rejected without returning raw JSON"
+    );
+    assert!(matches!(
+        restarted
+            .save(
+                &budget_lease,
+                State::Repairing,
+                &pause_candidate,
+                &policy,
+                &repair_facts
+            )
+            .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    let oversized_validation = serde_json::json!({"passed": false, "opaque": "x".repeat(17_000)});
+    bootstrap
+        .execute(
+            "UPDATE orchestrator.tasks SET validation_result=$2 WHERE id=$1",
+            &[&task_d.task_id, &oversized_validation],
+        )
+        .await
+        .expect("seed oversized metadata in the isolated database");
+    assert!(
+        matches!(
+            restarted.get_ci_observation(task_d.task_id).await,
+            Err(StoreError::InvalidRecord)
+        ),
+        "oversized metadata is rejected before decoding JSONB into the application"
+    );
+    assert!(matches!(
+        restarted
+            .save(
+                &budget_lease,
+                State::Repairing,
+                &pause_candidate,
+                &policy,
+                &repair_facts
+            )
+            .await,
+        Err(StoreError::InvalidRecord)
+    ));
+    bootstrap
+        .execute(
+            "UPDATE orchestrator.tasks SET validation_result=$2 WHERE id=$1",
+            &[&task_d.task_id, &serde_json::json!({"passed": false})],
+        )
+        .await
+        .expect("restore the isolated fixture after corruption checks");
+    let mut mismatched_ci = repair_facts.clone();
+    mismatched_ci.ci = Some(domain::CiObservation {
+        head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        pull_request: 105,
+        status: domain::CiStatus::Passed,
+    });
+    let mut mismatched_candidate = restarted
+        .get(task_d.task_id)
+        .await
+        .expect("load task before rejecting mismatched CI");
+    mismatched_candidate.state = State::Paused;
+    mismatched_candidate.checkpoint = Some(State::Repairing);
+    assert!(
+        matches!(
+            restarted
+                .save(
+                    &budget_lease,
+                    State::Repairing,
+                    &mismatched_candidate,
+                    &policy,
+                    &mismatched_ci,
+                )
+                .await,
+            Err(StoreError::InvalidRecord)
+        ),
+        "CI evidence for another head or PR fails closed before persistence"
     );
     let paused_overage = transition_task(
         &mut restarted,
@@ -806,6 +1915,46 @@ async fn postgres_claim_idempotency_expiry_fencing_and_recovery() {
         .release(&budget_lease)
         .await
         .expect("release over-budget paused task");
+
+    let mut mock_github = MockGitHubAdapter::new(
+        MockGitHubPolicy::new(vec!["develop".into()], vec!["ci".into()])
+            .expect("valid mock GitHub policy"),
+    );
+    mock_github
+        .execute(
+            "strict-journal-branch",
+            MockGitHubRequest::CreateBranch {
+                branch: "strict-journal-work".into(),
+                base_sha: BASE_SHA.into(),
+            },
+        )
+        .expect("create mock journal entry");
+    let mut unknown_journal = serde_json::to_value(mock_github.journal())
+        .expect("serialize mock journal for isolated recovery check");
+    unknown_journal[0]["unexpected"] = serde_json::json!("opaque");
+    bootstrap
+        .execute(
+            "UPDATE orchestrator.tasks SET mock_github_journal=$2 WHERE id=$1",
+            &[&task_d.task_id, &unknown_journal],
+        )
+        .await
+        .expect("seed an unknown journal field in the isolated database");
+    assert!(matches!(
+        restarted.get(task_d.task_id).await,
+        Err(StoreError::InvalidRecord)
+    ));
+    let persisted_unknown_journal: serde_json::Value = bootstrap
+        .query_one(
+            "SELECT mock_github_journal FROM orchestrator.tasks WHERE id=$1",
+            &[&task_d.task_id],
+        )
+        .await
+        .expect("read seeded journal after recovery rejection")
+        .get(0);
+    assert_eq!(
+        persisted_unknown_journal, unknown_journal,
+        "recovery rejects malformed journal without deleting or rewriting it"
+    );
 }
 
 async fn transition_task(
@@ -875,8 +2024,13 @@ async fn advance_to_merging(
     facts.validated_head_sha = Some(head_sha.to_owned());
     facts.pr_number = Some(pull_request);
     facts.pr_head_sha = Some(head_sha.to_owned());
-    facts.pr_base_ref = Some("main".to_owned());
+    facts.pr_base_ref = Some(policy.base_ref.clone());
     facts.pr_base_sha = Some(BASE_SHA.to_owned());
+    facts.ci = Some(domain::CiObservation {
+        head_sha: head_sha.to_owned(),
+        pull_request,
+        status: domain::CiStatus::Passed,
+    });
     transition_task(store, lease, policy, &facts, State::Reviewing, |task| {
         task.pull_request = Some(pull_request);
         task.validation_passed = true;
@@ -914,7 +2068,7 @@ impl RecoveryVerifier for MockRecoveryVerifier {
         (task_id == self.task_id
             && old_owner == self.owner
             && expired_fencing_token == self.fencing_token)
-            .then(|| serde_json::json!({"worker_stopped": true, "descendants_stopped": true}))
+            .then(|| serde_json::json!({"test_verifier_detail": "discard this value"}))
     }
 }
 
@@ -929,6 +2083,26 @@ fn new_task(issue_number: i64, idempotency_key: Uuid) -> NewTask {
         model_budget: 100_000,
         idempotency_key,
     }
+}
+
+fn crash_fixture_policy_and_facts() -> (TrustedPolicy, ObservedFacts) {
+    let policy = TrustedPolicy {
+        base_ref: "main".to_owned(),
+        base_sha: BASE_SHA.to_owned(),
+        allowed_assignee: "worker-a".to_owned(),
+        required_checks: vec!["ci".to_owned()],
+        max_attempts: 4,
+        max_runtime: Duration::from_secs(600),
+        max_model_tokens: 100_000,
+    };
+    let facts = ObservedFacts {
+        policy_base_ref: "main".to_owned(),
+        policy_base_sha: BASE_SHA.to_owned(),
+        issue_open: true,
+        base_sha: BASE_SHA.to_owned(),
+        ..ObservedFacts::default()
+    };
+    (policy, facts)
 }
 
 fn assert_isolated_loopback_database(url: &str) {

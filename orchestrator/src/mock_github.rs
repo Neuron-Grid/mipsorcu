@@ -1,6 +1,6 @@
 //! Deterministic, in-memory GitHub write simulation. This module never performs I/O.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use serde::{Deserialize, Serialize};
 
@@ -64,11 +64,19 @@ impl MockGitHubPolicy {
     }
 
     fn permits_target(&self, target: &str) -> bool {
-        target != "main" && self.allowed_targets.iter().any(|allowed| allowed == target)
+        target == "develop" && self.allowed_targets.iter().any(|allowed| allowed == target)
+    }
+
+    fn permits_work_branch(&self, branch: &str) -> bool {
+        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+        branch != "main"
+            && branch != "develop"
+            && !self.allowed_targets.iter().any(|target| target == branch)
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MockPullRequest {
     pub number: u64,
     pub branch: String,
@@ -79,8 +87,8 @@ pub struct MockPullRequest {
     pub merge_sha: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MockGitHubRequest {
     CreateBranch {
         branch: String,
@@ -119,8 +127,8 @@ pub enum MockGitHubRequest {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MockGitHubOutput {
     BranchCreated {
         branch: String,
@@ -176,11 +184,36 @@ struct Branch {
     head_sha: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MockGitHubJournalEntry {
     pub idempotency_key: String,
     pub request: MockGitHubRequest,
     pub result: Result<MockGitHubOutput, MockGitHubError>,
+}
+
+impl fmt::Debug for MockPullRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MockPullRequest([REDACTED])")
+    }
+}
+
+impl fmt::Debug for MockGitHubRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MockGitHubRequest([REDACTED])")
+    }
+}
+
+impl fmt::Debug for MockGitHubOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MockGitHubOutput([REDACTED])")
+    }
+}
+
+impl fmt::Debug for MockGitHubJournalEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MockGitHubJournalEntry([REDACTED])")
+    }
 }
 
 /// A stateful mock whose operations are replayed by idempotency key without repeating effects.
@@ -318,6 +351,9 @@ impl MockGitHubAdapter {
                 if !valid_name(branch) || !valid_sha(base_sha) {
                     return Err(MockGitHubError::InvalidRequest);
                 }
+                if !self.policy.permits_work_branch(branch) {
+                    return Err(MockGitHubError::TargetNotAllowed);
+                }
                 if self.branches.contains_key(branch) {
                     return Err(MockGitHubError::BranchExists);
                 }
@@ -352,6 +388,9 @@ impl MockGitHubAdapter {
                 if !valid_sha(expected_head_sha) || !valid_sha(new_head_sha) {
                     return Err(MockGitHubError::InvalidRequest);
                 }
+                if !self.policy.permits_work_branch(branch) {
+                    return Err(MockGitHubError::TargetNotAllowed);
+                }
                 let branch_state = self
                     .branches
                     .get_mut(branch)
@@ -363,6 +402,11 @@ impl MockGitHubAdapter {
                     return Err(MockGitHubError::HeadMismatch);
                 }
                 branch_state.head_sha = new_head_sha.to_ascii_lowercase();
+                for pull in self.pulls.values_mut() {
+                    if pull.branch == *branch && !pull.merged {
+                        pull.head_sha = new_head_sha.to_ascii_lowercase();
+                    }
+                }
                 Ok(MockGitHubOutput::Pushed {
                     branch: branch.clone(),
                     head_sha: new_head_sha.to_ascii_lowercase(),
@@ -565,6 +609,68 @@ mod tests {
         MockGitHubAdapter::new(
             MockGitHubPolicy::new(vec!["develop".into()], vec!["unit".into()]).unwrap(),
         )
+    }
+
+    #[test]
+    fn journal_round_trips_and_rejects_unknown_fields_at_every_level() {
+        let journal = vec![MockGitHubJournalEntry {
+            idempotency_key: "head".into(),
+            request: MockGitHubRequest::GetHead {
+                branch: "work-1".into(),
+            },
+            result: Ok(MockGitHubOutput::BranchHead {
+                branch: "work-1".into(),
+                head_sha: HEAD.into(),
+            }),
+        }];
+        let serialized = serde_json::to_value(&journal).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Vec<MockGitHubJournalEntry>>(serialized.clone()).unwrap(),
+            journal
+        );
+        assert!(crate::postgres::valid_mock_journal(&serialized));
+
+        let mut legacy_pull = serde_json::to_value(vec![MockGitHubJournalEntry {
+            idempotency_key: "pull".into(),
+            request: MockGitHubRequest::UpsertPullRequest {
+                branch: "work-1".into(),
+                target: "develop".into(),
+                title: "task".into(),
+            },
+            result: Ok(MockGitHubOutput::PullRequest(MockPullRequest {
+                number: 1,
+                branch: "work-1".into(),
+                target: "develop".into(),
+                title: "task".into(),
+                head_sha: HEAD.into(),
+                merged: false,
+                merge_sha: None,
+            })),
+        }])
+        .unwrap();
+        legacy_pull[0]["result"]["Ok"]
+            .as_object_mut()
+            .unwrap()
+            .remove("merge_sha");
+        assert!(
+            crate::postgres::valid_mock_journal(&legacy_pull),
+            "a previously optional pull request field may remain absent"
+        );
+
+        let mut unknown_entry = serialized.clone();
+        unknown_entry[0]["unexpected"] = serde_json::json!("opaque");
+        assert!(!crate::postgres::valid_mock_journal(&unknown_entry));
+
+        let mut unknown_request = serialized.clone();
+        unknown_request[0]["request"]["unexpected"] = serde_json::json!("opaque");
+        assert!(!crate::postgres::valid_mock_journal(&unknown_request));
+
+        let mut unknown_output = serialized;
+        unknown_output[0]["result"]["Ok"]["unexpected"] = serde_json::json!("opaque");
+        assert!(!crate::postgres::valid_mock_journal(&unknown_output));
+
+        legacy_pull[0]["result"]["Ok"]["unexpected"] = serde_json::json!("opaque");
+        assert!(!crate::postgres::valid_mock_journal(&legacy_pull));
     }
 
     fn ready_pull(adapter: &mut MockGitHubAdapter) -> u64 {
@@ -770,6 +876,68 @@ mod tests {
     }
 
     #[test]
+    fn rejects_direct_changes_to_protected_branches_and_other_targets() {
+        let policy = MockGitHubPolicy::new(
+            vec!["develop".into(), "release".into()],
+            vec!["unit".into()],
+        )
+        .unwrap();
+        let mut mock = MockGitHubAdapter::new(policy);
+        for branch in [
+            "main",
+            "develop",
+            "release",
+            "refs/heads/main",
+            "refs/heads/develop",
+            "refs/heads/release",
+        ] {
+            assert_eq!(
+                mock.execute(
+                    &format!("create-{branch}"),
+                    MockGitHubRequest::CreateBranch {
+                        branch: branch.into(),
+                        base_sha: BASE.into(),
+                    },
+                ),
+                Err(MockGitHubError::TargetNotAllowed)
+            );
+            assert_eq!(
+                mock.execute(
+                    &format!("push-{branch}"),
+                    MockGitHubRequest::CommitPush {
+                        branch: branch.into(),
+                        expected_head_sha: BASE.into(),
+                        new_head_sha: HEAD.into(),
+                    },
+                ),
+                Err(MockGitHubError::TargetNotAllowed)
+            );
+            assert_eq!(
+                mock.execute(
+                    &format!("read-{branch}"),
+                    MockGitHubRequest::GetHead {
+                        branch: branch.into(),
+                    },
+                ),
+                Err(MockGitHubError::BranchMissing)
+            );
+        }
+        assert_eq!(
+            mock.execute(
+                "release-pr",
+                MockGitHubRequest::UpsertPullRequest {
+                    branch: "work-1".into(),
+                    target: "release".into(),
+                    title: "test".into(),
+                },
+            ),
+            Err(MockGitHubError::TargetNotAllowed)
+        );
+        let restored = MockGitHubAdapter::restore(mock.policy.clone(), mock.journal()).unwrap();
+        assert_eq!(restored.journal(), mock.journal());
+    }
+
+    #[test]
     fn duplicate_key_replays_without_side_effects_and_rejects_conflicts() {
         let mut mock = adapter();
         let request = MockGitHubRequest::CreateBranch {
@@ -885,6 +1053,9 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(mock.pull_request(pr.number).unwrap().head_sha, NEXT);
+        assert!(mock.checks_passed(NEXT).is_empty());
+        assert!(!mock.review_approved(NEXT));
         assert_eq!(
             mock.merge("merge-stale", pr.number, HEAD, "develop"),
             Err(MockGitHubError::HeadMismatch)

@@ -1,11 +1,13 @@
 //! Builds domain facts only from policy-bound, fresh GitHub API results.
 
 use crate::{
-    domain::{ObservedFacts, State, TaskRecord, TrustedPolicy},
+    domain::{
+        CiObservation, CiStatus as DomainCiStatus, ObservedFacts, State, TaskRecord, TrustedPolicy,
+    },
     engine::EvidenceSource,
     github::{
-        GitHubAdapter, GitHubError, IssueExpectation, PullExpectation, PullStatus, VerifiedIssue,
-        VerifiedPullRequest,
+        CiStatus as GitHubCiStatus, GitHubAdapter, GitHubError, IssueExpectation,
+        ObservedPullRequest, PullExpectation, PullStatus, VerifiedIssue,
     },
     policy::PolicyBundle,
     workspace::{observe_worktree, observe_worktree_head},
@@ -135,9 +137,9 @@ impl EvidenceSource for GitHubEvidenceSource {
         }
         let (issue_expectation, pull_expectation) =
             self.expected_states(task, pull_number, head_sha).await?;
-        let verified = self
+        let observed = self
             .adapter
-            .verify_task(
+            .observe_task(
                 task.issue_number,
                 pull_number,
                 &task.base_sha,
@@ -156,7 +158,7 @@ impl EvidenceSource for GitHubEvidenceSource {
             )
             .await
             .map_err(|_| ())?;
-        facts_from_pull(task, policy, &issue, &verified, &self.validation_check)
+        facts_from_pull(task, policy, &issue, &observed, &self.validation_check)
     }
 }
 
@@ -170,7 +172,7 @@ impl GitHubEvidenceSource {
         for &(issue, pull) in expected_state_candidates(task.state) {
             match self
                 .adapter
-                .verify_task(
+                .observe_task(
                     task.issue_number,
                     pull_number,
                     &task.base_sha,
@@ -237,6 +239,7 @@ fn facts_from_issue(
         pr_base_sha: None,
         pr_merged: false,
         checks_passed: vec![],
+        ci: None,
         reviewer_approved: false,
         approved_assignee: policy.allowed_assignee.clone(),
         merge_commit_sha: None,
@@ -248,7 +251,7 @@ fn facts_from_pull(
     task: &TaskRecord,
     policy: &TrustedPolicy,
     issue: &VerifiedIssue,
-    pull: &VerifiedPullRequest,
+    pull: &ObservedPullRequest,
     validation_check: &str,
 ) -> Result<ObservedFacts, ()> {
     if issue.issue_number != task.issue_number
@@ -258,20 +261,42 @@ fn facts_from_pull(
         || issue.base_branch != policy.base_ref
         || pull.base_branch != policy.base_ref
         || pull.head_sha != task.head_sha.as_deref().ok_or(())?
+        || task.assignee.as_deref() != Some(policy.allowed_assignee.as_str())
         || !policy
             .required_checks
             .iter()
-            .all(|required| pull.successful_checks.contains(required))
-        || !pull
-            .successful_checks
-            .iter()
             .any(|check| check == validation_check)
-        || task.assignee.as_deref() != Some(policy.allowed_assignee.as_str())
     {
         return Err(());
     }
+    let ci_status = match pull.ci_status {
+        GitHubCiStatus::Passed => DomainCiStatus::Passed,
+        GitHubCiStatus::Pending => DomainCiStatus::Pending,
+        GitHubCiStatus::Failed => DomainCiStatus::Failed,
+        GitHubCiStatus::Unknown => DomainCiStatus::Unknown,
+    };
+    let checks_passed = if ci_status == DomainCiStatus::Passed
+        && policy
+            .required_checks
+            .iter()
+            .any(|check| check == validation_check)
+    {
+        policy.required_checks.clone()
+    } else {
+        Vec::new()
+    };
     if matches!(task.state, State::Merging | State::Completed) {
-        pull.require_approvals().map_err(|_| ())?;
+        if ci_status != DomainCiStatus::Passed
+            || !policy
+                .required_checks
+                .iter()
+                .any(|check| check == validation_check)
+        {
+            return Err(());
+        }
+        if !pull.approvals_satisfied {
+            return Err(());
+        }
     }
     let merged = pull.pull_state == PullStatus::Merged;
     Ok(ObservedFacts {
@@ -280,13 +305,18 @@ fn facts_from_pull(
         issue_open: issue.issue_state == "open",
         base_sha: issue.base_sha.clone(),
         head_sha: pull.head_sha.clone(),
-        validated_head_sha: Some(pull.head_sha.clone()),
+        validated_head_sha: (ci_status == DomainCiStatus::Passed).then(|| pull.head_sha.clone()),
         pr_number: Some(pull.pull_number),
         pr_head_sha: Some(pull.head_sha.clone()),
         pr_base_ref: Some(pull.base_branch.clone()),
         pr_base_sha: Some(pull.base_sha.clone()),
         pr_merged: merged,
-        checks_passed: pull.successful_checks.clone(),
+        checks_passed,
+        ci: Some(CiObservation {
+            head_sha: pull.head_sha.clone(),
+            pull_request: pull.pull_number,
+            status: ci_status,
+        }),
         reviewer_approved: pull.approvals_satisfied,
         approved_assignee: policy.allowed_assignee.clone(),
         merge_commit_sha: pull.merge_commit_sha.clone(),
@@ -311,7 +341,7 @@ mod tests {
     };
     use crate::{
         domain::{State, TaskRecord, TrustedPolicy},
-        github::{PullStatus, VerifiedIssue, VerifiedPullRequest},
+        github::{CiStatus, ObservedPullRequest, PullStatus, VerifiedIssue},
     };
     use std::time::Duration;
 
@@ -360,8 +390,8 @@ mod tests {
         }
     }
 
-    fn pull() -> VerifiedPullRequest {
-        VerifiedPullRequest {
+    fn pull() -> ObservedPullRequest {
+        ObservedPullRequest {
             issue_number: 7,
             pull_number: 9,
             issue_state: "open".into(),
@@ -371,7 +401,7 @@ mod tests {
             head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             merge_commit_sha: None,
             base_contains_merge_commit: false,
-            successful_checks: vec!["ci".into()],
+            ci_status: CiStatus::Passed,
             approval_count: 1,
             approvals_satisfied: true,
         }
@@ -408,12 +438,46 @@ mod tests {
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         );
         assert_eq!(facts.pr_number, Some(9));
+        assert_eq!(
+            facts.ci.as_ref().map(|ci| ci.status),
+            Some(crate::domain::CiStatus::Passed)
+        );
         assert_eq!(facts.approved_assignee, "worker");
 
         let mut stale = pull();
         stale.issue_number = 8;
         assert!(facts_from_pull(&task(), &policy(), &issue(), &stale, "ci").is_err());
         assert!(facts_from_pull(&task(), &policy(), &issue(), &pull(), "integration").is_err());
+    }
+
+    #[test]
+    fn pending_and_failed_ci_keep_pr_identity_without_validation_proof() {
+        use crate::domain::CiStatus as DomainCiStatus;
+
+        for (github_status, expected) in [
+            (CiStatus::Pending, DomainCiStatus::Pending),
+            (CiStatus::Failed, DomainCiStatus::Failed),
+            (CiStatus::Unknown, DomainCiStatus::Unknown),
+        ] {
+            let task = TaskRecord {
+                state: State::Validating,
+                validation_passed: false,
+                ..task()
+            };
+            let pull = ObservedPullRequest {
+                ci_status: github_status,
+                ..pull()
+            };
+            let facts = facts_from_pull(&task, &policy(), &issue(), &pull, "ci").unwrap();
+            assert_eq!(facts.pr_number, Some(9));
+            assert_eq!(
+                facts.pr_head_sha.as_deref(),
+                Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            );
+            assert_eq!(facts.ci.as_ref().map(|ci| ci.status), Some(expected));
+            assert!(facts.validated_head_sha.is_none());
+            assert!(facts.checks_passed.is_empty());
+        }
     }
 
     #[test]

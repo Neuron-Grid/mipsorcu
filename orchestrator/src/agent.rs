@@ -1,4 +1,5 @@
-//! Mock-only agent boundary. Real providers are deliberately unavailable.
+//! Typed agent execution boundary. Real providers remain unavailable until
+//! their authentication and billing routes can be verified.
 
 use std::{
     future::Future,
@@ -10,6 +11,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +112,7 @@ pub enum Failure {
     Timeout,
     Unavailable,
     InvalidSession,
+    InvalidInput,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,6 +121,32 @@ pub enum Session {
     Running,
     Interrupted,
     Completed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStage {
+    Plan,
+    Implement,
+    Validate,
+    Review,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    Implementer,
+    Reviewer,
+}
+
+/// Identifies one durable stage execution without carrying prompts or output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentRequest {
+    pub task_id: Uuid,
+    pub operation_id: Uuid,
+    pub stage: AgentStage,
+    pub role: AgentRole,
+    pub attempt: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,13 +163,20 @@ impl Cancellation {
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
-    fn cancelled(&self) -> bool {
+    /// Returns whether cancellation has been requested for this invocation.
+    pub fn cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
 }
 
 pub trait AgentAdapter {
     fn provider(&self) -> Provider;
+    /// Whether this adapter is configured for use, independent of session state.
+    /// This does not prove authentication, allow a completed session to be reused,
+    /// or authorize a paid request.
+    fn is_available(&self) -> bool {
+        false
+    }
     fn session(&self) -> Session;
     fn execute(
         &mut self,
@@ -149,10 +185,59 @@ pub trait AgentAdapter {
     ) -> impl Future<Output = Result<Outcome, Failure>> + Send;
 }
 
+/// Orchestration requires durable task and operation identity. Implementing
+/// this trait does not expose the legacy untyped execution method.
+pub trait TypedAgentAdapter {
+    fn execute_request(
+        &mut self,
+        request: AgentRequest,
+        cancellation: Cancellation,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<Outcome, Failure>> + Send;
+}
+
+/// Explicitly disabled provider adapter. It never starts a process or makes a
+/// network request while provider auth and billing routes are unverified.
+pub struct UnavailableAdapter {
+    provider: Provider,
+}
+
+impl UnavailableAdapter {
+    pub const fn new(provider: Provider) -> Self {
+        Self { provider }
+    }
+}
+
+impl AgentAdapter for UnavailableAdapter {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    fn session(&self) -> Session {
+        Session::Ready
+    }
+
+    async fn execute(&mut self, _: Cancellation, _: Duration) -> Result<Outcome, Failure> {
+        Err(Failure::Unavailable)
+    }
+}
+
+impl TypedAgentAdapter for UnavailableAdapter {
+    async fn execute_request(
+        &mut self,
+        _: AgentRequest,
+        _: Cancellation,
+        _: Duration,
+    ) -> Result<Outcome, Failure> {
+        Err(Failure::Unavailable)
+    }
+}
+
 /// Scripted outcomes carry no prompts, credentials, or raw provider output.
 pub struct MockAdapter {
     provider: Provider,
     session: Session,
+    request: Option<AgentRequest>,
     delay: Duration,
     result: Result<Outcome, Failure>,
 }
@@ -172,6 +257,7 @@ impl MockAdapter {
         Self {
             provider,
             session: Session::Ready,
+            request: None,
             delay,
             result,
         }
@@ -182,11 +268,52 @@ impl AgentAdapter for MockAdapter {
     fn provider(&self) -> Provider {
         self.provider
     }
+    fn is_available(&self) -> bool {
+        true
+    }
     fn session(&self) -> Session {
         self.session
     }
 
     async fn execute(
+        &mut self,
+        cancellation: Cancellation,
+        timeout: Duration,
+    ) -> Result<Outcome, Failure> {
+        self.run(cancellation, timeout).await
+    }
+}
+
+impl TypedAgentAdapter for MockAdapter {
+    async fn execute_request(
+        &mut self,
+        request: AgentRequest,
+        cancellation: Cancellation,
+        timeout: Duration,
+    ) -> Result<Outcome, Failure> {
+        if request.task_id.is_nil()
+            || request.operation_id.is_nil()
+            || request.attempt > 3
+            || !matches!(
+                (request.stage, request.role),
+                (
+                    AgentStage::Plan | AgentStage::Implement | AgentStage::Validate,
+                    AgentRole::Implementer
+                ) | (AgentStage::Review, AgentRole::Reviewer)
+            )
+        {
+            return Err(Failure::InvalidInput);
+        }
+        if self.request.is_some_and(|previous| previous != request) {
+            return Err(Failure::InvalidSession);
+        }
+        self.request = Some(request);
+        self.run(cancellation, timeout).await
+    }
+}
+
+impl MockAdapter {
+    async fn run(
         &mut self,
         cancellation: Cancellation,
         timeout: Duration,
@@ -340,5 +467,109 @@ mod tests {
             .is_err()
         );
         assert_eq!(agent.session(), Session::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn every_real_provider_fails_closed_without_starting_a_session() {
+        for provider in [Provider::Codex, Provider::Claude, Provider::DeepSeekHarness] {
+            let mut adapter = UnavailableAdapter::new(provider);
+            assert_eq!(adapter.provider(), provider);
+            assert!(!adapter.is_available());
+            assert_eq!(adapter.session(), Session::Ready);
+            assert_eq!(
+                adapter
+                    .execute_request(
+                        request(AgentStage::Plan, AgentRole::Implementer),
+                        Cancellation::default(),
+                        Duration::from_secs(1),
+                    )
+                    .await,
+                Err(Failure::Unavailable)
+            );
+            assert!(!adapter.is_available());
+            assert_eq!(adapter.session(), Session::Ready);
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_accepts_the_typed_execution_contract() {
+        let mut adapter = MockAdapter::new(Provider::Codex, Duration::ZERO, Ok(Outcome::Completed));
+        assert!(adapter.is_available());
+        assert_eq!(
+            adapter
+                .execute_request(
+                    request(AgentStage::Implement, AgentRole::Implementer),
+                    Cancellation::default(),
+                    Duration::from_secs(1),
+                )
+                .await,
+            Ok(Outcome::Completed)
+        );
+        assert!(adapter.is_available());
+    }
+
+    #[tokio::test]
+    async fn typed_mock_rejects_invalid_or_changed_execution_identity() {
+        let mut adapter = MockAdapter::new(Provider::Codex, Duration::ZERO, Ok(Outcome::Completed));
+        let valid = request(AgentStage::Implement, AgentRole::Implementer);
+        for invalid in [
+            AgentRequest {
+                task_id: Uuid::nil(),
+                ..valid
+            },
+            AgentRequest {
+                operation_id: Uuid::nil(),
+                ..valid
+            },
+            AgentRequest {
+                role: AgentRole::Reviewer,
+                ..valid
+            },
+            AgentRequest {
+                attempt: 4,
+                ..valid
+            },
+        ] {
+            assert_eq!(
+                adapter
+                    .execute_request(invalid, Cancellation::default(), Duration::from_secs(1))
+                    .await,
+                Err(Failure::InvalidInput)
+            );
+        }
+        let cancellation = Cancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            adapter
+                .execute_request(valid, cancellation, Duration::from_secs(1))
+                .await,
+            Err(Failure::Cancelled)
+        );
+        let changed = AgentRequest {
+            operation_id: Uuid::from_u128(3),
+            ..valid
+        };
+        assert_eq!(
+            adapter
+                .execute_request(changed, Cancellation::default(), Duration::from_secs(1))
+                .await,
+            Err(Failure::InvalidSession)
+        );
+        assert_eq!(
+            adapter
+                .execute_request(valid, Cancellation::default(), Duration::from_secs(1))
+                .await,
+            Ok(Outcome::Completed)
+        );
+    }
+
+    fn request(stage: AgentStage, role: AgentRole) -> AgentRequest {
+        AgentRequest {
+            task_id: Uuid::from_u128(1),
+            operation_id: Uuid::from_u128(2),
+            stage,
+            role,
+            attempt: 0,
+        }
     }
 }
